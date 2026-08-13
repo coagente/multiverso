@@ -8,14 +8,18 @@ import (
 	"github.com/coagente/multiverso/internal/object"
 )
 
-// Ledger event types (M0).
+// Ledger event types (M0 + M1a).
 const (
-	evIntentCreated    = "intent.created"
-	evWorldCreated     = "world.created"
-	evReceiptRecorded  = "receipt.recorded"
-	evDecisionRecorded = "decision.recorded"
-	evRaceStarted      = "race.started"
-	evRaceFinished     = "race.finished"
+	evIntentCreated       = "intent.created"
+	evWorldCreated        = "world.created"
+	evReceiptRecorded     = "receipt.recorded"
+	evDecisionRecorded    = "decision.recorded"
+	evRaceStarted         = "race.started"
+	evRaceFinished        = "race.finished"
+	evAdmissionStarted    = "admission.started"
+	evAdmissionFinished   = "admission.finished"
+	evAttestationRecorded = "attestation.recorded"
+	evKeyGenerated        = "key.generated"
 )
 
 type worldRec struct {
@@ -41,15 +45,30 @@ type raceStartRec struct {
 	Intent string
 }
 
+type admissionStartRec struct {
+	Seq            int64
+	Intent         string
+	SelectDecision string
+}
+
+type admissionFinishRec struct {
+	Seq    int64
+	Intent string
+	Result string
+	Commit string
+}
+
 // ledgerState is the typed view of one full ledger scan. Payload digests
 // double as object digests because payloads are the canonical object bytes.
 type ledgerState struct {
-	Events     int
-	Intents    map[string]object.Intent // digest -> intent
-	Worlds     []worldRec               // seq order
-	Receipts   []receiptRec             // seq order
-	Decisions  []decisionRec            // seq order
-	RaceStarts []raceStartRec           // seq order
+	Events            int
+	Intents           map[string]object.Intent // digest -> intent
+	Worlds            []worldRec               // seq order
+	Receipts          []receiptRec             // seq order
+	Decisions         []decisionRec            // seq order
+	RaceStarts        []raceStartRec           // seq order
+	AdmissionStarts   []admissionStartRec      // seq order
+	AdmissionFinishes []admissionFinishRec     // seq order
 }
 
 func loadState(led *ledger.Ledger) (*ledgerState, error) {
@@ -89,9 +108,33 @@ func loadState(led *ledger.Ledger) (*ledgerState, error) {
 				return fmt.Errorf("seq %d: decode race.started: %w", e.Seq, err)
 			}
 			st.RaceStarts = append(st.RaceStarts, raceStartRec{Seq: e.Seq, Intent: body.Intent})
+		case evAdmissionStarted:
+			var body struct {
+				Intent         string `json:"intent"`
+				SelectDecision string `json:"select_decision"`
+			}
+			if err := json.Unmarshal(e.Payload, &body); err != nil {
+				return fmt.Errorf("seq %d: decode admission.started: %w", e.Seq, err)
+			}
+			st.AdmissionStarts = append(st.AdmissionStarts, admissionStartRec{
+				Seq: e.Seq, Intent: body.Intent, SelectDecision: body.SelectDecision,
+			})
+		case evAdmissionFinished:
+			var body struct {
+				Intent string `json:"intent"`
+				Result string `json:"result"`
+				Commit string `json:"commit"`
+			}
+			if err := json.Unmarshal(e.Payload, &body); err != nil {
+				return fmt.Errorf("seq %d: decode admission.finished: %w", e.Seq, err)
+			}
+			st.AdmissionFinishes = append(st.AdmissionFinishes, admissionFinishRec{
+				Seq: e.Seq, Intent: body.Intent, Result: body.Result, Commit: body.Commit,
+			})
 		}
-		// Other event types (race.finished, policy.created) carry no
-		// state the CLI views need.
+		// Other event types (race.finished, policy.created,
+		// attestation.recorded, key.generated) carry no state the CLI
+		// views need.
 		return nil
 	})
 	if err != nil {
@@ -151,6 +194,21 @@ func (st *ledgerState) raceStartBefore(intentDig string, seq int64) int64 {
 	for _, rs := range st.RaceStarts {
 		if rs.Intent == intentDig && rs.Seq < seq && rs.Seq > best {
 			best = rs.Seq
+		}
+	}
+	return best
+}
+
+// admissionStartBefore returns the nearest admission.started event for the
+// intent before seq, or nil when none was recorded. Audit discriminates
+// replay paths with it: a decision replays via admit.Decide iff its
+// nearest admission.started is nearer than its nearest race.started.
+func (st *ledgerState) admissionStartBefore(intentDig string, seq int64) *admissionStartRec {
+	var best *admissionStartRec
+	for i := range st.AdmissionStarts {
+		as := &st.AdmissionStarts[i]
+		if as.Intent == intentDig && as.Seq < seq && (best == nil || as.Seq > best.Seq) {
+			best = as
 		}
 	}
 	return best

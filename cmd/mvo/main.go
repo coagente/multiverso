@@ -46,6 +46,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdWorlds(rest, stdout, stderr)
 	case "explain":
 		err = cmdExplain(rest, stdout, stderr)
+	case "admit":
+		err = cmdAdmit(rest, stdout, stderr)
+	case "verify":
+		err = cmdVerify(rest, stdout, stderr)
 	case "audit":
 		err = cmdAudit(rest, stdout, stderr)
 	case "help", "-h", "--help":
@@ -75,12 +79,15 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `usage: mvo <command> [flags]
 
 commands:
-  init                              create the .multiverso workspace
+  init [--keys]                     create the .multiverso workspace (--keys: add
+                                    signing keys to an existing workspace)
   intent new --title T [--desc D]   record an intent; prints its digest
              [--budget-candidates N] [--budget-wall-ms MS]
   race <intent-digest> --patches DIR --oracle-cmd CMD [--keep-worlds]
   worlds <intent-digest>            table of worlds: digest, outcome, gate, wall_ms
   explain <intent-digest>           render the recorded decision and evidence
+  admit <intent-digest>             land the SELECT winner on trunk with a signed attestation
+  verify <commit> [--key PUB] [--json]  verify the admission attestation offline
   audit [--json]                    verify hash chain and replay all decisions
 
 every command accepts --dir <repo> (default ".").

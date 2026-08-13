@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/signing"
 )
 
 func mustInit(t *testing.T, root string) *Workspace {
@@ -28,6 +30,7 @@ func TestInitLayout(t *testing.T) {
 
 	for _, rel := range []string{
 		"config.json", "ledger.db", "cas", "policies/default.json",
+		"keys/" + signing.PrivName, "keys/" + signing.PubName,
 	} {
 		if _, err := os.Stat(filepath.Join(root, DirName, rel)); err != nil {
 			t.Errorf("missing %s: %v", rel, err)
@@ -69,7 +72,8 @@ func TestInitLayout(t *testing.T) {
 		t.Errorf("default.json = %q, want canonical %q", onDisk, polCanon)
 	}
 
-	// The policy is recorded in the ledger and the chain verifies.
+	// The policy and keypair are recorded in the ledger in deterministic
+	// order and the chain verifies.
 	var events []ledger.Event
 	if err := ws.Ledger.Scan(func(e ledger.Event) error {
 		events = append(events, e)
@@ -77,14 +81,88 @@ func TestInitLayout(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(events) != 1 || events[0].Type != "policy.created" {
-		t.Fatalf("events = %+v, want one policy.created", events)
+	if len(events) != 2 || events[0].Type != "policy.created" || events[1].Type != "key.generated" {
+		t.Fatalf("events = %+v, want [policy.created, key.generated]", events)
 	}
 	if events[0].PayloadDig != polDig {
 		t.Errorf("recorded payload digest = %q, want %q", events[0].PayloadDig, polDig)
 	}
+
+	// key.generated names the keypair on disk.
+	pub, keyID, err := signing.LoadPublicKeyFile(filepath.Join(ws.KeysDir(), signing.PubName))
+	if err != nil {
+		t.Fatalf("LoadPublicKeyFile: %v", err)
+	}
+	var keyBody struct {
+		KeyID     string `json:"key_id"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(events[1].Payload, &keyBody); err != nil {
+		t.Fatalf("decode key.generated: %v", err)
+	}
+	if keyBody.KeyID != keyID {
+		t.Errorf("key.generated key_id = %q, want %q", keyBody.KeyID, keyID)
+	}
+	if keyBody.PublicKey != base64.StdEncoding.EncodeToString(pub) {
+		t.Errorf("key.generated public_key = %q does not match on-disk key", keyBody.PublicKey)
+	}
 	if err := ws.Ledger.VerifyChain(); err != nil {
 		t.Errorf("VerifyChain: %v", err)
+	}
+}
+
+// Keys live under the 0700 keys dir with 0600 modes — and the workspace is
+// git-ignored, so they can never enter history.
+func TestInitKeyModes(t *testing.T) {
+	root := t.TempDir()
+	ws := mustInit(t, root)
+	info, err := os.Stat(ws.KeysDir())
+	if err != nil {
+		t.Fatalf("stat keys dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("keys dir mode = %o, want 0700", got)
+	}
+	for _, name := range []string{signing.PrivName, signing.PubName} {
+		info, err := os.Stat(filepath.Join(ws.KeysDir(), name))
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %o, want 0600", name, got)
+		}
+	}
+}
+
+func TestGenerateKeysRefusesExisting(t *testing.T) {
+	ws := mustInit(t, t.TempDir())
+	if _, err := ws.GenerateKeys(); err == nil {
+		t.Fatal("GenerateKeys over existing keys: want error, got nil")
+	}
+}
+
+func TestSigner(t *testing.T) {
+	ws := mustInit(t, t.TempDir())
+	s, err := ws.Signer()
+	if err != nil {
+		t.Fatalf("Signer: %v", err)
+	}
+	_, keyID, err := signing.LoadPublicKeyFile(filepath.Join(ws.KeysDir(), signing.PubName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.KeyID != keyID {
+		t.Errorf("Signer KeyID = %q, want %q", s.KeyID, keyID)
+	}
+
+	// A pre-M1a workspace (no keys) points the operator at mvo init --keys.
+	if err := os.RemoveAll(ws.KeysDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Signer(); err == nil {
+		t.Fatal("Signer without keys: want error, got nil")
+	} else if !strings.Contains(err.Error(), "mvo init --keys") {
+		t.Errorf("error = %q, want mention of `mvo init --keys`", err)
 	}
 }
 
@@ -155,6 +233,12 @@ func TestOpenRoundTrip(t *testing.T) {
 	}
 	if got, want := reopened.WorldsDir(), filepath.Join(root, DirName, "worlds"); got != want {
 		t.Errorf("WorldsDir = %q, want %q", got, want)
+	}
+	if got, want := reopened.AdmitDir(), filepath.Join(root, DirName, "admit"); got != want {
+		t.Errorf("AdmitDir = %q, want %q", got, want)
+	}
+	if got, want := reopened.KeysDir(), filepath.Join(root, DirName, "keys"); got != want {
+		t.Errorf("KeysDir = %q, want %q", got, want)
 	}
 }
 

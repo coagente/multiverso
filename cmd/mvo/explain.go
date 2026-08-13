@@ -48,7 +48,7 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "type:      %s\n", dec.Type)
 	fmt.Fprintf(stdout, "intent:    %s  (%s)\n", intentDig, intent.Spec.Title)
 	fmt.Fprintf(stdout, "policy:    %s\n", dec.Policy)
-	if dec.Type == "SELECT" && len(dec.Subject) > 0 {
+	if (dec.Type == "SELECT" || dec.Type == "ADMIT") && len(dec.Subject) > 0 {
 		fmt.Fprintf(stdout, "winner:    %s\n", dec.Subject[0])
 	}
 	label := "subject:  "

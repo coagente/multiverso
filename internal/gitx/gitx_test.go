@@ -297,3 +297,228 @@ func TestApplyDeterministicTree(t *testing.T) {
 		t.Errorf("tree digests differ across worktrees: %q vs %q", trees[0], trees[1])
 	}
 }
+
+func TestCurrentBranch(t *testing.T) {
+	repo := initRepo(t)
+	want := git(t, repo, "symbolic-ref", "--short", "HEAD")
+	got, err := CurrentBranch(repo)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if got != want {
+		t.Errorf("CurrentBranch = %q, want %q", got, want)
+	}
+	git(t, repo, "checkout", "-q", "--detach")
+	if _, err := CurrentBranch(repo); err == nil {
+		t.Fatal("CurrentBranch on detached HEAD: want error, got nil")
+	}
+}
+
+func TestResolveCommit(t *testing.T) {
+	repo := initRepo(t)
+	want := git(t, repo, "rev-parse", "HEAD")
+	got, err := ResolveCommit(repo, "HEAD")
+	if err != nil {
+		t.Fatalf("ResolveCommit: %v", err)
+	}
+	if got != want {
+		t.Errorf("ResolveCommit(HEAD) = %q, want %q", got, want)
+	}
+	if _, err := ResolveCommit(repo, "no-such-rev"); err == nil {
+		t.Fatal("ResolveCommit on bogus rev: want error, got nil")
+	}
+}
+
+func TestTreeOfAndParentOf(t *testing.T) {
+	repo := initRepo(t)
+	root := git(t, repo, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "second")
+	head := git(t, repo, "rev-parse", "HEAD")
+
+	tree, err := TreeOf(repo, head)
+	if err != nil {
+		t.Fatalf("TreeOf: %v", err)
+	}
+	if want := TreePrefix + git(t, repo, "rev-parse", "HEAD^{tree}"); tree != want {
+		t.Errorf("TreeOf = %q, want %q", tree, want)
+	}
+	parent, err := ParentOf(repo, head)
+	if err != nil {
+		t.Fatalf("ParentOf: %v", err)
+	}
+	if parent != root {
+		t.Errorf("ParentOf = %q, want %q", parent, root)
+	}
+	if _, err := ParentOf(repo, root); err == nil {
+		t.Fatal("ParentOf on root commit: want error, got nil")
+	}
+}
+
+// CommitTree + UpdateRef + CommitMessage lifecycle: plumbing commits carry
+// the fixed mvo identity (ambient GIT_AUTHOR_* must not override it) and
+// UpdateRef is a compare-and-swap.
+func TestCommitTreeUpdateRefLifecycle(t *testing.T) {
+	repo := initRepo(t)
+	head, _, err := Head(repo)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "wt")
+	if err := AddWorktree(repo, dst, head); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	defer RemoveWorktree(repo, dst)
+	if err := Apply(dst, []byte(modifyPatch)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	newTree, err := WriteTree(dst)
+	if err != nil {
+		t.Fatalf("WriteTree: %v", err)
+	}
+
+	t.Setenv("GIT_AUTHOR_NAME", "ambient-impostor")
+	t.Setenv("GIT_COMMITTER_EMAIL", "impostor@example.invalid")
+
+	msg := "landing subject\n\nMultiverso-Attestation: sha256:" + strings.Repeat("ab", 32) + "\n"
+	commit, err := CommitTree(repo, newTree, head, msg)
+	if err != nil {
+		t.Fatalf("CommitTree: %v", err)
+	}
+	if !shaRe.MatchString(commit) {
+		t.Fatalf("CommitTree = %q, want 40-hex sha", commit)
+	}
+	if got := git(t, repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>", commit); got !=
+		CommitterName+" <"+CommitterEmail+">|"+CommitterName+" <"+CommitterEmail+">" {
+		t.Errorf("commit identity = %q, want fixed mvo identity", got)
+	}
+	if tree, err := TreeOf(repo, commit); err != nil || tree != newTree {
+		t.Errorf("TreeOf(commit) = %q, %v; want %q", tree, err, newTree)
+	}
+	if parent, err := ParentOf(repo, commit); err != nil || parent != head {
+		t.Errorf("ParentOf(commit) = %q, %v; want %q", parent, err, head)
+	}
+	body, err := CommitMessage(repo, commit)
+	if err != nil {
+		t.Fatalf("CommitMessage: %v", err)
+	}
+	if !strings.HasPrefix(body, "landing subject\n") ||
+		!strings.Contains(body, "Multiverso-Attestation: sha256:"+strings.Repeat("ab", 32)) {
+		t.Errorf("CommitMessage = %q, want subject + trailer", body)
+	}
+
+	// CommitTree accepts the tree with or without TreePrefix.
+	bare := strings.TrimPrefix(newTree, TreePrefix)
+	if _, err := CommitTree(repo, bare, head, "bare tree\n"); err != nil {
+		t.Errorf("CommitTree with bare tree sha: %v", err)
+	}
+
+	branch, err := CurrentBranch(repo)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if err := UpdateRef(repo, "refs/heads/"+branch, commit, head); err != nil {
+		t.Fatalf("UpdateRef: %v", err)
+	}
+	if got := git(t, repo, "rev-parse", "refs/heads/"+branch); got != commit {
+		t.Errorf("branch = %q, want %q", got, commit)
+	}
+	// Compare-and-swap: the ref moved, so the old tip no longer matches.
+	if err := UpdateRef(repo, "refs/heads/"+branch, head, head); err == nil {
+		t.Fatal("UpdateRef with stale old commit: want error, got nil")
+	}
+}
+
+func TestStatusCleanAndResetHard(t *testing.T) {
+	repo := initRepo(t)
+	clean, err := StatusClean(repo)
+	if err != nil {
+		t.Fatalf("StatusClean: %v", err)
+	}
+	if !clean {
+		t.Fatal("fresh repo not clean")
+	}
+	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clean, err = StatusClean(repo)
+	if err != nil {
+		t.Fatalf("StatusClean: %v", err)
+	}
+	if clean {
+		t.Fatal("modified repo reported clean")
+	}
+	if err := ResetHard(repo); err != nil {
+		t.Fatalf("ResetHard: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(repo, "hello.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hello\n" {
+		t.Errorf("hello.txt = %q after ResetHard, want %q", got, "hello\n")
+	}
+	if clean, err = StatusClean(repo); err != nil || !clean {
+		t.Errorf("StatusClean after ResetHard = %v, %v; want true, nil", clean, err)
+	}
+}
+
+func TestApplyCapture(t *testing.T) {
+	repo := initRepo(t)
+	commit, baseTree, err := Head(repo)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+
+	// Clean apply: staged like Apply, streams captured, no error.
+	dst := filepath.Join(t.TempDir(), "ok")
+	if err := AddWorktree(repo, dst, commit); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	defer RemoveWorktree(repo, dst)
+	_, _, applyErr := ApplyCapture(dst, []byte(modifyPatch))
+	if applyErr != nil {
+		t.Fatalf("ApplyCapture: %v", applyErr)
+	}
+	tree, err := WriteTree(dst)
+	if err != nil {
+		t.Fatalf("WriteTree: %v", err)
+	}
+	if tree == baseTree {
+		t.Error("ApplyCapture did not stage the patch (tree unchanged)")
+	}
+
+	// Conflict: applyErr non-nil, stderr carries git's conflict set (CP-8).
+	dst2 := filepath.Join(t.TempDir(), "conflict")
+	if err := AddWorktree(repo, dst2, commit); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	defer RemoveWorktree(repo, dst2)
+	_, stderr, applyErr := ApplyCapture(dst2, []byte(mismatchPatch))
+	if applyErr == nil {
+		t.Fatal("ApplyCapture on conflicting patch: want error, got nil")
+	}
+	if len(stderr) == 0 {
+		t.Error("ApplyCapture conflict left empty stderr; conflict set lost")
+	}
+}
+
+// git worktree add must accept an existing empty directory: admit creates
+// the landing worktree inside an os.MkdirTemp result.
+func TestAddWorktreeExistingEmptyDir(t *testing.T) {
+	repo := initRepo(t)
+	commit, _, err := Head(repo)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	dst := t.TempDir() // exists, empty
+	if err := AddWorktree(repo, dst, commit); err != nil {
+		t.Fatalf("AddWorktree into existing empty dir: %v", err)
+	}
+	if err := RemoveWorktree(repo, dst); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+}

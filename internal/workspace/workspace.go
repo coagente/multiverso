@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/signing"
 )
 
 // SchemaConfig identifies .multiverso/config.json.
@@ -52,9 +54,11 @@ func DefaultPolicy() object.Policy {
 }
 
 // Init creates <root>/.multiverso/{ledger.db,cas/,config.json,
-// policies/default.json}, stores the default policy in CAS and records it
-// in the ledger, and git-ignores the workspace. It refuses to re-init, and
-// removes the partial directory if initialization fails partway.
+// policies/default.json,keys/}, stores the default policy in CAS and
+// records it in the ledger, generates the local signing keypair (M1a), and
+// git-ignores the workspace. Fresh-workspace event order is deterministic:
+// policy.created, then key.generated. It refuses to re-init, and removes
+// the partial directory if initialization fails partway.
 func Init(root string) (ws *Workspace, err error) {
 	dir := filepath.Join(root, DirName)
 	if _, statErr := os.Stat(dir); statErr == nil {
@@ -114,7 +118,11 @@ func Init(root string) (ws *Workspace, err error) {
 	if err := ensureGitignore(root); err != nil {
 		return nil, err
 	}
-	return &Workspace{Root: root, Dir: dir, Config: cfg, Ledger: led, CAS: store}, nil
+	ws = &Workspace{Root: root, Dir: dir, Config: cfg, Ledger: led, CAS: store}
+	if _, err = ws.GenerateKeys(); err != nil {
+		return nil, err
+	}
+	return ws, nil
 }
 
 // Open opens an existing workspace at root.
@@ -152,6 +160,45 @@ func (w *Workspace) Close() error {
 
 // WorldsDir is where race worktrees live.
 func (w *Workspace) WorldsDir() string { return filepath.Join(w.Dir, "worlds") }
+
+// AdmitDir is the parent directory for landing worktrees.
+func (w *Workspace) AdmitDir() string { return filepath.Join(w.Dir, "admit") }
+
+// KeysDir is where the local signing keypair lives — inside the
+// git-ignored workspace, never anywhere else.
+func (w *Workspace) KeysDir() string { return filepath.Join(w.Dir, "keys") }
+
+// GenerateKeys generates the local keypair into KeysDir (refusing to
+// overwrite an existing one) and records key.generated in the ledger.
+func (w *Workspace) GenerateKeys() (*signing.Signer, error) {
+	s, err := signing.Generate(w.KeysDir())
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	body, err := object.Canonical(map[string]any{
+		"key_id":     s.KeyID,
+		"public_key": base64.StdEncoding.EncodeToString(s.Public),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace: encode key.generated: %w", err)
+	}
+	if _, err := w.Ledger.Append("key.generated", body); err != nil {
+		return nil, fmt.Errorf("workspace: record key.generated: %w", err)
+	}
+	return s, nil
+}
+
+// Signer loads the workspace signing keypair.
+func (w *Workspace) Signer() (*signing.Signer, error) {
+	s, err := signing.Load(w.KeysDir())
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("workspace: no signing keys in %s (run `mvo init --keys`): %w", w.KeysDir(), err)
+		}
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	return s, nil
+}
 
 // GetObject fetches an object's canonical bytes from CAS by its "mv0:"
 // digest.

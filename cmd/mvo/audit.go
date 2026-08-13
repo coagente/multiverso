@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 
+	"github.com/coagente/multiverso/internal/admit"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/race"
@@ -22,6 +23,7 @@ type auditReport struct {
 	Schema          string          `json:"schema"`
 	Events          int             `json:"events"`
 	Decisions       int             `json:"decisions"`
+	Admissions      int             `json:"admissions"` // decisions replayed via the admission path (M1a, additive)
 	ChainOK         bool            `json:"chain_ok"`
 	ReplayIdentical bool            `json:"replay_identical"`
 	Mismatches      []auditMismatch `json:"mismatches"`
@@ -74,20 +76,38 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fail(fmt.Errorf("decision %s: %w", dr.Dig, err))
 		}
-		start := st.raceStartBefore(dr.Decision.Intent, dr.Seq)
-		worldRecs := st.worldsFor(dr.Decision.Intent, start, dr.Seq)
-		worldDigs := make(map[string]bool, len(worldRecs))
-		worlds := make([]object.World, 0, len(worldRecs))
-		for _, wr := range worldRecs {
-			worldDigs[wr.Dig] = true
-			worlds = append(worlds, wr.World)
-		}
-		receipts := make([]object.Receipt, 0)
-		for _, rr := range st.receiptsFor(worldDigs, start, dr.Seq) {
-			receipts = append(receipts, rr.Receipt)
+
+		// Replay-path discrimination (M1a): a decision replays via
+		// admit.Decide iff the closest admission.started for its intent is
+		// nearer than the closest race.started; otherwise via race.Decide
+		// (M0 behavior, including a == r == 0).
+		raceStart := st.raceStartBefore(dr.Decision.Intent, dr.Seq)
+		admStart := st.admissionStartBefore(dr.Decision.Intent, dr.Seq)
+		var got object.Decision
+		if admStart != nil && admStart.Seq > raceStart {
+			report.Admissions++
+			replayed, detail := replayAdmission(st, pol, dr, admStart)
+			if detail != "" {
+				report.Mismatches = append(report.Mismatches,
+					auditMismatch{Seq: dr.Seq, Decision: dr.Dig, Detail: detail})
+				continue
+			}
+			got = replayed
+		} else {
+			worldRecs := st.worldsFor(dr.Decision.Intent, raceStart, dr.Seq)
+			worldDigs := make(map[string]bool, len(worldRecs))
+			worlds := make([]object.World, 0, len(worldRecs))
+			for _, wr := range worldRecs {
+				worldDigs[wr.Dig] = true
+				worlds = append(worlds, wr.World)
+			}
+			receipts := make([]object.Receipt, 0)
+			for _, rr := range st.receiptsFor(worldDigs, raceStart, dr.Seq) {
+				receipts = append(receipts, rr.Receipt)
+			}
+			got = race.Decide(pol, worlds, receipts)
 		}
 
-		got := race.Decide(pol, worlds, receipts)
 		if detail := diffDecision(dr.Decision, got); detail != "" {
 			report.Mismatches = append(report.Mismatches,
 				auditMismatch{Seq: dr.Seq, Decision: dr.Dig, Detail: detail})
@@ -113,6 +133,47 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+// replayAdmission recomputes an admission decision from the ledger scan
+// and CAS alone — no git, no clock (NFR-1). Window receipts are the
+// receipt.recorded events between the admission.started and the decision
+// whose World is the SELECT winner: the smallest-digest landing-apply
+// receipt and the smallest-digest suite receipt (nil if none). A non-empty
+// detail is a mismatch entry, not an error.
+func replayAdmission(st *ledgerState, pol object.Policy, dr decisionRec, admStart *admissionStartRec) (object.Decision, string) {
+	var sel *object.Decision
+	for i := range st.Decisions {
+		d := &st.Decisions[i]
+		if d.Dig == admStart.SelectDecision && d.Decision.Type == race.TypeSelect {
+			sel = &d.Decision
+			break
+		}
+	}
+	if sel == nil || len(sel.Subject) == 0 {
+		return object.Decision{}, fmt.Sprintf("select decision %s not in ledger", admStart.SelectDecision)
+	}
+	winner := sel.Subject[0]
+
+	var apply, gate *object.Receipt
+	var applyDig, gateDig string
+	for i := range st.Receipts {
+		rr := &st.Receipts[i]
+		if rr.Seq <= admStart.Seq || rr.Seq >= dr.Seq || rr.Receipt.World != winner {
+			continue
+		}
+		if rr.Receipt.Oracle.ID == admit.OracleIDLandingApply && (apply == nil || rr.Dig < applyDig) {
+			apply, applyDig = &rr.Receipt, rr.Dig
+		}
+		if rr.Receipt.Family == "suite" && (gate == nil || rr.Dig < gateDig) {
+			gate, gateDig = &rr.Receipt, rr.Dig
+		}
+	}
+	if apply == nil {
+		return object.Decision{}, fmt.Sprintf(
+			"no landing-apply receipt for winner %s between seq %d and %d", winner, admStart.Seq, dr.Seq)
+	}
+	return admit.Decide(pol, dr.Decision.Intent, winner, *apply, gate), ""
+}
+
 // diffDecision compares the replay-deterministic fields (NFR-1); CreatedAt
 // is a record of when the original decision happened and is excluded.
 func diffDecision(recorded, replayed object.Decision) string {
@@ -129,7 +190,7 @@ func diffDecision(recorded, replayed object.Decision) string {
 	return ""
 }
 
-func emitJSON(w io.Writer, report auditReport) error {
+func emitJSON(w io.Writer, report any) error {
 	b, err := json.Marshal(report)
 	if err != nil {
 		return fmt.Errorf("encode report: %w", err)

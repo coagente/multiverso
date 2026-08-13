@@ -150,7 +150,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		} else if tree, err = gitx.WriteTree(dir); err != nil {
 			return nil, fmt.Errorf("race: world for %s: %w", name, err)
 		}
-		env, err := envDigest(cfg.CAS, dir)
+		env, err := EnvDigest(cfg.CAS, dir)
 		if err != nil {
 			return nil, err
 		}
@@ -325,10 +325,11 @@ func listPatches(dir string) ([]string, error) {
 	return names, nil
 }
 
-// envDigest builds the M0 env manifest for a world —
+// EnvDigest builds the M0 env manifest for a directory —
 // {"go":"none","os":runtime.GOOS} plus sha256 hashes of any recognized
 // lockfiles — stores its canonical bytes in CAS, and returns its digest.
-func envDigest(store *cas.Store, dir string) (string, error) {
+// Exported for admit, which records the same manifest for landing trees.
+func EnvDigest(store *cas.Store, dir string) (string, error) {
 	manifest := map[string]any{"go": "none", "os": runtime.GOOS}
 	locks := map[string]any{}
 	for _, name := range lockfileNames {
