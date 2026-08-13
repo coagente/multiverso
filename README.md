@@ -31,7 +31,12 @@ Intent → N Worlds → Evidence → Decision → Admission
 🌱 **Building in public.** This project is at the research stage.
 
 - [`RESEARCH.md`](RESEARCH.md) — the founding scope memo (Spanish): verdict, scope, and phased plan
-- [`research/`](research/) — exhaustive state-of-the-art research (in progress)
+- [`research/`](research/) — **the research corpus**: 15 chapters, ~60,000 words, 240 primary sources, cutoff 2026-08-12
+  - [Executive summary & findings](research/README.md) — the five-capability novelty map, the white space (evidence-aware scheduling), and what it changes for the roadmap
+  - [Verification](research/VERIFICATION.md) — adversarial fact-check of the memo's 13 load-bearing claims (13/13 confirmed)
+  - [Bibliography](research/BIBLIOGRAPHY.md) — deduplicated source index
+
+**Headline finding:** every one of Multiverso's five capabilities exists somewhere individually; **no system on Earth ships more than two**, and nobody at all ships an adaptive verification budget. The conjunction is empty — and closing fast (estimated window: 12–24 months).
 
 ## License
 
