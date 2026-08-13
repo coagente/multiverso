@@ -30,7 +30,10 @@ func mkWorld(t *testing.T, patch, outcome string) (object.World, string) {
 		Producer: object.Producer{
 			Adapter: "script@v0", IdentityTier: "claimed", Role: "generator",
 		},
+		Context:   "sha256:ctx-" + patch,
 		Patch:     "sha256:" + patch,
+		Trace:     "sha256:trace-" + patch,
+		Cost:      object.RunCost{WallMS: 1, Source: "none"},
 		Outcome:   outcome,
 		CreatedAt: fixedTime,
 	}

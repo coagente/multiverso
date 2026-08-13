@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Fake Claude Code CLI for adapter tests (docs/design/M1b-agent-adapters.md
+# "Fake agent fixtures"). NEVER calls a real agent or the network. Mode is
+# selected via FAKE_AGENT_MODE (reaches this script only through the env
+# allowlist — itself a test of design decision 14). argv is ignored
+# entirely: argv construction is covered by pure-function goldens.
+set -u
+mode="${FAKE_AGENT_MODE:-happy}"
+
+# edit_cwd: if stats.py exists in cwd, rewrite it with the fixed mean()
+# (semantically patch-a's change, so the acceptance race's captured patch
+# is real and oracle-gated); otherwise write AGENT_TOUCH.txt so unit tests
+# in bare temp worktrees still get a non-empty diff.
+edit_cwd() {
+  if [ -f stats.py ]; then
+    cat > stats.py <<'PYEOF'
+"""Tiny numeric helpers used by the multiverso M0 acceptance fixture."""
+
+
+def mean(values):
+    """Return the arithmetic mean of a non-empty sequence."""
+    if not values:
+        raise ValueError("mean() of empty sequence")
+    return sum(values) / len(values)
+
+
+def clamp(value, low, high):
+    """Return value limited to the inclusive range [low, high]."""
+    if low > high:
+        raise ValueError("clamp() with low > high")
+    return min(max(value, low), high)
+
+
+def total(values):
+    """Return the sum of a sequence."""
+    return sum(values)
+PYEOF
+  else
+    printf 'fake agent was here\n' > AGENT_TOUCH.txt
+  fi
+}
+
+# hang: spawn a sleeping child (its pid is left in fake_child.pid so tests
+# can probe that the watchdog killed the whole process group), then wait.
+hang() {
+  sleep 60 &
+  echo "$!" > fake_child.pid
+  wait
+}
+
+# hang_trap: spawn a grandchild that IGNORES SIGTERM, closes its inherited
+# stdio (so the leader's reaping is not delayed by held pipes), and
+# respawns short sleeps forever. Only the group SIGKILL escalation kills
+# it — the adversarial probe for design decision 9: the leader dying to
+# the initial SIGTERM must never cancel the SIGKILL to the pgid.
+hang_trap() {
+  (
+    trap '' TERM
+    exec >/dev/null 2>&1
+    while :; do sleep 1; done
+  ) &
+  echo "$!" > fake_child.pid
+  wait
+}
+
+init='{"type":"system","subtype":"init","session_id":"fake-session-1","model":"fake-model","tools":[],"cwd":"."}'
+assistant='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"fixed mean()"}]}}'
+
+case "$mode" in
+  happy)
+    echo "$init"
+    edit_cwd
+    echo "$assistant"
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"fake-session-1","num_turns":3,"total_cost_usd":0.0042,"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":200}}'
+    exit 0
+    ;;
+  cost-report)
+    echo "$init"
+    edit_cwd
+    echo "$assistant"
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"fake-session-1","num_turns":3,"total_cost_usd":0.0031415,"usage":{"input_tokens":1200,"cache_read_input_tokens":100,"output_tokens":345}}'
+    exit 0
+    ;;
+  slow)
+    echo "$init"
+    hang
+    ;;
+  slow-trap-term)
+    echo "$init"
+    hang_trap
+    ;;
+  slow-after-result)
+    # Rule-0 precedence: a flushed success result must NOT beat the
+    # control plane's watchdog kill (design decision 8).
+    echo "$init"
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"fake-session-1","num_turns":1,"total_cost_usd":0.0042,"usage":{"input_tokens":10,"output_tokens":5}}'
+    hang
+    ;;
+  bad-exit)
+    echo "$init"
+    echo "$assistant"
+    exit 3
+    ;;
+  garbage-output)
+    echo "$init"
+    echo 'this is not json at all'
+    echo '{"type":"totally-unknown","x":1}'
+    echo '{broken json'
+    exit 0
+    ;;
+  native-cap)
+    echo "$init"
+    echo '{"type":"result","subtype":"error_max_turns","is_error":true,"result":"max turns reached","session_id":"fake-session-1","num_turns":8}'
+    exit 1
+    ;;
+  provider-error)
+    echo "$init"
+    echo '{"type":"system","subtype":"api_retry","error":"rate_limit"}'
+    echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API error","session_id":"fake-session-1","num_turns":1}'
+    exit 1
+    ;;
+  usage-error)
+    echo "Usage: claude [options] -- unknown flag" >&2
+    exit 2
+    ;;
+  *)
+    echo "fake claude: unknown FAKE_AGENT_MODE '$mode'" >&2
+    exit 64
+    ;;
+esac

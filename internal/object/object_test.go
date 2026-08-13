@@ -96,6 +96,33 @@ func TestDigestGolden(t *testing.T) {
 			wantCanon: `{"hard_gates":[],"ranking":[],"schema":"multiverso.dev/policy/v0"}`,
 			wantDig:   "mv0:8dbcd0a12b566d973499b1a96dd68b7a01d2ec7a1bf9f2df1527d30f87b6da16",
 		},
+		{
+			// M1b: context/trace/cost are always serialized — no omitempty
+			// games, optional fields would make digests ambiguous.
+			name: "world object with context, trace, and cost",
+			v: World{
+				Schema:        SchemaWorld,
+				Intent:        "mv0:" + strings.Repeat("4", 64),
+				Tree:          "git:89e6c98d92887913cadf06b2adb97f26cde4849b",
+				Env:           "mv0:" + strings.Repeat("5", 64),
+				IsolationTier: "T0-worktree",
+				Producer:      Producer{Adapter: "claude-code@v0", Model: "claude-sonnet-5", IdentityTier: "claimed", Role: "generator"},
+				Context:       "sha256:" + strings.Repeat("a", 64),
+				Patch:         "sha256:" + strings.Repeat("6", 64),
+				Trace:         "sha256:" + strings.Repeat("b", 64),
+				Cost:          RunCost{WallMS: 1234, USDMicro: 4200, TokensIn: 1300, TokensOut: 345, Source: "client-estimate"},
+				Outcome:       OutcomeCompleted,
+				CreatedAt:     "2026-01-02T03:04:05Z",
+			},
+			wantCanon: `{"context":"sha256:` + strings.Repeat("a", 64) + `","cost":{"source":"client-estimate","tokens_in":1300,"tokens_out":345,"usd_micro":4200,"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","env":"mv0:` + strings.Repeat("5", 64) + `","intent":"mv0:` + strings.Repeat("4", 64) + `","isolation_tier":"T0-worktree","outcome":"COMPLETED","patch":"sha256:` + strings.Repeat("6", 64) + `","producer":{"adapter":"claude-code@v0","identity_tier":"claimed","model":"claude-sonnet-5","role":"generator"},"schema":"multiverso.dev/world/v0","trace":"sha256:` + strings.Repeat("b", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}`,
+			wantDig:   "mv0:049c3cea7c06a38839c3083c6a5d4248756052cc93dc628c767f8f530d958f18",
+		},
+		{
+			name:      "run cost zero value serializes every field",
+			v:         RunCost{Source: "none"},
+			wantCanon: `{"source":"none","tokens_in":0,"tokens_out":0,"usd_micro":0,"wall_ms":0}`,
+			wantDig:   "mv0:a9df3066548b262b2ac0e0f4989a0ae9d450b96600a6bbbeb36c11c8dc44788e",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,8 +150,11 @@ func TestDigestStability(t *testing.T) {
 			Env:           "mv0:" + strings.Repeat("5", 64),
 			IsolationTier: "T0-worktree",
 			Producer:      Producer{Adapter: "script@v0", Model: "", IdentityTier: "claimed", Role: "generator"},
+			Context:       "sha256:" + strings.Repeat("9", 64),
 			Patch:         "sha256:" + strings.Repeat("6", 64),
-			Outcome:       "COMPLETED",
+			Trace:         "sha256:" + strings.Repeat("a", 64),
+			Cost:          RunCost{WallMS: 42, Source: "none"},
+			Outcome:       OutcomeCompleted,
 			CreatedAt:     "2026-01-02T03:04:05Z",
 		},
 		Decision{
@@ -151,6 +181,27 @@ func TestDigestStability(t *testing.T) {
 			if got != first {
 				t.Fatalf("digest of %T unstable on run %d: %q != %q", v, i, got, first)
 			}
+		}
+	}
+}
+
+// TestOutcomeConstants pins the six-value outcome taxonomy (AG-1): the
+// exact strings are World-schema vocabulary and must never drift.
+func TestOutcomeConstants(t *testing.T) {
+	got := []string{
+		OutcomeCompleted, OutcomeBudgetExceeded, OutcomeInterrupted,
+		OutcomeConfigError, OutcomeProviderError, OutcomeCrash,
+	}
+	want := []string{
+		"COMPLETED", "BUDGET_EXCEEDED", "INTERRUPTED",
+		"CONFIG_ERROR", "PROVIDER_ERROR", "CRASH",
+	}
+	if len(got) != 6 {
+		t.Fatalf("outcome taxonomy has %d values, want exactly 6", len(got))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("outcome[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }

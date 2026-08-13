@@ -17,10 +17,11 @@ const (
 	TypeReject = "REJECT"
 )
 
-// World outcomes (world/v0 M0 subset).
+// World outcomes — aliases of the object constants (M0 API compatibility;
+// the full six-value taxonomy lives in internal/object since M1b).
 const (
-	OutcomeCompleted   = "COMPLETED"
-	OutcomeConfigError = "CONFIG_ERROR"
+	OutcomeCompleted   = object.OutcomeCompleted
+	OutcomeConfigError = object.OutcomeConfigError
 )
 
 // GateSuitePass is the only hard gate M0 knows how to evaluate.

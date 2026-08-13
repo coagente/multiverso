@@ -1,7 +1,9 @@
 // Package gitx shells out to the system git for worktree, patch, and
 // tree-digest operations (XP-1, AG-4). No go-git: git itself is the
-// engine. Every command runs with hooks disabled and stderr captured
-// into returned errors.
+// engine. Every command runs with hooks disabled, config-driven command
+// execution off (core.fsmonitor), user-level excludes neutralized
+// (core.excludesFile — hermetic AND an agent cannot rely on the
+// operator's global gitignore), and stderr captured into returned errors.
 package gitx
 
 import (
@@ -49,10 +51,20 @@ func gitEnv() []string {
 	return out
 }
 
-// run executes git in dir with hooks disabled and returns trimmed stdout.
-// On failure the captured stderr is folded into the error.
+// baseArgs harden every git invocation: hooks disabled (M0), fsmonitor
+// off and user-level excludes neutralized (M1b AG-4 hardening — a world's
+// git state is agent-writable after the run, and config-driven command
+// execution or ambient ignore rules must never shape captured evidence).
+var baseArgs = []string{
+	"-c", "core.hooksPath=/dev/null",
+	"-c", "core.fsmonitor=false",
+	"-c", "core.excludesFile=/dev/null",
+}
+
+// run executes git in dir with baseArgs applied and returns trimmed
+// stdout. On failure the captured stderr is folded into the error.
 func run(dir string, args ...string) (string, error) {
-	full := append([]string{"-c", "core.hooksPath=/dev/null"}, args...)
+	full := append(append([]string{}, baseArgs...), args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
@@ -113,11 +125,54 @@ func RemoveWorktree(repo, dst string) error {
 	return err
 }
 
+// CommonDir returns the absolute path of dir's git common directory (the
+// main repository's .git), symlinks resolved so paths compare stably.
+func CommonDir(dir string) (string, error) {
+	out, err := run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(out)
+	if err != nil {
+		return "", fmt.Errorf("gitx: resolve git common dir %s: %w", out, err)
+	}
+	return resolved, nil
+}
+
+// VerifyWorktreeRepo checks that the worktree at dir still belongs to
+// repo: its git common dir must be repo's own. A worktree's `.git`
+// pointer is a plain file inside the world — agent-writable — so after an
+// agent runs, a mismatch (or an unreadable git identity) means the
+// world's git state was replaced and no git-derived evidence from it can
+// be trusted (AG-4).
+func VerifyWorktreeRepo(repo, dir string) error {
+	want, err := CommonDir(repo)
+	if err != nil {
+		return err
+	}
+	got, err := CommonDir(dir)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("gitx: worktree %s points at git dir %s, not the control plane's %s", dir, got, want)
+	}
+	return nil
+}
+
+// PruneWorktrees drops stale worktree registrations from repo — the
+// companion of removing a corrupted worktree directory that `git worktree
+// remove` itself refused to handle.
+func PruneWorktrees(repo string) error {
+	_, err := run(repo, "worktree", "prune")
+	return err
+}
+
 // Apply applies patch to dir's worktree and index via git apply --index,
 // then git add -A so everything the patch touched is staged. M0 applies
 // without committing; the resulting tree digest comes from WriteTree.
 func Apply(dir string, patch []byte) error {
-	cmd := exec.Command("git", "-c", "core.hooksPath=/dev/null", "apply", "--index", "-")
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "apply", "--index", "-")...)
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
 	cmd.Stdin = bytes.NewReader(patch)
@@ -144,13 +199,41 @@ func WriteTree(dir string) (string, error) {
 	return TreePrefix + out, nil
 }
 
+// AddAll stages everything in dir's worktree (git add -A), untracked files
+// included. Idempotent. Staging before diffing is what makes control-plane
+// diff capture see files the agent created (AG-4).
+func AddAll(dir string) error {
+	_, err := run(dir, "add", "-A")
+	return err
+}
+
+// DiffCached returns the binary patch from baseTree (accepted with or
+// without TreePrefix) to dir's index: git diff --binary --cached <tree>.
+// The returned bytes are RAW stdout — no trimming, because the trailing
+// newline is significant to git apply — so this takes its own exec path
+// instead of run()'s TrimSpace. An empty diff is legal (nothing changed).
+func DiffCached(dir, baseTree string) ([]byte, error) {
+	sha := strings.TrimPrefix(baseTree, TreePrefix)
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "diff", "--binary", "--cached", sha)...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gitx: git diff --binary --cached in %s: %w: %s",
+			dir, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 // ApplyCapture is Apply with the streams captured for evidence: it applies
 // the patch (git apply --index, then git add -A) and returns git's
 // stdout/stderr bytes; applyErr is non-nil on conflict, and the captured
 // stderr is CP-8's conflict set. Apply stays as-is for race.
 func ApplyCapture(dir string, patch []byte) (stdout, stderr []byte, applyErr error) {
 	var outBuf, errBuf bytes.Buffer
-	cmd := exec.Command("git", "-c", "core.hooksPath=/dev/null", "apply", "--index", "-")
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "apply", "--index", "-")...)
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
 	cmd.Stdin = bytes.NewReader(patch)
@@ -160,7 +243,7 @@ func ApplyCapture(dir string, patch []byte) (stdout, stderr []byte, applyErr err
 		return outBuf.Bytes(), errBuf.Bytes(),
 			fmt.Errorf("gitx: git apply --index in %s: %w", dir, err)
 	}
-	add := exec.Command("git", "-c", "core.hooksPath=/dev/null", "add", "-A")
+	add := exec.Command("git", append(append([]string{}, baseArgs...), "add", "-A")...)
 	add.Dir = dir
 	add.Env = gitEnv()
 	add.Stdout = &outBuf
@@ -209,7 +292,7 @@ func CommitMessage(repo, commit string) (string, error) {
 // only, no working tree involved. Returns the new commit sha.
 func CommitTree(repo, tree, parent, message string) (string, error) {
 	sha := strings.TrimPrefix(tree, TreePrefix)
-	cmd := exec.Command("git", "-c", "core.hooksPath=/dev/null", "commit-tree", sha, "-p", parent)
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "commit-tree", sha, "-p", parent)...)
 	cmd.Dir = repo
 	// Appended after the ambient env so the fixed identity always wins.
 	cmd.Env = append(gitEnv(),

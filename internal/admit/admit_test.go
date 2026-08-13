@@ -124,7 +124,11 @@ func newFixture(t *testing.T) *fixture {
 		Schema: object.SchemaWorld, Intent: intentDig, Tree: tree, Env: "mv0:env",
 		IsolationTier: "T0-worktree",
 		Producer:      object.Producer{Adapter: "script@v0", IdentityTier: "claimed", Role: "generator"},
-		Patch:         patchKey, Outcome: "COMPLETED", CreatedAt: "2026-01-01T00:00:01Z",
+		Context:       patchKey, // script: the prompt IS the patch (M1b decision 7)
+		Patch:         patchKey,
+		Trace:         "sha256:" + strings.Repeat("e", 64),
+		Cost:          object.RunCost{WallMS: 1, Source: "none"},
+		Outcome:       "COMPLETED", CreatedAt: "2026-01-01T00:00:01Z",
 	})
 	suiteRec := gateReceipt("pass")
 	suiteRec.World = winnerDig

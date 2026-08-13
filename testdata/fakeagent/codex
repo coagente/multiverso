@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Fake Codex CLI for adapter tests (docs/design/M1b-agent-adapters.md
+# "Fake agent fixtures"). NEVER calls a real agent or the network. Mode is
+# selected via FAKE_AGENT_MODE (through the env allowlist, decision 14);
+# argv is ignored entirely.
+set -u
+mode="${FAKE_AGENT_MODE:-happy}"
+
+edit_cwd() {
+  if [ -f stats.py ]; then
+    cat > stats.py <<'PYEOF'
+"""Tiny numeric helpers used by the multiverso M0 acceptance fixture."""
+
+
+def mean(values):
+    """Return the arithmetic mean of a non-empty sequence."""
+    if not values:
+        raise ValueError("mean() of empty sequence")
+    return sum(values) / len(values)
+
+
+def clamp(value, low, high):
+    """Return value limited to the inclusive range [low, high]."""
+    if low > high:
+        raise ValueError("clamp() with low > high")
+    return min(max(value, low), high)
+
+
+def total(values):
+    """Return the sum of a sequence."""
+    return sum(values)
+PYEOF
+  else
+    printf 'fake agent was here\n' > AGENT_TOUCH.txt
+  fi
+}
+
+hang() {
+  sleep 60 &
+  echo "$!" > fake_child.pid
+  wait
+}
+
+# hang_trap: grandchild ignores SIGTERM and closes its stdio; only the
+# group SIGKILL escalation kills it (see the claude fixture).
+hang_trap() {
+  (
+    trap '' TERM
+    exec >/dev/null 2>&1
+    while :; do sleep 1; done
+  ) &
+  echo "$!" > fake_child.pid
+  wait
+}
+
+init='{"type":"thread.started","thread_id":"fake-thread-1"}'
+
+case "$mode" in
+  happy|native-cap) # codex has no native caps: native-cap behaves as happy
+    echo "$init"
+    echo '{"type":"item.completed","item":{"type":"agent_message","text":"fixing mean()"}}'
+    edit_cwd
+    echo '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":200}}'
+    exit 0
+    ;;
+  cost-report)
+    echo "$init"
+    echo '{"type":"item.completed","item":{"type":"agent_message","text":"fixing mean()"}}'
+    edit_cwd
+    echo '{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":100,"output_tokens":345}}'
+    exit 0
+    ;;
+  slow)
+    echo "$init"
+    hang
+    ;;
+  slow-trap-term)
+    echo "$init"
+    hang_trap
+    ;;
+  slow-after-result)
+    echo "$init"
+    echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}'
+    hang
+    ;;
+  bad-exit)
+    echo "$init"
+    exit 3
+    ;;
+  garbage-output)
+    echo "$init"
+    echo 'this is not json at all'
+    echo '{"type":"totally-unknown","x":1}'
+    echo '{broken json'
+    exit 0
+    ;;
+  provider-error)
+    echo "$init"
+    echo '{"type":"turn.failed","error":{"message":"rate limit exceeded"}}'
+    exit 1
+    ;;
+  usage-error)
+    echo "error: unexpected argument found" >&2
+    exit 2
+    ;;
+  *)
+    echo "fake codex: unknown FAKE_AGENT_MODE '$mode'" >&2
+    exit 64
+    ;;
+esac

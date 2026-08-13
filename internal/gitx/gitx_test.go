@@ -1,6 +1,7 @@
 package gitx
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -520,5 +521,116 @@ func TestAddWorktreeExistingEmptyDir(t *testing.T) {
 	}
 	if err := RemoveWorktree(repo, dst); err != nil {
 		t.Fatalf("RemoveWorktree: %v", err)
+	}
+}
+
+// AddAll + DiffCached lifecycle (AG-4): staging captures modified,
+// untracked, and binary files; the cached diff against the base tree is
+// raw (trailing newline preserved) and applies back onto the base tree,
+// binary file included.
+func TestAddAllAndDiffCached(t *testing.T) {
+	repo := initRepo(t)
+	commit, baseTree, err := Head(repo)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+
+	// Modified tracked file + untracked text file + untracked binary file.
+	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("goodbye\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("created\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := []byte{0x00, 0x01, 0xFF, 0xFE, 0x00, 'g', 'o'}
+	if err := os.WriteFile(filepath.Join(repo, "blob.bin"), bin, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AddAll(repo); err != nil {
+		t.Fatalf("AddAll: %v", err)
+	}
+	if err := AddAll(repo); err != nil { // idempotent
+		t.Fatalf("AddAll (second): %v", err)
+	}
+
+	patch, err := DiffCached(repo, baseTree)
+	if err != nil {
+		t.Fatalf("DiffCached: %v", err)
+	}
+	s := string(patch)
+	for _, want := range []string{
+		"diff --git a/hello.txt b/hello.txt",
+		"diff --git a/new.txt b/new.txt",
+		"diff --git a/blob.bin b/blob.bin",
+		"GIT binary patch",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("patch missing %q:\n%s", want, s)
+		}
+	}
+	// RAW output: no trimming — the trailing newline is significant to
+	// git apply.
+	if !strings.HasSuffix(s, "\n") {
+		t.Error("DiffCached output lost its trailing newline")
+	}
+
+	// The prefix boundary: baseTree accepted with or without TreePrefix.
+	bare := strings.TrimPrefix(baseTree, TreePrefix)
+	patch2, err := DiffCached(repo, bare)
+	if err != nil {
+		t.Fatalf("DiffCached(bare sha): %v", err)
+	}
+	if string(patch2) != s {
+		t.Error("DiffCached differs between prefixed and bare base tree")
+	}
+
+	// The patch applies onto a fresh worktree at the base commit and
+	// reproduces the staged tree exactly, binary file included.
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := AddWorktree(repo, wt, commit); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	defer RemoveWorktree(repo, wt)
+	if err := Apply(wt, patch); err != nil {
+		t.Fatalf("Apply(captured patch): %v", err)
+	}
+	wantTree, err := WriteTree(repo)
+	if err != nil {
+		t.Fatalf("WriteTree(repo): %v", err)
+	}
+	gotTree, err := WriteTree(wt)
+	if err != nil {
+		t.Fatalf("WriteTree(wt): %v", err)
+	}
+	if gotTree != wantTree {
+		t.Errorf("replayed tree = %s, want %s", gotTree, wantTree)
+	}
+	gotBin, err := os.ReadFile(filepath.Join(wt, "blob.bin"))
+	if err != nil {
+		t.Fatalf("read replayed binary: %v", err)
+	}
+	if !bytes.Equal(gotBin, bin) {
+		t.Errorf("replayed binary = %v, want %v", gotBin, bin)
+	}
+}
+
+// An unchanged index yields an empty cached diff (the world recorded the
+// base tree and the empty-bytes patch key — legal, AG-4).
+func TestDiffCachedEmpty(t *testing.T) {
+	repo := initRepo(t)
+	_, baseTree, err := Head(repo)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if err := AddAll(repo); err != nil {
+		t.Fatalf("AddAll: %v", err)
+	}
+	patch, err := DiffCached(repo, baseTree)
+	if err != nil {
+		t.Fatalf("DiffCached: %v", err)
+	}
+	if len(patch) != 0 {
+		t.Errorf("patch = %q, want empty", patch)
 	}
 }

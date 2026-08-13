@@ -83,7 +83,12 @@ commands:
                                     signing keys to an existing workspace)
   intent new --title T [--desc D]   record an intent; prints its digest
              [--budget-candidates N] [--budget-wall-ms MS]
-  race <intent-digest> --patches DIR --oracle-cmd CMD [--keep-worlds]
+  race <intent-digest> [--agent script|claude-code|codex] --oracle-cmd CMD
+       [--keep-worlds]
+       script (default):  --patches DIR
+       claude-code|codex: [--prompt TEXT | --prompt-file P] [--model NAME[,NAME...]]
+                          [--candidates N] [--max-usd USD] [--max-turns N]
+                          [--max-wall-ms MS] [--agent-env NAME[,NAME...]]
   worlds <intent-digest>            table of worlds: digest, outcome, gate, wall_ms
   explain <intent-digest>           render the recorded decision and evidence
   admit <intent-digest>             land the SELECT winner on trunk with a signed attestation

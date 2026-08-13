@@ -42,7 +42,7 @@ func cmdWorlds(args []string, stdout, stderr io.Writer) error {
 	}
 
 	tw := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORLD\tOUTCOME\tGATE\tWALL_MS")
+	fmt.Fprintln(tw, "WORLD\tOUTCOME\tGATE\tWALL_MS\tUSD_MICRO")
 	for _, wr := range st.worldsFor(intentDig, 0, 0) {
 		gate, wall := "-", "-"
 		if rec, ok := recByWorld[wr.Dig]; ok {
@@ -52,7 +52,10 @@ func cmdWorlds(args []string, stdout, stderr io.Writer) error {
 			}
 			wall = strconv.FormatInt(rec.Cost.WallMS, 10)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", wr.Dig, wr.World.Outcome, gate, wall)
+		// Production cost comes from the world itself (AG-2, NFR-5), not
+		// from any receipt: generation is not an oracle run.
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n",
+			wr.Dig, wr.World.Outcome, gate, wall, wr.World.Cost.USDMicro)
 	}
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("worlds: %w", err)
