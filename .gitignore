@@ -1,0 +1,6 @@
+.multiverso/
+*.db
+*.db-wal
+*.db-shm
+dist/
+.DS_Store
