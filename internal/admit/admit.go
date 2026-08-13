@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coagente/multiverso/internal/attest"
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
@@ -18,8 +19,6 @@ import (
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/signing"
 )
-
-const isolationTier = "T0-worktree"
 
 // Config wires one admission. All fields are required.
 type Config struct {
@@ -169,7 +168,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			Argv:          []string{"git", "apply", "--index", "-"},
 			ExitCode:      exitCode,
 			DurationMS:    applyMS,
-			IsolationTier: isolationTier,
+			IsolationTier: object.TierT0Worktree,
+			IsolationCaps: object.HostCaps(),
 		},
 		Result: object.Result{Status: status, Artifacts: []string{stdoutKey, stderrKey}},
 		Freshness: object.Freshness{
@@ -213,7 +213,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("admit: %w", err)
 	}
-	gateRec, err := cfg.Oracle.Run(ctx, dir)
+	// Landing gates stay T0 on the host in M1c (decision 12): an intent
+	// raced under T1 lands via a host-run gate whose receipt honestly
+	// records T0-worktree + the host env digest; if the host lacks the
+	// toolchain the gate fails → REJECT — honest, never silently skipped.
+	gateRec, err := cfg.Oracle.Run(ctx, backend.HostDir(dir))
 	if err != nil {
 		return nil, fmt.Errorf("admit: landing oracle in %s: %w", dir, err)
 	}

@@ -18,7 +18,7 @@ func TestClaudeArgvGolden(t *testing.T) {
 		Prompt: "do it",
 		Model:  "claude-sonnet-5",
 		Budget: Budget{MaxTurns: 8, MaxUSDMicro: 250_000},
-	})
+	}, object.TierT0Worktree)
 	want := []string{
 		"claude", "-p", "do it",
 		"--output-format", "stream-json",
@@ -32,8 +32,18 @@ func TestClaudeArgvGolden(t *testing.T) {
 		t.Errorf("claudeArgv(full) = %q, want %q", full, want)
 	}
 
+	// claude-code is tier-independent (M1c decision 14): T1 argv is
+	// byte-identical to T0.
+	if t1 := claudeArgv(RunSpec{
+		Prompt: "do it",
+		Model:  "claude-sonnet-5",
+		Budget: Budget{MaxTurns: 8, MaxUSDMicro: 250_000},
+	}, object.TierT1Container); !reflect.DeepEqual(t1, want) {
+		t.Errorf("claudeArgv(T1) = %q, want the T0 argv %q", t1, want)
+	}
+
 	// Budget flags appear iff the corresponding limit is set (decision 16).
-	bare := claudeArgv(RunSpec{Prompt: "p"})
+	bare := claudeArgv(RunSpec{Prompt: "p"}, object.TierT0Worktree)
 	wantBare := []string{
 		"claude", "-p", "p",
 		"--output-format", "stream-json",
@@ -44,7 +54,7 @@ func TestClaudeArgvGolden(t *testing.T) {
 		t.Errorf("claudeArgv(bare) = %q, want %q", bare, wantBare)
 	}
 
-	usdOnly := claudeArgv(RunSpec{Prompt: "p", Budget: Budget{MaxUSDMicro: 4_200}})
+	usdOnly := claudeArgv(RunSpec{Prompt: "p", Budget: Budget{MaxUSDMicro: 4_200}}, object.TierT0Worktree)
 	if want := "0.0042"; usdOnly[len(usdOnly)-1] != want {
 		t.Errorf("claudeArgv usd flag = %q, want %q (FormatUSDMicro exact)", usdOnly[len(usdOnly)-1], want)
 	}

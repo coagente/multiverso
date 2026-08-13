@@ -74,12 +74,14 @@ func TestDigestGolden(t *testing.T) {
 			wantDig:   "mv0:2ddec07fc097fe911028cb010dd293a0b042ab56618febe5567fb286ef39464c",
 		},
 		{
+			// M1c: execution.isolation_caps is always serialized (XP-2; no
+			// omitempty games) — receipt digests re-derived.
 			name: "receipt object, deeply nested",
 			v: Receipt{
 				Schema:      SchemaReceipt,
 				World:       "mv0:" + strings.Repeat("1", 64),
 				Oracle:      OracleRef{ID: "command", Version: "v0", Config: "mv0:" + strings.Repeat("2", 64)},
-				Execution:   Execution{Argv: []string{"python3", "-m", "pytest", "-q"}, ExitCode: 1, DurationMS: 1234, IsolationTier: "T0-worktree"},
+				Execution:   Execution{Argv: []string{"python3", "-m", "pytest", "-q"}, ExitCode: 1, DurationMS: 1234, IsolationTier: TierT0Worktree, IsolationCaps: HostCaps()},
 				Result:      Result{Status: "fail", Artifacts: []string{"sha256:aa11", "sha256:bb22"}},
 				Freshness:   Freshness{Basis: "construction", ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
 				RecheckTier: "V1-replayable",
@@ -87,8 +89,30 @@ func TestDigestGolden(t *testing.T) {
 				Cost:        Cost{WallMS: 1234},
 				CreatedAt:   "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"cost":{"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"exit_code":1,"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"status":"fail"},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
-			wantDig:   "mv0:3055fb611efeb67820bb712e3696f9ebaa1c49deb547a3504be8327f09f1905e",
+			wantCanon: `{"cost":{"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"exit_code":1,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"status":"fail"},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
+			wantDig:   "mv0:fda9d18bb334a090209b0ca3a4e9102f05df6493b773b125403d5550ec10653e",
+		},
+		{
+			// M1c: full T1 caps — every field, canonical key order pinned.
+			name: "isolation caps, full T1 record",
+			v: IsolationCaps{
+				CapDrop:      "ALL",
+				CPUMilli:     1500,
+				MemoryBytes:  512 << 20,
+				Network:      NetworkNone,
+				PidsLimit:    256,
+				ReadOnlyRoot: true,
+				User:         "501:20",
+			},
+			wantCanon: `{"cap_drop":"ALL","cpu_milli":1500,"memory_bytes":536870912,"network":"none","pids_limit":256,"read_only_root":true,"user":"501:20"}`,
+			wantDig:   "mv0:23cd3394b6b7e0363c3ed57412dd867f28f6b4521140073395f892e517da6038",
+		},
+		{
+			// HostCaps golden: the honest uncapped-bare-host record (PRD §9).
+			name:      "host caps",
+			v:         HostCaps(),
+			wantCanon: `{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""}`,
+			wantDig:   "mv0:c90466e7b0182bf02de142ce987a44cb3c34f003b13948127ce3fe368bdcd419",
 		},
 		{
 			name:      "policy object with empty slices",
@@ -202,6 +226,31 @@ func TestOutcomeConstants(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("outcome[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestTierAndNetworkConstants pins the isolation-tier and network-mode
+// vocabulary (XP-1, NFR-4): the exact strings appear in world and receipt
+// schemas and must never drift.
+func TestTierAndNetworkConstants(t *testing.T) {
+	tiers := map[string]string{
+		TierT0Worktree:  "T0-worktree",
+		TierT1Container: "T1-container",
+	}
+	for got, want := range tiers {
+		if got != want {
+			t.Errorf("tier constant = %q, want %q", got, want)
+		}
+	}
+	networks := map[string]string{
+		NetworkNone:    "none",
+		NetworkDefault: "default",
+		NetworkHost:    "host",
+	}
+	for got, want := range networks {
+		if got != want {
+			t.Errorf("network constant = %q, want %q", got, want)
 		}
 	}
 }

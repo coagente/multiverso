@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/object"
 )
 
@@ -80,12 +81,26 @@ func Binary(a Adapter) string {
 
 // RunSpec is one candidate run. WorldDir is the agent's cwd and the only
 // place it may write (enforced by isolation tier, recorded not assumed).
+// World is the execution surface the process crosses into (XP-1): the
+// subprocess adapters route spawn and kill through it; the script adapter
+// ignores it — its git operations are control-plane host work (M1c
+// decision 13). A nil World means the bare host (backend.HostDir over
+// WorldDir): exactly M1b behavior.
 type RunSpec struct {
-	WorldDir string // absolute path to the world worktree
-	Prompt   string // literal prompt text; script: the patch bytes as a string
-	Model    string // model pin passed to the CLI; "" = tool default
+	WorldDir string        // absolute path to the world worktree (host side)
+	World    backend.World // execution surface; nil = bare host T0
+	Prompt   string        // literal prompt text; script: the patch bytes as a string
+	Model    string        // model pin passed to the CLI; "" = tool default
 	Budget   Budget
 	Env      []string // extra parent env var NAMES to pass through (base set always included)
+}
+
+// world normalizes the spec's execution surface: nil means the bare host.
+func (spec RunSpec) world() backend.World {
+	if spec.World != nil {
+		return spec.World
+	}
+	return backend.HostDir(spec.WorldDir)
 }
 
 // Budget bounds one run (AG-2). Control-plane wall clock is primary; the

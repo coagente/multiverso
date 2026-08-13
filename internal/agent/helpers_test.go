@@ -102,9 +102,8 @@ func fixtureStdout(t *testing.T, bin, mode string) []byte {
 // shrinkKillGrace makes the TERM→KILL escalation fast for watchdog tests.
 func shrinkKillGrace(t *testing.T, d time.Duration) {
 	t.Helper()
-	old := killGrace
-	killGrace = d
-	t.Cleanup(func() { killGrace = old })
+	old := setKillGrace(d)
+	t.Cleanup(func() { setKillGrace(old) })
 }
 
 // assertProcessGone polls until pid no longer exists (the whole process

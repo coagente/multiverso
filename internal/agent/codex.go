@@ -29,13 +29,24 @@ func (codexAdapter) binary() string { return "codex" }
 
 // Start implements Adapter.
 func (a codexAdapter) Start(ctx context.Context, spec RunSpec) (Run, error) {
-	return startProc(ctx, spec, codexArgv(spec), &codexParser{})
+	return startProc(ctx, spec, codexArgv(spec, spec.world().Tier()), &codexParser{})
 }
 
-// codexArgv builds the codex argv: --sandbox workspace-write is the
-// OS-level equivalent of what the task defines (decision 12).
-func codexArgv(spec RunSpec) []string {
-	argv := []string{"codex", "exec", "--json", "--sandbox", "workspace-write"}
+// codexArgv builds the codex argv per tier (M1c decision 14). T0:
+// --sandbox workspace-write, the OS-level equivalent of what the task
+// defines (decision 12), byte-for-byte M1b. T1: the container IS the
+// sandbox (cap-drop ALL, no network, read-only root — all recorded), so
+// codex gets --sandbox danger-full-access (its Landlock/seatbelt sandbox
+// is designed for bare hosts and can misbehave under a restricted kernel)
+// and --skip-git-repo-check (the worktree's .git file points at a host
+// path that does not exist in the container, by design).
+func codexArgv(spec RunSpec, tier string) []string {
+	argv := []string{"codex", "exec", "--json"}
+	if tier == object.TierT1Container {
+		argv = append(argv, "--sandbox", "danger-full-access", "--skip-git-repo-check")
+	} else {
+		argv = append(argv, "--sandbox", "workspace-write")
+	}
 	if spec.Model != "" {
 		argv = append(argv, "-m", spec.Model)
 	}

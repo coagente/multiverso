@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/object"
 )
 
@@ -28,9 +30,22 @@ const (
 	waitDelay = 5 * time.Second
 )
 
-// killGrace is the SIGTERM→SIGKILL grace for process-group kills. A var so
-// tests can shrink it; 5 s in production (design decision 9).
-var killGrace = 5 * time.Second
+// killGraceNS is the SIGTERM→SIGKILL grace for process-group kills, in
+// nanoseconds; 5 s in production (design decision 9). Atomic so tests can
+// shrink and restore it while a lingering kill goroutine from a finishing
+// run still reads it.
+var killGraceNS atomic.Int64
+
+func init() { killGraceNS.Store(int64(5 * time.Second)) }
+
+// killGrace reads the current grace period.
+func killGrace() time.Duration { return time.Duration(killGraceNS.Load()) }
+
+// setKillGrace swaps the grace period and returns the previous value
+// (test hook).
+func setKillGrace(d time.Duration) time.Duration {
+	return time.Duration(killGraceNS.Swap(int64(d)))
+}
 
 // baseEnvNames is the fixed env allowlist every agent subprocess receives
 // (decision 14). Values come from mvo's own environment; unset names are
@@ -77,6 +92,7 @@ type streamParser interface {
 // tee into the transcript buffer ahead of any parsing (AG-3).
 type procRun struct {
 	cmd    *exec.Cmd
+	world  backend.World // execution surface; kill routes through it first
 	parser streamParser
 	events chan Event
 
@@ -103,15 +119,21 @@ func startProc(ctx context.Context, spec RunSpec, argv []string, parser streamPa
 		return nil, errors.New("agent: empty WorldDir in run spec")
 	}
 	r := &procRun{
+		world:  spec.world(),
 		parser: parser,
 		events: make(chan Event, eventBuffer),
 		done:   make(chan struct{}),
 	}
 	r.lw = &lineWriter{transcript: &r.transcript, parse: r.parseLine}
 
-	cmd := exec.Command(argv[0], argv[1:]...)
+	// The world maps the in-world invocation onto the host invocation that
+	// executes it there (XP-1). T0 is the identity — byte-for-byte M1b
+	// behavior; T1 wraps in docker exec while the control plane keeps the
+	// pipes, the timers, and the git (AG-3/AG-4 ownership is structural).
+	hostArgv, hostEnv := r.world.Command(argv, buildEnv(spec.Env))
+	cmd := exec.Command(hostArgv[0], hostArgv[1:]...)
 	cmd.Dir = spec.WorldDir
-	cmd.Env = buildEnv(spec.Env)
+	cmd.Env = hostEnv
 	cmd.Stdin = nil // /dev/null: agents must never block on reads
 	cmd.Stdout = r.lw
 	cmd.Stderr = &r.stderr
@@ -212,9 +234,18 @@ func (r *procRun) kill(reason string) {
 	}
 	r.mu.Unlock()
 
+	// M1c decision 5: the world is killed FIRST (T1: docker kill — SIGKILL
+	// to PID 1 tears down the pid namespace, killing every in-container
+	// process; signaling the host docker client kills nothing inside the
+	// container). T0's Kill is a no-op and the host-group escalation below
+	// stays authoritative. T1 forfeits the graceful SIGTERM window by
+	// design: hard enforcement is the tier's point (XP-2), and the tee
+	// holds every byte streamed up to the kill.
+	_ = r.world.Kill()
+
 	pid := r.cmd.Process.Pid
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	time.AfterFunc(killGrace, func() {
+	time.AfterFunc(killGrace(), func() {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	})
 }

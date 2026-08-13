@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# M1b acceptance script — M1a's ten steps (admission, signed attestation,
-# offline verification, tamper detection) with the race running through
-# agent adapters: step 2 races the script adapter explicitly (the
-# refactor-proof), step 3b races the fake claude-code fixture and asserts
-# captured patch, transcript, and honest cost (see
-# docs/design/M1b-agent-adapters.md "Acceptance script"). Exits non-zero
-# on the first broken assertion. No real agent CLI is ever invoked.
+# M1c acceptance script — M1b's steps kept intact (admission, signed
+# attestation, offline verification, tamper detection; step 2 races the
+# script adapter, step 3b the fake claude-code fixture) with two M1c
+# insertions: step 3c races --parallel 2 and pins decision type + winner
+# against the serial run, and step 3d is the docker-gated T1 step that
+# skips gracefully when no daemon is reachable (see
+# docs/design/M1c-containers-parallel.md "Acceptance script"). Exits
+# non-zero on the first broken assertion. No real agent CLI is ever
+# invoked, and nothing larger than python:3.12-alpine is ever pulled.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -103,6 +105,95 @@ grep -q 'diff --git' "$PATCH2_FILE" || fail "fake-agent winner patch is not a re
 [ -s "$TRACE2_FILE" ] || fail "fake-agent winner trace $TRACE2_KEY is empty or missing"
 head -1 "$TRACE2_FILE" | grep -q '"type"' || fail "fake-agent winner trace first line carries no event"
 
+# --- 3c. parallel determinism: a --parallel 2 race of the same patches
+# reaches the same decision type and the same winner (identified by its
+# context CAS key — patch-a's content hash) as step 2's serial run.
+# Schedule-independent here: patch-a is the unique gate-passer (M1c
+# decision 17). ---
+INTENT3="$("$MVO" intent new --dir "$REPO" --title "fix mean() in parallel" --desc "parallel race")"
+[ -n "$INTENT3" ] || fail "mvo intent new (parallel intent) printed no digest"
+"$MVO" race "$INTENT3" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --parallel 2 --oracle-cmd "python3 -m pytest -q"
+EXPLAIN3="$("$MVO" explain "$INTENT3" --dir "$REPO")"
+echo "$EXPLAIN3" | grep -q '^type: *SELECT$' || fail "parallel decision is not SELECT:
+$EXPLAIN3"
+WINNER3="$(echo "$EXPLAIN3" | awk '/^winner:/ {print $2}')"
+WORLD3_A="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT payload_dig FROM events WHERE type='world.created' AND cast(payload AS text) LIKE '%$PATCH_A_KEY%' AND cast(payload AS text) LIKE '%$INTENT3%';")"
+[ -n "$WORLD3_A" ] || fail "no world.created event for the parallel race references patch-a"
+[ "$WINNER3" = "$WORLD3_A" ] || fail "parallel winner $WINNER3 is not patch-a's world $WORLD3_A (serial and parallel disagree)"
+
+# --- 3d. T1 container race (docker-gated; skips gracefully when no daemon
+# is reachable — CI has no docker). The script adapter applies patches on
+# the host (M1c decision 13); the pytest oracle runs INSIDE the pinned
+# container. ---
+T1_RAN=0
+if ! docker version >/dev/null 2>&1; then
+  echo "accept: T1 step SKIPPED (no docker daemon)"
+else
+  T1_IMAGE="multiverso-t1-fixture:v1"
+  if ! docker image inspect "$T1_IMAGE" >/dev/null 2>&1; then
+    echo "accept: building fixture image $T1_IMAGE (one-time)"
+    if ! docker build -f "$ROOT/testdata/t1image/Dockerfile" -t "$T1_IMAGE" "$ROOT/testdata"; then
+      echo "accept: T1 step SKIPPED (fixture image build failed — offline?)"
+      T1_IMAGE=""
+    fi
+  fi
+  if [ -n "$T1_IMAGE" ]; then
+    T1_RAN=1
+    INTENT4="$("$MVO" intent new --dir "$REPO" --title "fix mean() under T1" --desc "container race")"
+    [ -n "$INTENT4" ] || fail "mvo intent new (T1 intent) printed no digest"
+    "$MVO" race "$INTENT4" --dir "$REPO" --agent script --patches "$REPO/patches" \
+      --exec T1 --exec-image "$T1_IMAGE" --memory-mb 512 --cpus 1 --pids 256 \
+      --oracle-cmd "python3 -m pytest -q"
+    EXPLAIN4="$("$MVO" explain "$INTENT4" --dir "$REPO")"
+    echo "$EXPLAIN4" | grep -q '^type: *SELECT$' || fail "T1 decision is not SELECT:
+$EXPLAIN4"
+    WINNER4="$(echo "$EXPLAIN4" | awk '/^winner:/ {print $2}')"
+    WORLD4_A="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+      "SELECT payload_dig FROM events WHERE type='world.created' AND cast(payload AS text) LIKE '%$PATCH_A_KEY%' AND cast(payload AS text) LIKE '%$INTENT4%';")"
+    [ -n "$WORLD4_A" ] || fail "no world.created event for the T1 race references patch-a"
+    [ "$WINNER4" = "$WORLD4_A" ] || fail "T1 winner $WINNER4 is not patch-a's world $WORLD4_A (the container did not gate it)"
+
+    # XP-3: the T1 winner's env manifest in CAS carries the pinned image
+    # digest, and its env digest differs from the T0 winner's (step 2).
+    ENV4="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+      "SELECT cast(payload AS text) FROM events WHERE type='world.created' AND payload_dig='$WINNER4';" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"])')"
+    ENV1="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+      "SELECT cast(payload AS text) FROM events WHERE type='world.created' AND payload_dig='$WORLD_A';" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"])')"
+    [ "$ENV4" != "$ENV1" ] || fail "T1 winner env digest equals the T0 winner's ($ENV4) — XP-3 image pinning missing"
+    ENV4_HEX="${ENV4#mv0:}"
+    ENV4_FILE="$REPO/.multiverso/cas/sha256/${ENV4_HEX:0:2}/${ENV4_HEX:2}"
+    [ -f "$ENV4_FILE" ] || fail "T1 env manifest $ENV4 not in CAS"
+    grep -q '"image_digest":"sha256:' "$ENV4_FILE" \
+      || fail "T1 env manifest carries no image digest: $(cat "$ENV4_FILE")"
+
+    # XP-1/XP-2/NFR-4: the T1 suite receipt records the container tier and
+    # the network-off cap.
+    sqlite3 "$REPO/.multiverso/ledger.db" \
+      "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+      | python3 -c '
+import json, sys
+world = sys.argv[1]
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+mine = [r for r in recs if r.get("world") == world and r.get("family") == "suite"]
+assert mine, f"no suite receipt for T1 winner {world}"
+for r in mine:
+    ex = r["execution"]
+    assert ex["isolation_tier"] == "T1-container", ex["isolation_tier"]
+    caps = ex["isolation_caps"]
+    assert caps["network"] == "none", caps
+    assert caps["cap_drop"] == "ALL", caps
+    assert caps["read_only_root"] is True, caps
+    assert caps["memory_bytes"] == 512 << 20, caps
+    assert caps["cpu_milli"] == 1000, caps
+    assert caps["pids_limit"] == 256, caps
+' "$WINNER4" || fail "T1 suite receipt failed tier/caps assertions"
+  fi
+fi
+
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"
 "$MVO" admit "$INTENT" --dir "$REPO" || fail "mvo admit exited non-zero"
@@ -124,18 +215,20 @@ assert r.get("ok") is True, r
 "$MVO" verify HEAD --key "$REPO/.multiverso/keys/local.pub" --dir "$REPO" \
   || fail "mvo verify --key failed"
 
-# --- 7. second machine: audit replays both races (the fake race's SELECT
-# included) AND the admission ---
+# --- 7. second machine: audit replays every race — script, fake-agent,
+# the parallel race, and (when it ran) the T1 race — AND the admission ---
 COPY="$WORK/toyrepo-copy"
 cp -R "$REPO" "$COPY"
+MIN_DECISIONS=4
+[ "$T1_RAN" = "1" ] && MIN_DECISIONS=5
 "$MVO" audit --json --dir "$COPY" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 assert r.get("chain_ok") is True, r
 assert r.get("replay_identical") is True, r
 assert r.get("admissions", 0) >= 1, r
-assert r.get("decisions", 0) >= 3, r
-' || fail "audit --json on the copy did not replay all decisions identically"
+assert r.get("decisions", 0) >= int(sys.argv[1]), r
+' "$MIN_DECISIONS" || fail "audit --json on the copy did not replay all decisions identically"
 
 # --- 8. tamper (bundle): flip one byte; verify must fail on bundle_digest ---
 TRAILER_DIG="$($GIT -C "$COPY" log -1 --format=%B \

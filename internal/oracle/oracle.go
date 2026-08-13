@@ -1,6 +1,8 @@
 // Package oracle defines the Oracle interface and CommandOracle (EP-1,
-// EP-7): a verifier that runs a command inside a world directory and emits
-// a Receipt with its stdout/stderr stored in CAS as artifacts.
+// EP-7): a verifier that runs a command inside a world and emits a Receipt
+// with its stdout/stderr stored in CAS as artifacts. Since M1c the run
+// surface is the world handle (PRD EP-1 is literally "run(world) →
+// Receipt"): a string dir can no longer say where execution must happen.
 package oracle
 
 import (
@@ -13,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/object"
 )
@@ -25,7 +28,6 @@ const (
 )
 
 const (
-	isolationTier = "T0-worktree"
 	recheckTier   = "V1-replayable"
 	family        = "suite"
 	freshnessBase = "construction"
@@ -34,21 +36,25 @@ const (
 	waitDelay = 5 * time.Second
 )
 
-// Oracle produces evidence receipts for a world directory.
+// Oracle produces evidence receipts for a world.
 type Oracle interface {
 	ID() string      // "command"
 	Version() string // "v0"
-	Run(ctx context.Context, worldDir string) (object.Receipt, error)
+	Run(ctx context.Context, w backend.World) (object.Receipt, error)
 }
 
-// CommandOracle runs Argv in the world directory and maps the exit code to
-// a receipt status: 0 → pass, non-zero → fail, timeout or spawn error →
-// error. On timeout the whole process group is killed (EP-7), not just the
+// CommandOracle runs Argv inside the world and maps the exit code to a
+// receipt status: 0 → pass, non-zero → fail, timeout or spawn error →
+// error. On timeout the world is killed (T1: docker kill, pid-namespace
+// teardown) and then the whole host process group (EP-7), not just the
 // leader.
 //
-// Run fills every receipt field it can observe; World and
-// Freshness.ValidFor are completed by the caller (the race orchestrator),
-// which alone knows the world's object digest, tree, and env digests.
+// The receipt records the IN-WORLD argv (the verification command is the
+// evidence; any docker exec wrapper is transport — M1c decision 12) and
+// the world's tier and caps. Run fills every receipt field it can observe;
+// World and Freshness.ValidFor are completed by the caller (the race
+// orchestrator), which alone knows the world's object digest, tree, and
+// env digests.
 type CommandOracle struct {
 	Argv    []string
 	Timeout time.Duration
@@ -61,16 +67,19 @@ func (o *CommandOracle) ID() string { return "command" }
 // Version implements Oracle.
 func (o *CommandOracle) Version() string { return "v0" }
 
-// Run executes the command in worldDir and returns the receipt. A failing
+// Run executes the command in the world and returns the receipt. A failing
 // or timing-out command is evidence, not an error: the receipt records it
 // and err stays nil. Non-nil err means the evidence itself could not be
 // produced (bad config, CAS failure).
-func (o *CommandOracle) Run(ctx context.Context, worldDir string) (object.Receipt, error) {
+func (o *CommandOracle) Run(ctx context.Context, w backend.World) (object.Receipt, error) {
 	if len(o.Argv) == 0 {
 		return object.Receipt{}, errors.New("oracle: command oracle: empty argv")
 	}
 	if o.CAS == nil {
 		return object.Receipt{}, errors.New("oracle: command oracle: nil CAS store")
+	}
+	if w == nil {
+		return object.Receipt{}, errors.New("oracle: command oracle: nil world")
 	}
 	cfgDig, _, err := object.Digest(map[string]any{
 		"argv":       o.Argv,
@@ -87,12 +96,17 @@ func (o *CommandOracle) Run(ctx context.Context, worldDir string) (object.Receip
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, o.Argv[0], o.Argv[1:]...)
-	cmd.Dir = worldDir
+	hostArgv, hostEnv := w.Command(o.Argv, nil)
+	cmd := exec.CommandContext(runCtx, hostArgv[0], hostArgv[1:]...)
+	cmd.Dir = w.Dir()
+	cmd.Env = hostEnv // nil ⇒ inherit the ambient environment (exactly M0 for T0)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// EP-7: on timeout, kill the whole process group so no orphaned test
-	// runners survive the world.
+	// EP-7 + M1c decision 5: on timeout, kill the world first (T1: docker
+	// kill tears down the pid namespace — signaling the docker exec client
+	// kills nothing inside the container), then the whole host process
+	// group so no orphaned test runners survive.
 	cmd.Cancel = func() error {
+		_ = w.Kill()
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
@@ -140,7 +154,8 @@ func (o *CommandOracle) Run(ctx context.Context, worldDir string) (object.Receip
 			Argv:          append([]string(nil), o.Argv...),
 			ExitCode:      exitCode,
 			DurationMS:    wallMS,
-			IsolationTier: isolationTier,
+			IsolationTier: w.Tier(),
+			IsolationCaps: w.Caps(),
 		},
 		Result:      object.Result{Status: status, Artifacts: []string{stdoutKey, stderrKey}},
 		Freshness:   object.Freshness{Basis: freshnessBase},

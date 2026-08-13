@@ -11,15 +11,29 @@ import (
 )
 
 func TestCodexArgvGolden(t *testing.T) {
-	full := codexArgv(RunSpec{Prompt: "do it", Model: "gpt-5.3-codex"})
+	full := codexArgv(RunSpec{Prompt: "do it", Model: "gpt-5.3-codex"}, object.TierT0Worktree)
 	want := []string{"codex", "exec", "--json", "--sandbox", "workspace-write", "-m", "gpt-5.3-codex", "do it"}
 	if !reflect.DeepEqual(full, want) {
 		t.Errorf("codexArgv(model) = %q, want %q", full, want)
 	}
-	bare := codexArgv(RunSpec{Prompt: "do it"})
+	bare := codexArgv(RunSpec{Prompt: "do it"}, object.TierT0Worktree)
 	wantBare := []string{"codex", "exec", "--json", "--sandbox", "workspace-write", "do it"}
 	if !reflect.DeepEqual(bare, wantBare) {
 		t.Errorf("codexArgv(bare) = %q, want %q", bare, wantBare)
+	}
+
+	// Under T1 the container IS the sandbox (M1c decision 14): codex's own
+	// sandbox is disabled and the git-repo check skipped (the worktree's
+	// .git points at a host path that does not exist in the container).
+	t1 := codexArgv(RunSpec{Prompt: "do it", Model: "gpt-5.3-codex"}, object.TierT1Container)
+	wantT1 := []string{"codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "-m", "gpt-5.3-codex", "do it"}
+	if !reflect.DeepEqual(t1, wantT1) {
+		t.Errorf("codexArgv(T1) = %q, want %q", t1, wantT1)
+	}
+	t1bare := codexArgv(RunSpec{Prompt: "do it"}, object.TierT1Container)
+	wantT1Bare := []string{"codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "do it"}
+	if !reflect.DeepEqual(t1bare, wantT1Bare) {
+		t.Errorf("codexArgv(T1 bare) = %q, want %q", t1bare, wantT1Bare)
 	}
 }
 

@@ -145,14 +145,21 @@ func TestRaceFakeClaudeAndWorldsCostColumn(t *testing.T) {
 	if !strings.Contains(lines[0], "USD_MICRO") {
 		t.Fatalf("worlds header %q missing USD_MICRO column", lines[0])
 	}
+	// M1c: the TIER column reports each world's recorded isolation tier.
+	if !strings.Contains(lines[0], "TIER") {
+		t.Fatalf("worlds header %q missing TIER column", lines[0])
+	}
 	agentRows := 0
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
-		if len(fields) != 5 {
-			t.Fatalf("worlds row %q has %d columns, want 5", line, len(fields))
+		if len(fields) != 6 {
+			t.Fatalf("worlds row %q has %d columns, want 6", line, len(fields))
 		}
 		if fields[4] == "4200" {
 			agentRows++
+		}
+		if fields[5] != "T0-worktree" {
+			t.Errorf("worlds row %q TIER = %q, want T0-worktree", line, fields[5])
 		}
 	}
 	if agentRows != 2 {

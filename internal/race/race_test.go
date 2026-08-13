@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coagente/multiverso/internal/agent"
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
@@ -71,8 +72,8 @@ type stubOracle struct{}
 func (stubOracle) ID() string      { return "stub" }
 func (stubOracle) Version() string { return "v0" }
 
-func (stubOracle) Run(_ context.Context, dir string) (object.Receipt, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "x.txt"))
+func (stubOracle) Run(_ context.Context, w backend.World) (object.Receipt, error) {
+	b, err := os.ReadFile(filepath.Join(w.Dir(), "x.txt"))
 	if err != nil {
 		return object.Receipt{}, err
 	}
@@ -83,7 +84,7 @@ func (stubOracle) Run(_ context.Context, dir string) (object.Receipt, error) {
 	return object.Receipt{
 		Schema:      object.SchemaReceipt,
 		Oracle:      object.OracleRef{ID: "stub", Version: "v0", Config: "mv0:cfg"},
-		Execution:   object.Execution{Argv: []string{"stub"}, IsolationTier: "T0-worktree"},
+		Execution:   object.Execution{Argv: []string{"stub"}, IsolationTier: w.Tier(), IsolationCaps: w.Caps()},
 		Result:      object.Result{Status: status, Artifacts: []string{}},
 		Freshness:   object.Freshness{Basis: "construction"},
 		RecheckTier: "V1-replayable",
@@ -171,7 +172,19 @@ func newConfig(t *testing.T, patches map[string]string) Config {
 		Candidates: scriptCands(patches),
 		WorldsDir:  filepath.Join(t.TempDir(), "worlds"),
 		Oracle:     stubOracle{},
+		Backend:    mustBackend(t),
+		Parallel:   1,
 	}
+}
+
+// mustBackend returns the default T0 backend.
+func mustBackend(t *testing.T) backend.Backend {
+	t.Helper()
+	b, err := backend.New(backend.Config{})
+	if err != nil {
+		t.Fatalf("backend.New: %v", err)
+	}
+	return b
 }
 
 func TestRunSelectsWinnerAndRecordsEverything(t *testing.T) {

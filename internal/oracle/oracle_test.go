@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/object"
 )
@@ -56,7 +57,7 @@ func TestRunStatusMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := newOracle(t, tt.argv, 30*time.Second)
-			rec, err := o.Run(context.Background(), t.TempDir())
+			rec, err := o.Run(context.Background(), backend.HostDir(t.TempDir()))
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -89,7 +90,7 @@ func TestRunStatusMapping(t *testing.T) {
 
 func TestRunReceiptShape(t *testing.T) {
 	o := newOracle(t, []string{"/bin/sh", "-c", "true"}, time.Second)
-	rec, err := o.Run(context.Background(), t.TempDir())
+	rec, err := o.Run(context.Background(), backend.HostDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -102,8 +103,13 @@ func TestRunReceiptShape(t *testing.T) {
 	if got, want := rec.Oracle.Config[:len(object.DigestPrefix)], object.DigestPrefix; got != want {
 		t.Errorf("oracle config = %q, want %q prefix", rec.Oracle.Config, want)
 	}
-	if rec.Execution.IsolationTier != "T0-worktree" {
-		t.Errorf("isolation_tier = %q, want T0-worktree", rec.Execution.IsolationTier)
+	if rec.Execution.IsolationTier != object.TierT0Worktree {
+		t.Errorf("isolation_tier = %q, want %q (from the world handle)", rec.Execution.IsolationTier, object.TierT0Worktree)
+	}
+	// M1c: tier and caps come from the world handle, never from a package
+	// constant — a T0 receipt carries the honest uncapped-bare-host record.
+	if rec.Execution.IsolationCaps != object.HostCaps() {
+		t.Errorf("isolation_caps = %+v, want HostCaps %+v", rec.Execution.IsolationCaps, object.HostCaps())
 	}
 	if rec.Family != "suite" {
 		t.Errorf("family = %q, want suite", rec.Family)
@@ -134,7 +140,7 @@ func TestRunReceiptShape(t *testing.T) {
 func TestRunTimeoutKillsProcessGroup(t *testing.T) {
 	o := newOracle(t, []string{"/bin/sh", "-c", "sleep 30 & sleep 30"}, 200*time.Millisecond)
 	start := time.Now()
-	rec, err := o.Run(context.Background(), t.TempDir())
+	rec, err := o.Run(context.Background(), backend.HostDir(t.TempDir()))
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -154,15 +160,15 @@ func TestRunConfigDigest(t *testing.T) {
 	a := newOracle(t, []string{"true"}, time.Second)
 	b := newOracle(t, []string{"true"}, time.Second)
 	c := newOracle(t, []string{"true"}, 2*time.Second)
-	ra, err := a.Run(context.Background(), t.TempDir())
+	ra, err := a.Run(context.Background(), backend.HostDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Run a: %v", err)
 	}
-	rb, err := b.Run(context.Background(), t.TempDir())
+	rb, err := b.Run(context.Background(), backend.HostDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Run b: %v", err)
 	}
-	rc, err := c.Run(context.Background(), t.TempDir())
+	rc, err := c.Run(context.Background(), backend.HostDir(t.TempDir()))
 	if err != nil {
 		t.Fatalf("Run c: %v", err)
 	}
@@ -184,9 +190,15 @@ func TestRunRejectsBadConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := tt.oracle.Run(context.Background(), t.TempDir()); err == nil {
+			if _, err := tt.oracle.Run(context.Background(), backend.HostDir(t.TempDir())); err == nil {
 				t.Fatal("Run: want error, got nil")
 			}
 		})
 	}
+	t.Run("nil world", func(t *testing.T) {
+		o := newOracle(t, []string{"true"}, time.Second)
+		if _, err := o.Run(context.Background(), nil); err == nil {
+			t.Fatal("Run(nil world): want error, got nil")
+		}
+	})
 }

@@ -25,7 +25,7 @@ func (claudeAdapter) binary() string { return "claude" }
 
 // Start implements Adapter.
 func (a claudeAdapter) Start(ctx context.Context, spec RunSpec) (Run, error) {
-	return startProc(ctx, spec, claudeArgv(spec), &claudeParser{})
+	return startProc(ctx, spec, claudeArgv(spec, spec.world().Tier()), &claudeParser{})
 }
 
 // claudeArgv builds the fixed-order claude-code argv. --bare keeps the run
@@ -33,8 +33,12 @@ func (a claudeAdapter) Start(ctx context.Context, spec RunSpec) (Run, error) {
 // because in -p mode an unanswerable permission prompt is a crippled run
 // and worlds are control-plane-owned isolated worktrees gated by oracles
 // (decision 12). Budget flags are appended only when the corresponding
-// limit > 0 (decision 16). No MCP flags in M1b (AG-7 is out).
-func claudeArgv(spec RunSpec) []string {
+// limit > 0 (decision 16). No MCP flags in M1b (AG-7 is out). The tier
+// parameter exists because argv builders are tier-dependent (M1c decision
+// 14); claude-code's argv is byte-identical in both tiers —
+// bypassPermissions was already the M1b call.
+func claudeArgv(spec RunSpec, tier string) []string {
+	_ = tier // identical under T0 and T1 (M1c decision 14)
 	argv := []string{
 		"claude", "-p", spec.Prompt,
 		"--output-format", "stream-json",

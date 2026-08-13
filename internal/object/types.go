@@ -22,6 +22,35 @@ const (
 	OutcomeCrash          = "CRASH"
 )
 
+// Isolation tiers (World.IsolationTier, Execution.IsolationTier) and
+// network modes (IsolationCaps.Network). Recorded, never assumed (XP-1;
+// see docs/design/M1c-containers-parallel.md).
+const (
+	TierT0Worktree  = "T0-worktree"
+	TierT1Container = "T1-container"
+	NetworkNone     = "none"
+	NetworkDefault  = "default"
+	NetworkHost     = "host"
+)
+
+// IsolationCaps records what actually confined an execution (XP-1/XP-2).
+// All fields are always serialized; zero means uncapped, honestly.
+type IsolationCaps struct {
+	CapDrop      string `json:"cap_drop"`     // "ALL" | ""
+	CPUMilli     int64  `json:"cpu_milli"`    // 0 = uncapped
+	MemoryBytes  int64  `json:"memory_bytes"` // 0 = uncapped (MemoryMB << 20)
+	Network      string `json:"network"`      // "none" | "default" | "host"
+	PidsLimit    int64  `json:"pids_limit"`   // 0 = uncapped
+	ReadOnlyRoot bool   `json:"read_only_root"`
+	User         string `json:"user"` // effective user; "" = process default
+}
+
+// HostCaps is the T0 record: uncapped bare host, said plainly (PRD §9 —
+// macOS has no cgroups, bare-host runs are uncappable and say so).
+func HostCaps() IsolationCaps {
+	return IsolationCaps{Network: NetworkHost}
+}
+
 // Base identifies the git state an intent starts from.
 type Base struct {
 	Commit string `json:"commit"`
@@ -98,12 +127,16 @@ type OracleRef struct {
 	Config  string `json:"config"` // digest of argv+timeout
 }
 
-// Execution records how the oracle ran.
+// Execution records how the oracle ran. Argv is the IN-WORLD invocation
+// (the verification command is the evidence; any docker exec wrapper is
+// transport, reproducible from tier + caps + image digest — M1c decision
+// 12). IsolationCaps is always serialized (PRD §5.3; no omitempty games).
 type Execution struct {
-	Argv          []string `json:"argv"`
-	ExitCode      int      `json:"exit_code"`
-	DurationMS    int64    `json:"duration_ms"`
-	IsolationTier string   `json:"isolation_tier"`
+	Argv          []string      `json:"argv"`
+	ExitCode      int           `json:"exit_code"`
+	DurationMS    int64         `json:"duration_ms"`
+	IsolationTier string        `json:"isolation_tier"`
+	IsolationCaps IsolationCaps `json:"isolation_caps"`
 }
 
 // Result is the oracle's verdict plus evidence artifacts.
