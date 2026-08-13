@@ -30,8 +30,9 @@ Intent → N Worlds → Evidence → Decision → Admission
 
 🌱 **Building in public.** This project is at the research stage.
 
+- [`PRD.md`](PRD.md) — **the product requirements document**: data model, requirements by plane, architecture, MVP scope, evaluation plan, roadmap M0–M4
 - [`RESEARCH.md`](RESEARCH.md) — the founding scope memo (Spanish): verdict, scope, and phased plan
-- [`research/`](research/) — **the research corpus**: 15 chapters, ~60,000 words, 240 primary sources, cutoff 2026-08-12
+- [`research/`](research/) — **the research corpus**: 20 chapters, ~76,000 words, 305 primary sources, cutoff 2026-08-12
   - [Executive summary & findings](research/README.md) — the five-capability novelty map, the white space (evidence-aware scheduling), and what it changes for the roadmap
   - [Verification](research/VERIFICATION.md) — adversarial fact-check of the memo's 13 load-bearing claims (13/13 confirmed)
   - [Bibliography](research/BIBLIOGRAPHY.md) — deduplicated source index

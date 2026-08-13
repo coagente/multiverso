@@ -1,7 +1,7 @@
 # Multiverso Research Corpus
 
 > Exhaustive state-of-the-art research for **Multiverso** — an evidence-native, Git-compatible control plane for speculative software change produced by AI agents.
-> Corpus cutoff: **2026-08-12** · 15 chapters · ~60,000 words · [240 sources](BIBLIOGRAPHY.md) · [13/13 founding-memo claims verified](VERIFICATION.md)
+> Corpus cutoff: **2026-08-12** · 20 chapters · ~76,000 words · [305 sources](BIBLIOGRAPHY.md) · [13/13 founding-memo claims verified](VERIFICATION.md)
 
 This corpus was produced by a multi-agent research workflow (12 dimension deep-dives + 3 adversarial fact-checkers + 1 completeness critic that triggered 3 additional chapters), with every factual claim cited to a primary source. It stress-tests the thesis of the founding memo ([`../RESEARCH.md`](../RESEARCH.md), Spanish) and maps the terrain Multiverso would occupy.
 
@@ -50,7 +50,17 @@ Bare parallel-agent orchestration was commoditized within ~12 months (Terragon s
 | 14 | [Formal Methods as Admission Oracles](14-formal-verification-admission-oracles.md) | Proof-carrying receipts make veracity machine-checkable; extends the oracle ladder with formal rungs |
 | 15 | [Post-Admission Runtime Evidence: Canary & Progressive Delivery](15-runtime-evidence-progressive-delivery.md) | Canary verdicts never flow back to admission decisions; graduated ADMIT with evidence debt proposed |
 
-Supporting documents: **[VERIFICATION.md](VERIFICATION.md)** (adversarial fact-check of the founding memo) · **[BIBLIOGRAPHY.md](BIBLIOGRAPHY.md)** (240 deduplicated primary sources).
+### Implementation track (feeds the [PRD](../PRD.md))
+
+| # | Chapter | One-line finding |
+|---|---|---|
+| 16 | [Agent Integration Surfaces](16-agent-integration-surfaces.md) | Claude Code has the only native dollar cap; budget enforcement must be control-plane-primary; reproducibility is evidential, not replay-based |
+| 17 | [Implementation Stack for the Control Plane](17-implementation-stack.md) | Go, decided by the trust plane (sigstore-go is the only stable attestation-capable client); shell out to git/jj; SQLite WAL ledger |
+| 18 | [Forge Integration: GitHub-First Admission Surface](18-forge-integration.md) | v0 App-less via `refs/multiverso/*` with self-authenticating receipts; Checks API requires an App; merge queue handled from day one |
+| 19 | [MVP Oracle Toolchain & Evaluation Harness](19-mvp-oracle-toolchain.md) | 4-rung ladder O0–O3 with verified tool versions; exit-code-5 laundering guard; SWE-bench-Live frozen + monthly slice |
+| 20 | [OSS Strategy, License & Naming](20-oss-strategy-license-naming.md) | Apache-2.0 + DCO, no CLA; open-core with receipts free forever; keep "Multiverso", binary `mvo` |
+
+Supporting documents: **[VERIFICATION.md](VERIFICATION.md)** (adversarial fact-check of the founding memo) · **[BIBLIOGRAPHY.md](BIBLIOGRAPHY.md)** (deduplicated primary sources).
 
 ## What this changes for the roadmap
 

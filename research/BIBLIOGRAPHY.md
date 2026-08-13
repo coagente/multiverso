@@ -7,12 +7,14 @@
 - [Adaptive Deployment of Untrusted LLMs Reduces Distributed Threats (Nov 2024)](https://arxiv.org/abs/2411.17693) — ch. 13
 - [Advancing safe deployment practices — Azure blog (Russinovich, 2020-02-05)](https://azure.microsoft.com/en-us/blog/advancing-safe-deployment-practices/) — ch. 15
 - [AgentFS (Turso)](https://www.agentfs.ai/) — ch. 1
+- [Agentic Property-Based Testing](https://arxiv.org/abs/2510.09907) — ch. 19
 - [Agentic Version Control Benchmarks](https://blog.gitbutler.com/vcbench) — ch. 4
 - [AgenticFlict: A Large-Scale Dataset of Merge Conflicts in AI Coding Agent Pull Requests on GitHub](https://arxiv.org/abs/2604.03551) — ch. 6
 - [AI Agent Pull Requests on GitHub: Frequency, Structure, and Merge Conflict Rates](https://arxiv.org/abs/2607.04697) — ch. 6
 - [AI Agents That Matter](https://arxiv.org/abs/2407.01502) — ch. 9
 - [AI Control: Improving Safety Despite Intentional Subversion (Greenblatt, Shlegeris, Sachan, Roger; ICML 2024)](https://arxiv.org/abs/2312.06942) — ch. 13
 - [AI-Augmented CI/CD Pipelines: From Code Commit to Production with Autonomous Decisions](https://arxiv.org/abs/2508.11867) — ch. 15
+- [Aider scripting docs](https://aider.chat/docs/scripting.html) — ch. 16
 - [AlphaEvolve: A coding agent for scientific and algorithmic discovery](https://arxiv.org/abs/2506.13131) — ch. 12
 - [AlphaEvolve: A Gemini-powered coding agent (DeepMind)](https://deepmind.google/discover/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) — ch. 2
 - [AlphaEvolve: A Gemini-powered coding agent for designing advanced algorithms (DeepMind)](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) — ch. 3
@@ -21,6 +23,7 @@
 - [An Introduction to Rekor (Chainguard Academy)](https://edu.chainguard.dev/open-source/sigstore/rekor/an-introduction-to-rekor/) — ch. 7
 - [Announcing SCIP (Sourcegraph)](https://sourcegraph.com/blog/announcing-scip) — ch. 11
 - [Announcing the 2024 DORA report — Google Cloud blog](https://cloud.google.com/blog/products/devops-sre/announcing-the-2024-dora-report) — ch. 15
+- [Anthropic model migration guide](https://platform.claude.com/docs/en/about-claude/models/migration-guide) — ch. 16
 - [Anthropic Pilot Sabotage Risk Report / Google DeepMind Frontier Safety Framework v3](https://alignment.anthropic.com/2025/sabotage-risk-report/) — ch. 13
 - [Anthropic: Claude Opus 4.6](https://www.anthropic.com/news/claude-opus-4-6) — ch. 10
 - [Anytime Verified Agents: Adaptive Compute Allocation for Reliable LLM Reasoning under Budget Constraints](https://openreview.net/forum?id=JMDCMf7mlF) — ch. 3
@@ -30,9 +33,11 @@
 - [Async Control: Stress-testing Asynchronous Control Measures for LLM Agents (Dec 2025)](https://arxiv.org/abs/2512.13526) — ch. 13
 - [ATM: CID-Brokered Pre-Write Admission for Multi-Agent Code Co-Synthesis](https://arxiv.org/abs/2607.00041) — ch. 6
 - [Attack Selection in Agentic AI Control Evaluations Meaningfully Decreases Safety (Jun 2026)](https://arxiv.org/abs/2606.06529) — ch. 13
+- [Authenticating as a GitHub App installation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation) — ch. 18
 - [Automated Canary Analysis at Netflix with Kayenta](https://netflixtechblog.com/automated-canary-analysis-at-netflix-with-kayenta-3260bc7acc69) — ch. 15
 - [Automated Proof Generation for Rust Code via Self-Evolution](https://arxiv.org/abs/2410.15756) — ch. 14
 - [AutoVerus: Automated Proof Generation for Rust Code](https://arxiv.org/abs/2409.13082) — ch. 14
+- [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets) — ch. 18
 - [B4: Towards Optimal Assessment of Plausible Code Solutions with Plausible Tests](https://arxiv.org/abs/2409.08692) — ch. 3
 - [BashArena: A Control Setting for Highly Privileged AI Agents (Dec 2025)](https://arxiv.org/abs/2512.15688) — ch. 13
 - [Bazel query guide; Tinder/bazel-diff](https://github.com/Tinder/bazel-diff) — ch. 11
@@ -41,6 +46,7 @@
 - [bors-ng README](https://github.com/bors-ng/bors-ng/blob/master/README.md) — ch. 5
 - [Build faster with Buck2 (Meta engineering)](https://engineering.fb.com/2023/04/06/open-source/buck2-open-source-large-scale-build-system/) — ch. 11
 - [Building a C compiler with a team of parallel Claudes (Anthropic engineering)](https://www.anthropic.com/engineering/building-c-compiler) — ch. 6
+- [Bun is joining Anthropic](https://bun.com/blog/bun-joins-anthropic) — ch. 20
 - [BusinessWire: CodeRabbit Series B](https://www.businesswire.com/news/home/20250916401011/en/CodeRabbit-Raises-$60M-Series-B-Following-Unprecedented-Growth-as-Vibe-Coding-Triggers-a-Need-for-New-Code-Quality-Standards) — ch. 10
 - [BusinessWire: OpenHands Series A](https://www.businesswire.com/news/home/20251118768131/en/OpenHands-Raises-$18.8M-Series-A-to-Bring-Open-Source-Cloud-Coding-Agents-to-Enterprises) — ch. 10
 - [Bypassing Large Diffs in SubmitQueue — Uber Blog](https://www.uber.com/en-CA/blog/bypassing-large-diffs-in-submitqueue/) — ch. 5
@@ -48,25 +54,38 @@
 - [Can Pre-trained Language Models be Used to Resolve Textual and Semantic Merge Conflicts? (arXiv:2111.11904)](https://arxiv.org/abs/2111.11904) — ch. 5
 - [Canary Judge — Spinnaker docs](https://spinnaker.io/docs/guides/user/canary/judge/) — ch. 15
 - [Canarying Releases — Google SRE Workbook](https://sre.google/workbook/canarying-releases/) — ch. 15
+- [cargo-mutants changelog](https://mutants.rs/changelog.html) — ch. 19
+- [cargo-nextest libtest-json docs](https://nexte.st/docs/machine-readable/libtest-json/) — ch. 19
 - [Chromium CQ documentation](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/infra/cq.md) — ch. 5
 - [Claim Plane paper (full text, sections 5-8, 11)](https://arxiv.org/pdf/2607.21909) — ch. 6
 - [Claim Plane: Enforceable Change Intents and Dynamic Scope for Parallel Coding Agents](https://arxiv.org/abs/2607.21909) — ch. 6, 12
+- [Claude Agent SDK Python reference](https://code.claude.com/docs/en/agent-sdk/python) — ch. 16
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) — ch. 16
 - [Claude Code docs: Common workflows](https://code.claude.com/docs/en/common-workflows) — ch. 1
+- [Claude Code hooks reference](https://code.claude.com/docs/en/hooks) — ch. 16
 - [CloudBees acquires Launchable](https://www.cloudbees.com/newsroom/cloudbees-acquires-launchable-to-boost-genai-efforts-across-devsecops) — ch. 11
 - [Clover: Closed-Loop Verifiable Code Generation](https://arxiv.org/abs/2310.17807) — ch. 14
 - [CNBC](https://www.cnbc.com/2026/06/16/spacex-spcx-cursor-acquisition-ipo.html) — ch. 10
+- [CNCF allowed-third-party-license policy](https://github.com/cncf/foundation/blob/main/policies-guidance/allowed-third-party-license-policy.md) — ch. 20
+- [CNCF in-toto graduation announcement](https://www.cncf.io/announcements/2025/04/23/cncf-announces-graduation-of-in-toto-security-framework-enhancing-software-supply-chain-integrity-across-industries/) — ch. 20
 - [CoAgent: Concurrency Control for Multi-Agent Systems](https://arxiv.org/abs/2606.15376) — ch. 6
 - [Code Monitor Red Teaming for Public-Test-Passing Code (Jul 2026)](https://arxiv.org/abs/2607.20852) — ch. 13
 - [CodeCRDT: Observation-Driven Coordination for Multi-Agent LLM Code Generation](https://arxiv.org/abs/2510.18893) — ch. 6
 - [CodeMonkeys (HTML full text)](https://arxiv.org/html/2501.14723v1) — ch. 2
 - [CodeMonkeys: Scaling Test-Time Compute for Software Engineering](https://arxiv.org/abs/2501.14723) — ch. 2, 3, 9, 12
 - [CodeT: Code Generation with Generated Tests](https://arxiv.org/abs/2207.10397) — ch. 2, 8
+- [Codex CLI reference](https://developers.openai.com/codex/cli/reference) — ch. 16
 - [Codex cloud documentation (OpenAI)](https://learn.chatgpt.com/docs/cloud) — ch. 1
+- [Codex non-interactive mode](https://developers.openai.com/codex/noninteractive) — ch. 16
+- [Codex SDK / openai/codex#24777](https://github.com/openai/codex/issues/24777) — ch. 16
 - [Cognition blog: Devin 2.0](https://cognition.com/blog/devin-2) — ch. 10
+- [Commit statuses REST API](https://docs.github.com/en/rest/commits/statuses?apiVersion=2022-11-28) — ch. 18
 - [Continuous Formal Verification of Amazon s2n (CAV 2018)](https://link.springer.com/chapter/10.1007/978-3-319-96142-2_26) — ch. 14
 - [Control Tax: The Price of Keeping AI in Check (Jun 2025, rev. Mar 2026)](https://arxiv.org/abs/2506.05296) — ch. 13
 - [ControlArena GitHub repository](https://github.com/UKGovernmentBEIS/control-arena) — ch. 13
 - [CooperBench: Why Coding Agents Cannot be Your Teammates Yet](https://arxiv.org/abs/2601.13295) — ch. 6
+- [cosmic-ray on PyPI](https://pypi.org/project/cosmic-ray/) — ch. 19
+- [coverage.py on PyPI](https://pypi.org/project/coverage/) — ch. 19
 - [Cross-repository code navigation (Sourcegraph)](https://sourcegraph.com/blog/cross-repository-code-navigation) — ch. 11
 - [Ctrl-Z: Controlling AI Agents via Resampling (Apr 2025)](https://arxiv.org/abs/2504.10374) — ch. 13
 - [Cursor 2.0 blog](https://cursor.com/blog/2-0) — ch. 10
@@ -74,12 +93,14 @@
 - [Cursor docs: Cloud Agents](https://cursor.com/docs/cloud-agent) — ch. 1
 - [DafnyBench: A Benchmark for Formal Software Verification](https://arxiv.org/abs/2406.08467) — ch. 14
 - [dagger/container-use (GitHub)](https://github.com/dagger/container-use) — ch. 1
+- [Datadog Flaky Tests Management](https://docs.datadoghq.com/tests/flaky_management/) — ch. 19
 - [Datadog Test Impact Analysis docs](https://docs.datadoghq.com/tests/test_impact_analysis/) — ch. 11
 - [Daytona snapshots documentation](https://www.daytona.io/docs/en/snapshots/) — ch. 1
 - [Detecting Semantic Conflicts using Static Analysis (arXiv:2310.04269)](https://arxiv.org/abs/2310.04269) — ch. 5
 - [Devin can now Manage Devins (Cognition)](https://cognition.com/blog/devin-can-now-manage-devins) — ch. 1
 - [Dissecting the SWE-Bench Leaderboards](https://arxiv.org/html/2506.17208v2) — ch. 2
 - [Diversity Empowers Intelligence: Integrating Expertise of Software Engineering Agents](https://arxiv.org/abs/2408.07060) — ch. 2
+- [Docker Engine SDKs](https://docs.docker.com/reference/api/engine/sdk/) — ch. 17
 - [Dynamic Scaling of Unit Tests for Code Reward Modeling](https://arxiv.org/abs/2501.01054) — ch. 2
 - [E2B sandbox persistence docs](https://docs.e2b.dev/sandbox/persistence) — ch. 1
 - [Effective Strategies for Asynchronous Software Engineering Agents](https://arxiv.org/abs/2603.21489) — ch. 6
@@ -92,6 +113,7 @@
 - [Factor(U,T): Controlling Untrusted AI by Monitoring their Plans (Dec 2025)](https://arxiv.org/abs/2512.14745) — ch. 13
 - [Finding and fixing software bugs automatically with SapFix and Sapienz](https://engineering.fb.com/2018/09/13/developer-tools/finding-and-fixing-software-bugs-automatically-with-sapfix-and-sapienz/) — ch. 12
 - [Firecracker snapshot support documentation](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/snapshot-support.md) — ch. 1
+- [Firecracker vs Docker (PandaStack)](https://www.pandastack.ai/blog/firecracker-vs-docker/) — ch. 19
 - [Fishtest Mathematics (Stockfish official docs)](https://official-stockfish.github.io/docs/fishtest-wiki/Fishtest-Mathematics.html) — ch. 3
 - [Fixing Performance Regressions Before they Happen — Netflix Tech Blog (2022-01-24)](https://netflixtechblog.com/fixing-performance-regressions-before-they-happen-eab2602b86fe) — ch. 15
 - [Fork, Explore, Commit (v2 full text)](https://arxiv.org/html/2602.08199v2) — ch. 1
@@ -101,16 +123,24 @@
 - [GA: Azure confidential VMs with NVIDIA H100 Tensor Core GPUs](https://techcommunity.microsoft.com/blog/azureconfidentialcomputingblog/general-availability-azure-confidential-vms-with-nvidia-h100-tensor-core-gpus/4242644) — ch. 7
 - [Gandalf: An Intelligent, End-To-End Analytics Service for Safe Deployment (NSDI 2020)](https://www.usenix.org/conference/nsdi20/presentation/li) — ch. 15
 - [gfix](https://www.gfix.space/) — ch. 4
+- [gh attestation verify / Artifact attestations concept](https://cli.github.com/manual/gh_attestation_verify) — ch. 18
 - [git-notes documentation](https://git-scm.com/docs/git-notes) — ch. 4
+- [GitButler ai-agents docs](https://github.com/gitbutlerapp/gitbutler-docs/blob/main/content/docs/ai-agents/parallel-agents.mdx) — ch. 16
 - [GitButler parallel agents docs](https://docs.gitbutler.com/ai-agents/parallel-agents) — ch. 4, 12
-- [GitButler Series A](https://blog.gitbutler.com/series-a) — ch. 4
+- [GitButler push and fetch / Checking out PRs locally / Git Notes Display](https://docs.gitbutler.com/features/virtual-branches/pushing-and-fetching) — ch. 18
+- [GitButler Series A](https://blog.gitbutler.com/series-a) — ch. 4, 20
 - [GitButler's Claude Code tab (Butler's Log)](https://blog.gitbutler.com/agents-tab) — ch. 4
 - [GitHub blog: Introducing Agent HQ](https://github.blog/news-insights/company-news/welcome-home-agents/) — ch. 10
+- [GitHub Check Runs REST API](https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28) — ch. 18
 - [GitHub Docs: Artifact attestations](https://docs.github.com/en/actions/concepts/security/artifact-attestations) — ch. 7
+- [GitHub users/search API; microsoft/Multiverso](https://github.com/microsoft/Multiverso) — ch. 20
 - [github/stack-graphs (archived)](https://github.com/github/stack-graphs) — ch. 11
+- [GitLab external status checks / Gitea AGit](https://docs.gitlab.com/user/project/merge_requests/status_checks/) — ch. 18
 - [gittuf](https://github.com/gittuf/gittuf) — ch. 4
+- [go-git COMPATIBILITY.md](https://github.com/go-git/go-git/blob/main/COMPATIBILITY.md) — ch. 17
 - [Google Kythe (Wikipedia)](https://en.wikipedia.org/wiki/Google_Kythe) — ch. 11
-- [Graphite blog: Series B and Diamond launch](https://graphite.com/blog/series-b-diamond-launch) — ch. 10
+- [GoReleaser releases](https://github.com/goreleaser/goreleaser/releases) — ch. 17
+- [Graphite blog: Series B and Diamond launch](https://graphite.com/blog/series-b-diamond-launch) — ch. 10, 20
 - [Great Models Think Alike and this Undermines AI Oversight](https://arxiv.org/abs/2502.04313) — ch. 3
 - [Greptile blog](https://www.greptile.com/blog) — ch. 10
 - [Hacker News: Indexing Code at Scale with Glean](https://news.ycombinator.com/item?id=42568516) — ch. 11
@@ -119,6 +149,7 @@
 - [Heteroskedastic Signals in Budgeted LLM Verification](https://arxiv.org/pdf/2606.15841) — ch. 3
 - [How we made sandboxed coding agents 10x faster to start (Imbue)](https://imbue.com/blog/containers) — ch. 1
 - [Hyperband: A Novel Bandit-Based Approach to Hyperparameter Optimization](https://arxiv.org/abs/1603.06560) — ch. 12
+- [Hypothesis integrations reference](https://hypothesis.readthedocs.io/en/latest/reference/integrations.html) — ch. 19
 - [ICAN-Deploy: Identity-Stable Canary Deployment for Safety-Critical Embodied Agents](https://arxiv.org/abs/2605.28097) — ch. 15
 - [Identifying Patch Correctness in Test-Based Program Repair (ICSE 2018)](https://arxiv.org/abs/1706.09120) — ch. 8
 - [Imbue blog: Sculptor announce](https://imbue.com/blog/sculptor-announce) — ch. 10
@@ -126,9 +157,12 @@
 - [in-toto and SLSA](https://slsa.dev/blog/2023/05/in-toto-and-slsa) — ch. 12
 - [in-toto attestation spec](https://github.com/in-toto/attestation/blob/main/spec/README.md) — ch. 7
 - [in-toto test-result predicate](https://github.com/in-toto/attestation/blob/main/spec/predicates/test-result.md) — ch. 7
+- [in-toto/go-witness](https://github.com/in-toto/go-witness) — ch. 17
+- [in-toto/in-toto-rs; in-toto/attestation](https://github.com/in-toto/in-toto-rs) — ch. 17
 - [Indexing code at scale with Glean (Meta engineering)](https://engineering.fb.com/2024/12/19/developer-tools/glean-open-source-code-indexing/) — ch. 11
 - [Inference-Time Code Selection via Symbolic Equivalence Partitioning (2026)](https://arxiv.org/abs/2604.06485) — ch. 8
 - [Inference-Time Scaling and Collective Intelligence for Frontier AI (Sakana AI)](https://sakana.ai/ab-mcts/) — ch. 2
+- [InfoQ: Codex CLI Rust rewrite](https://www.infoq.com/news/2025/06/codex-cli-rust-native-rewrite) — ch. 17
 - [Introducing Claude Sonnet 4.5 (Anthropic)](https://www.anthropic.com/news/claude-sonnet-4-5) — ch. 2
 - [Introducing Infinibranch - Morph Cloud docs](https://cloud.morph.so/docs/blog/developers) — ch. 1
 - [Introducing stack graphs (GitHub blog)](https://github.blog/open-source/introducing-stack-graphs/) — ch. 11
@@ -137,7 +171,9 @@
 - [IRIS: LLM-Assisted Static Analysis for Detecting Security Vulnerabilities](https://arxiv.org/abs/2405.17238) — ch. 14
 - [Is Your Code Generated by ChatGPT Really Correct? (EvalPlus)](https://arxiv.org/abs/2305.01210) — ch. 8, 9
 - [jj changelog](https://docs.jj-vcs.dev/latest/changelog/) — ch. 4
+- [jj CHANGELOG](https://github.com/jj-vcs/jj/blob/main/CHANGELOG.md) — ch. 17
 - [jj conflicts docs](https://docs.jj-vcs.dev/latest/conflicts/) — ch. 4
+- [jj contributing docs](https://github.com/jj-vcs/jj/blob/main/docs/contributing.md) — ch. 20
 - [jj discussion #8831](https://github.com/jj-vcs/jj/discussions/8831) — ch. 4
 - [jj Git compatibility docs](https://docs.jj-vcs.dev/latest/git-compatibility/) — ch. 4
 - [jj operation log docs](https://docs.jj-vcs.dev/latest/operation-log/) — ch. 4
@@ -146,6 +182,7 @@
 - [JudgeBench: A Benchmark for Evaluating LLM-based Judges (ICLR 2025)](https://arxiv.org/abs/2410.12784) — ch. 8
 - [Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena / LLM Evaluators Recognize and Favor Their Own Generations](https://arxiv.org/abs/2306.05685) — ch. 2
 - [Jujutsu Governance](https://docs.jj-vcs.dev/latest/governance/governance/) — ch. 4
+- [Jules API | Google for Developers](https://developers.google.com/jules/api) — ch. 16
 - [Jules environment documentation](https://jules.google/docs/environment/) — ch. 1
 - [Keeping Master Green at Scale](https://dl.acm.org/doi/10.1145/3302424.3303970) — ch. 12
 - [Keeping master green at scale — The Morning Paper](https://blog.acolyer.org/2019/04/18/keeping-master-green-at-scale/) — ch. 5
@@ -155,56 +192,80 @@
 - [LaunchDarkly — Guarded rollouts](https://launchdarkly.com/docs/home/releases/guarded-rollouts) — ch. 15
 - [lean4checker (with drat-trim, cake_lpr, Carcara repos)](https://github.com/leanprover/lean4checker) — ch. 14
 - [Learning How Hard to Think: Input-Adaptive Allocation of LM Computation](https://arxiv.org/abs/2410.04707) — ch. 3
+- [Linear MCP / mcp-github-issue / go-task#2324](https://github.com/go-task/task/issues/2324) — ch. 16
 - [LinuxArena: A Control Setting for AI Agents in Live Production Software Environments (Apr 2026)](https://arxiv.org/abs/2604.15384) — ch. 13
+- [Litestream releases / Litestream VFS](https://github.com/benbjohnson/litestream/releases) — ch. 17
 - [LLM Critics Help Catch LLM Bugs (OpenAI, 2024)](https://arxiv.org/abs/2407.00215) — ch. 8
 - [LLM Evaluators Recognize and Favor Their Own Generations (NeurIPS 2024)](https://arxiv.org/abs/2404.13076) — ch. 8
 - [LSIF.dev](https://lsif.dev/) — ch. 11
-- [Managing a merge queue — GitHub Docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) — ch. 5
+- [Managing a merge queue — GitHub Docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) — ch. 5, 18
 - [MARS: Margin-Adversarial Risk-controlled Stopping for Parallel LLM Test-time Scaling](https://arxiv.org/pdf/2606.12935) — ch. 3
 - [Mergify: State of Merge Queues 2026](https://mergify.com/reports/state-of-merge-queues-2026) — ch. 10
 - [Merging a pull request with a merge queue — GitHub Docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/merging-a-pull-request-with-a-merge-queue) — ch. 5
 - [Mergiraf architecture](https://mergiraf.org/architecture.html) — ch. 4
+- [Mergiraf Cargo.toml (Codeberg)](https://codeberg.org/mergiraf/mergiraf) — ch. 20
 - [Mergiraf languages](https://mergiraf.org/languages.html) — ch. 4
+- [Meta Sapling announcement; TechCrunch Antithesis launch](https://engineering.fb.com/2022/11/15/open-source/sapling-source-control-scalable/) — ch. 20
+- [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — ch. 17
+- [multi-swe-bench/multi-swe-bench](https://github.com/multi-swe-bench/multi-swe-bench) — ch. 19
+- [Multiverse Computing Series C (TFN)](https://techfundingnews.com/multiverse-computing-570m-series-c-2-3b-valuation/) — ch. 20
 - [Mutation-Guided LLM-based Test Generation at Meta (FSE 2025)](https://arxiv.org/abs/2501.12862) — ch. 8
+- [mutmut on PyPI](https://pypi.org/project/mutmut/) — ch. 19
 - [Nimbalyst: Vibe Kanban After Bloop](https://nimbalyst.com/blog/vibe-kanban-after-bloop-whats-next/) — ch. 10
 - [Non-stochastic Best Arm Identification and Hyperparameter Optimization](https://arxiv.org/abs/1502.07943) — ch. 3
 - [Notarized Agents: Receiver-Attested Confidential Receipts for AI Agent Actions (arXiv:2606.04193)](https://arxiv.org/abs/2606.04193) — ch. 7
+- [npm/PyPI/crates.io/Homebrew registry APIs (live checks)](https://crates.io/api/v1/crates/multiverso) — ch. 20
 - [One Human, N Agents: Audit-Budget Allocation for LLM Agent Fleets (Jul 2026)](https://arxiv.org/abs/2607.28317) — ch. 13
 - [Open Orchestrators: Augment Code launches Intent](https://openorchestrators.org/news/augment-code-intent-launch/) — ch. 10
+- [OpenAI to acquire Astral](https://openai.com/index/openai-to-acquire-astral/) — ch. 20
 - [OpenAI to Buy Product Testing Startup Statsig for $1.1 Billion — Bloomberg (via Wikipedia OpenAI citation)](https://www.bloomberg.com/news/articles/2025-09-02/openai-to-buy-product-testing-startup-statsig-for-1-1-billion) — ch. 15
+- [opencode CLI and SDK docs](https://opencode.ai/docs/sdk/) — ch. 16
 - [OpenHands runtime architecture docs](https://docs.openhands.dev/openhands/usage/architecture/runtime) — ch. 1
+- [OpenHands SDK metrics guide](https://docs.openhands.dev/sdk/guides/metrics.md) — ch. 16
+- [OpenTofu fork announcement](https://opentofu.org/blog/opentofu-announces-fork-of-terraform/) — ch. 20
 - [OSS-Fuzz docs / LLM fuzz target generation](https://google.github.io/oss-fuzz/research/llms/target_generation/) — ch. 8
 - [Parallel Mode — Aviator MergeQueue docs](https://docs.aviator.co/mergequeue/concepts/parallel-mode) — ch. 5
 - [Phala: GPU TEEs live on OpenRouter](https://phala.com/posts/GPU-TEEs-is-Alive-on-OpenRouter) — ch. 7
 - [Pijul](https://pijul.org/) — ch. 4
 - [Planning In Natural Language Improves LLM Search For Code Generation](https://arxiv.org/abs/2409.03733) — ch. 2
 - [PR Newswire: Antithesis Series A](https://www.prnewswire.com/news-releases/jane-street-leads-antithesiss-105m-series-a-to-make-deterministic-simulation-testing-the-new-standard-302631076.html) — ch. 10
-- [Practical Mutation Testing at Scale](https://arxiv.org/abs/2102.11378) — ch. 8
+- [Practical Mutation Testing at Scale](https://arxiv.org/abs/2102.11378) — ch. 8, 19
 - [Predictive Test Selection](https://arxiv.org/abs/1810.05286) — ch. 3, 5, 11
 - [Probe to Generate: Program Variant-Guided Test Augmentation for Repository-Level Repair Benchmarks](https://arxiv.org/abs/2604.01518) — ch. 8
 - [Project Gating — Zuul documentation](https://zuul-ci.org/docs/zuul/latest/gating.html) — ch. 5, 12
 - [Proof-or-Stop: Don't Trust the Agent, Trust the Evidence (arXiv:2607.14890)](https://arxiv.org/abs/2607.14890) — ch. 7, 12
+- [pytest exit codes reference](https://docs.pytest.org/en/stable/reference/exit-codes.html) — ch. 19
+- [pytest-json-report on PyPI](https://pypi.org/project/pytest-json-report/) — ch. 19
 - [R2E-Gym: Procedural Environments and Hybrid Verifiers for Scaling Open-Weights SWE Agents](https://arxiv.org/abs/2504.07164) — ch. 3, 9, 12
 - [Rapid release at massive scale — Meta Engineering](https://engineering.fb.com/2017/08/31/web/rapid-release-at-massive-scale/) — ch. 15
+- [Rate limits for the REST API](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28) — ch. 18
 - [Rational Metareasoning for Large Language Models](https://arxiv.org/abs/2410.05563) — ch. 3
+- [Rekor v2 GA — Sigstore Blog](https://blog.sigstore.dev/rekor-v2-ga/) — ch. 17
 - [Remote Caching — Bazel documentation](https://bazel.build/remote/caching) — ch. 5
+- [REST API endpoints for repository attestations](https://docs.github.com/en/rest/repos/attestations?apiVersion=2022-11-28) — ch. 18
 - [Rethinking Mixture-of-Agents: Is Mixing Different Large Language Models Beneficial?](https://arxiv.org/abs/2502.00674) — ch. 2
 - [Retrying vs Resampling in AI Control (Redwood Research blog, May 29 2026)](https://blog.redwoodresearch.org/p/retrying-vs-resampling-in-ai-control) — ch. 13
 - [RISC Zero zkVM receipts documentation](https://dev.risczero.com/api/zkvm/receipts) — ch. 14
+- [Run Claude Code programmatically (headless)](https://code.claude.com/docs/en/headless) — ch. 16, 19
 - [S*: Test Time Scaling for Code Generation](https://arxiv.org/abs/2502.14382) — ch. 2, 3
 - [Sacra: Cognition revenue, valuation & funding](https://sacra.com/c/cognition/) — ch. 10
 - [Safely and Quickly Deploying New Features with a Staged Rollout Framework (arXiv:1905.10493)](https://arxiv.org/abs/1905.10493) — ch. 15
 - [Sapling introduction](https://sapling-scm.com/docs/introduction/) — ch. 4
 - [Saving SWE-Bench: A Benchmark Mutation Approach for Realistic Agent Evaluation](https://arxiv.org/abs/2510.08996) — ch. 9
+- [scaleapi/SWE-bench_Pro-os](https://github.com/scaleapi/SWE-bench_Pro-os) — ch. 19
 - [Scaling LLM Inference with Optimized Sample Compute Allocation](https://arxiv.org/abs/2410.22480) — ch. 3
 - [Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters](https://arxiv.org/abs/2408.03314) — ch. 12
 - [Scaling Static Analyses at Facebook (CACM 2019)](https://research.facebook.com/publications/scaling-static-analyses-at-facebook/) — ch. 14
 - [Secure code more than three times faster with Copilot Autofix](https://github.blog/news-insights/product-news/secure-code-more-than-three-times-faster-with-copilot-autofix/) — ch. 14
+- [SecurityWeek: Chainguard Series D](https://www.securityweek.com/chainguard-raises-hefty-356m-series-d-at-3-5-billion-valuation/) — ch. 20
 - [Selecting Computations: Theory and Applications (UAI 2012)](https://arxiv.org/abs/1408.2048) — ch. 3
 - [Semantic Voting: Execution-Grounded Consensus for LLM Code Generation (2026)](https://arxiv.org/abs/2605.08680) — ch. 8
 - [Semantic-based Automated Reasoning for AWS Access Policies using SMT (FMCAD 2018)](https://www.amazon.science/publications/semantic-based-automated-reasoning-for-aws-access-policies-using-smt) — ch. 14
 - [SHADE-Arena: Evaluating Sabotage and Monitoring in LLM Agents (Anthropic et al., Jun 2025)](https://arxiv.org/abs/2506.15740) — ch. 13
 - [Sigstore security model](https://docs.sigstore.dev/about/security/) — ch. 7
+- [sigstore/cosign CONTRIBUTING.md; OpenSSF Sigstore page](https://github.com/sigstore/cosign/blob/main/CONTRIBUTING.md) — ch. 20
+- [sigstore/sigstore-go](https://github.com/sigstore/sigstore-go) — ch. 17
+- [sigstore/sigstore-rs](https://github.com/sigstore/sigstore-rs) — ch. 17
 - [SiliconANGLE: Baz Planner and funding](https://siliconangle.com/2026/06/29/exclusive-agentic-coding-startup-baz-brings-code-reviews-planning-stage-extends-seed-funding-17m/) — ch. 10
 - [Slashing CI Costs at Uber — Uber Blog](https://www.uber.com/blog/slashing-ci-costs-at-uber/) — ch. 5
 - [SLSA v1.0 Provenance specification](https://slsa.dev/spec/v1.0/provenance) — ch. 15
@@ -212,8 +273,11 @@
 - [Software Engineering at Google, ch. 23 (Continuous Integration)](https://abseil.io/resources/swe-book/html/ch23.html) — ch. 5
 - [sourcegraph/scip repository](https://github.com/sourcegraph/scip) — ch. 11
 - [spinnaker/kayenta GitHub repository](https://github.com/spinnaker/kayenta) — ch. 15
+- [SQLite Write-Ahead Logging](https://sqlite.org/wal.html) — ch. 17
+- [StrykerJS incremental mode](https://stryker-mutator.io/docs/stryker-js/incremental/) — ch. 19
 - [SWE-ABS: Adversarial Benchmark Strengthening Exposes Inflated Success Rates on Test-based Benchmark](https://arxiv.org/abs/2603.00520) — ch. 9
-- [SWE-bench Goes Live! / microsoft/SWE-bench-Live](https://github.com/microsoft/SWE-bench-Live) — ch. 9
+- [SWE-bench Goes Live! / microsoft/SWE-bench-Live](https://github.com/microsoft/SWE-bench-Live) — ch. 9, 19
+- [SWE-bench Multilingual; Multi-SWE-bench (arXiv:2504.02605)](https://www.swebench.com/multilingual.html) — ch. 17
 - [SWE-Bench Pro: Can AI Agents Solve Long-Horizon Software Engineering Tasks?](https://arxiv.org/abs/2509.16941) — ch. 9
 - [SWE-Bench+: Enhanced Coding Benchmark for LLMs](https://arxiv.org/abs/2410.06992) — ch. 9
 - [SWE-Lancer: Can Frontier LLMs Earn $1 Million from Real-World Freelance Software Engineering?](https://arxiv.org/abs/2502.12115) — ch. 9
@@ -237,6 +301,7 @@
 - [Verify the Safety of the Rust Standard Library (AWS blog)](https://aws.amazon.com/blogs/opensource/verify-the-safety-of-the-rust-standard-library/) — ch. 14
 - [VERINA: Benchmarking Verifiable Code Generation](https://arxiv.org/abs/2505.23135) — ch. 14
 - [Verus publications and projects](https://verus-lang.github.io/verus/publications-and-projects/) — ch. 14
+- [Webhook events and payloads / Best practices for using webhooks](https://docs.github.com/en/webhooks/webhook-events-and-payloads) — ch. 18
 - [When To Solve, When To Verify: Compute-Optimal Problem Solving and Generative Verification for LLM Reasoning](https://arxiv.org/abs/2504.01005) — ch. 3
 - [Why SWE-bench Verified no longer measures frontier coding capabilities (OpenAI)](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/) — ch. 9
 - [Wider or Deeper? Scaling LLM Inference-Time Compute with Adaptive Branching Tree Search](https://arxiv.org/abs/2503.04412) — ch. 3, 12
