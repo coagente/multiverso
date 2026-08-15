@@ -17,6 +17,13 @@ const (
 	GateNoFailedTests     = "no-failed-tests"
 	GateCoverageAtLeast   = "coverage-at-least"
 	GateSuitePass         = "suite-pass" // v0 dialect only
+	// M1f. paths-unmodified is the one gate whose evidence the adversary
+	// provably cannot author: it compares tree blob hashes the control
+	// plane holds. skips-not-above exists because tests_skipped was
+	// recorded in every suite receipt since M1e and no gate in the closed
+	// vocabulary could read it — the study's third vector, unreadable.
+	GatePathsUnmodified = "paths-unmodified"
+	GateSkipsNotAbove   = "skips-not-above"
 )
 
 // Ranking keys. gate_pass is an implicit FIRST key and world_digest_asc an
@@ -46,6 +53,17 @@ const (
 	MetricCoverageBP          = "coverage_bp"
 	MetricTestsFailedFirstRun = "tests_failed_first_run"
 	MetricTestsPassedAfterRun = "tests_passed_after_rerun"
+
+	// M1f tree-guard metrics. Every one of them is derived from two git
+	// trees the control plane holds: no candidate authors these numbers in
+	// any regime (the metric provenance table).
+	MetricProtectedModified = "protected_modified"
+	MetricProtectedDeleted  = "protected_deleted"
+	MetricProtectedAdded    = "protected_added"
+	MetricHarnessModified   = "harness_modified"
+	MetricHarnessDeleted    = "harness_deleted"
+	MetricHarnessAdded      = "harness_added"
+	MetricPathsExamined     = "paths_examined"
 )
 
 // Oracle kinds (the registry's closed key space) and the correlation
@@ -54,9 +72,16 @@ const (
 	KindCommand       = "command"
 	KindPytestCollect = "pytest-collect"
 	KindPytestSuite   = "pytest-suite"
+	// KindTreeGuard is a registry kind, not a special case in Decide (M1f
+	// decision 8): its receipt carries violation counts as metrics and the
+	// violation list as a CAS artifact, so ladder ordering, the explain
+	// table, the ESCALATE payload, admission re-gating, replay and
+	// publication all work for free.
+	KindTreeGuard = "tree-guard"
 
 	FamilySuite   = "suite"
 	FamilyCollect = "collect"
+	FamilyTree    = "tree"
 )
 
 // DefaultPytestPrefix is the runner prefix a pytest-kind oracle resolves to
@@ -79,6 +104,15 @@ var gateDefs = map[string]gateDef{
 	GateCollectedNotBelow: {metrics: []string{MetricCollectedDelta}, threshold: true},
 	GateNoFailedTests:     {metrics: []string{MetricTestsFailed, MetricTestsErrored}},
 	GateCoverageAtLeast:   {metrics: []string{MetricCoverageBP}, threshold: true},
+	GatePathsUnmodified: {metrics: []string{
+		MetricProtectedModified, MetricProtectedDeleted, MetricProtectedAdded,
+		MetricHarnessModified, MetricHarnessDeleted, MetricHarnessAdded,
+		MetricPathsExamined,
+	}},
+	// skips-not-above TAKES a parameter, so threshold == 0 is legal and
+	// meaningful ("no skipped tests at all"): M1e validation rule 5's
+	// "threshold must be 0 when the predicate takes none" does not apply.
+	GateSkipsNotAbove: {metrics: []string{MetricTestsSkipped}, threshold: true},
 }
 
 // keyDef declares a ranking key's direction and, for metric-bearing keys,
@@ -109,7 +143,12 @@ type kindDef struct {
 }
 
 var kindDefs = map[string]kindDef{
-	KindCommand:       {family: FamilySuite},
+	KindCommand: {family: FamilySuite},
+	KindTreeGuard: {family: FamilyTree, metrics: []string{
+		MetricProtectedModified, MetricProtectedDeleted, MetricProtectedAdded,
+		MetricHarnessModified, MetricHarnessDeleted, MetricHarnessAdded,
+		MetricPathsExamined,
+	}},
 	KindPytestCollect: {family: FamilyCollect, metrics: []string{MetricCollectedTotal, MetricCollectedBase, MetricCollectedDelta}},
 	KindPytestSuite: {family: FamilySuite, metrics: []string{
 		MetricTestsTotal, MetricTestsPassed, MetricTestsFailed, MetricTestsErrored,
@@ -133,6 +172,47 @@ func KnownKinds() []string { return sortedKeys(kindDefs) }
 func KnownBases() []string {
 	return []string{object.BasisConstruction, object.BasisDependency, object.BasisProbabilistic}
 }
+
+// Evidence regime selection (M1f decision 13). RegimeAuto is the compiled
+// default and picks `isolated` when the tier is T1 and the platform
+// supplies a distinct oracle uid, `streamed` otherwise. The default tier
+// is T0, so THE DEFAULT REGIME ON A LAPTOP IS `streamed` — said loudly
+// here and printed by `mvo explain`, because a guarantee nobody can see
+// the absence of is a guarantee nobody has.
+const RegimeAuto = "auto"
+
+// Cross-source agreement (M1f decision 9). "require" is the compiled
+// default: honest runs agree, and disagreement is `status = error` —
+// brittleness escalates, it never convicts and never acquits.
+const (
+	CrosscheckRequire = "require"
+	CrosscheckOff     = "off"
+)
+
+// Entry-point plugin autoloading inside the oracle run. AutoloadOff is the
+// compiled default and the seal the red team's entry-point attack needed:
+// pytest imports pytest11 entry points from any *.egg-info / *.dist-info on
+// sys.path, the candidate tree root is on sys.path, and the plugin module
+// can be called anything — so the harness glob set cannot close it and
+// PYTEST_DISABLE_PLUGIN_AUTOLOAD must. AutoloadOn is the escape hatch for
+// suites that genuinely need an installed plugin, and it is a pinned,
+// attested policy choice with a stated cost.
+const (
+	AutoloadOff = "off"
+	AutoloadOn  = "on"
+)
+
+// KnownRegimes returns the legal evidence.regime values, sorted.
+func KnownRegimes() []string {
+	return []string{RegimeAuto, object.RegimeInTree, object.RegimeIsolated, object.RegimeStreamed}
+}
+
+// KnownCrosschecks returns the legal evidence.crosscheck values, sorted.
+func KnownCrosschecks() []string { return []string{CrosscheckOff, CrosscheckRequire} }
+
+// KnownPluginAutoload returns the legal evidence.plugin_autoload values,
+// sorted.
+func KnownPluginAutoload() []string { return []string{AutoloadOff, AutoloadOn} }
 
 // KindFamily returns the correlation family a kind's receipts carry.
 func KindFamily(kind string) string { return kindDefs[kind].family }

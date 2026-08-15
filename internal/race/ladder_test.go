@@ -34,6 +34,11 @@ func fakePython(t *testing.T, reportPytest bool) string {
 	if !reportPytest {
 		probe = `{}`
 	}
+	// Since M1f it also plays the part of the control-plane plugin: when
+	// the evidence channel is present it writes the framed stream the
+	// oracle derives its metrics from. That is the point — the
+	// orchestrator tests exercise the REAL severed evidence path, with no
+	// pytest and no plugin installed anywhere.
 	script := `#!/bin/sh
 if [ "$1" = "-c" ]; then printf '%s\n' '` + probe + `'; exit 0; fi
 collect=""
@@ -46,7 +51,30 @@ for a in "$@"; do
 done
 n=2
 if [ -f x.txt ] && [ "$(cat x.txt)" = "still-broken" ]; then n=1; fi
-if [ -n "$collect" ]; then echo "$n tests collected in 0.01s"; exit 0; fi
+emit() { if [ -n "$MVO_EVIDENCE_STREAM" ]; then printf '%s' "$1" >> "$MVO_EVIDENCE_STREAM"; fi; }
+emit "mvo-evidence/v0	$MVO_EVIDENCE_NONCE
+1	session_start	{\"pid\":1}
+"
+if [ -n "$collect" ]; then
+  echo "$n tests collected in 0.01s"
+  emit "2	collected	{\"count\":$n}
+3	session_finish	{\"duration_ms\":10,\"errored\":0,\"exitstatus\":0,\"failed\":0,\"passed\":0,\"skipped\":0,\"total\":0}
+"
+  exit 0
+fi
+emit "2	collected	{\"count\":$n}
+"
+seq=2
+i=1
+while [ "$i" -le "$n" ]; do
+  seq=$((seq+1))
+  emit "$seq	test	{\"duration_ms\":1,\"nodeid\":\"t.py::t$i\",\"outcome\":\"passed\",\"run\":1}
+"
+  i=$((i+1))
+done
+seq=$((seq+1))
+emit "$seq	session_finish	{\"duration_ms\":100,\"errored\":0,\"exitstatus\":0,\"failed\":0,\"passed\":$n,\"skipped\":0,\"total\":$n}
+"
 if [ -n "$junit" ]; then
   printf '<testsuite name="p" tests="%s" failures="0" errors="0" skipped="0" time="0.100"></testsuite>' "$n" > "$junit"
 fi
@@ -460,7 +488,12 @@ func TestRequireEvidenceEscalatesWhenTheRequiredSourceWasUnavailable(t *testing.
 	if extra == nil {
 		t.Fatalf("the required oracle produced no metric-less receipt: %d receipts", len(res.Worlds[0].Receipts))
 	}
-	if extra.Result.Status != "pass" {
-		t.Errorf("the required oracle's receipt status = %q, want pass (an absent source is not a failing run)", extra.Result.Status)
+	// M1f rule S1 supersedes M1e's "an absent source is not a failing
+	// run": a process that exited 0 with NO usable evidence stream is
+	// `error`, never `pass`. The cheapest attack on a streaming oracle is
+	// to silence the plugin, and silence must buy a failed gate.
+	if extra.Result.Status != "error" {
+		t.Errorf("the required oracle's receipt status = %q, want error (S1: a 0-exit with no usable stream is never a pass)",
+			extra.Result.Status)
 	}
 }

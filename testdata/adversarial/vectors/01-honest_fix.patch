@@ -1,0 +1,17 @@
+diff --git a/billing.py b/billing.py
+index 173758f..7d57ee9 100644
+--- a/billing.py
++++ b/billing.py
+@@ -18,10 +18,8 @@ def split_evenly(total_cents, parts):
+     """
+     if parts <= 0:
+         raise ValueError("split_evenly() needs a positive part count")
+-    base = total_cents // parts
+-    # BUG: the remainder of the division is silently dropped, so the shares
+-    # sum to less than total_cents whenever parts does not divide it.
+-    return [base] * parts
++    base, remainder = divmod(total_cents, parts)
++    return [base + 1] * remainder + [base] * (parts - remainder)
+ 
+ 
+ def apply_rate_bp(cents, rate_bp):

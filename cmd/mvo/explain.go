@@ -75,6 +75,13 @@ type explainReport struct {
 	Freshness       string                `json:"freshness"`
 	FreshnessDetail string                `json:"freshness_detail"`
 	Diffs           []explainDiff         `json:"diffs,omitempty"`
+	// Evidence regime (M1f): additive on the report, as with audit. It is
+	// UNCONDITIONAL because a reader must not have to know that T0 means
+	// `streamed` — the whole failure the study found was a guarantee
+	// nobody could see the absence of.
+	EvidenceRegime  string `json:"evidence_regime"`
+	EvidencePlugin  string `json:"evidence_plugin"`
+	EvidenceTier    string `json:"evidence_tier"`
 	receiptByDigest map[string]object.Receipt
 }
 
@@ -173,6 +180,7 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	for _, e := range dec.Evidence {
 		rep.Evidence = append(rep.Evidence, evidenceRow(rep.receiptByDigest, e))
 	}
+	rep.EvidenceRegime, rep.EvidencePlugin, rep.EvidenceTier = observedRegime(rep.receiptByDigest, dec.Evidence)
 	if *diffs > 0 {
 		rep.Diffs = candidateDiffs(ws, rep.Candidates, *diffs)
 	}
@@ -188,6 +196,55 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	}
 	writeExplain(stdout, rep)
 	return nil
+}
+
+// observedRegime reports how the decision's evidence was observed. Every
+// receipt of one decision runs under one regime, so the first that names
+// one answers for all; a pre-M1f ledger names none and the line is
+// omitted rather than guessed at.
+func observedRegime(byDigest map[string]object.Receipt, evidence []string) (regime, plugin, tier string) {
+	for _, dig := range evidence {
+		rec, ok := byDigest[dig]
+		if !ok || rec.Execution.EvidenceRegime == "" {
+			continue
+		}
+		if rec.Execution.EvidenceRegime == object.RegimeControlPlane && regime != "" {
+			continue // the guard observes nothing; it never speaks for the run
+		}
+		regime, plugin, tier = rec.Execution.EvidenceRegime, rec.Execution.EvidencePlugin, rec.Execution.IsolationTier
+		if plugin != "" {
+			return regime, plugin, tier
+		}
+	}
+	return regime, plugin, tier
+}
+
+// invariantsDeclared reports whether the policy declared any invariant.
+// The column appears only then, so an M1e-policy golden is unchanged.
+func invariantsDeclared(cands []race.CandidateTrace) bool {
+	for _, c := range cands {
+		if len(c.Invariants) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// invariantCell renders one candidate's invariant column.
+func invariantCell(c race.CandidateTrace) string {
+	worst := "ok"
+	for _, inv := range c.Invariants {
+		switch inv.Result {
+		case race.InvariantViolated:
+			return "VIOLATED"
+		case race.InvariantNotEvaluated:
+			worst = "n/a"
+		}
+	}
+	if len(c.Invariants) == 0 {
+		return "n/a"
+	}
+	return worst
 }
 
 // raceWindow assembles a race decision's replay inputs exactly as audit does:
@@ -301,6 +358,19 @@ func writeExplain(w io.Writer, rep explainReport) {
 		name = "-"
 	}
 	fmt.Fprintf(w, "policy:    %s  (%s, %s)\n", rep.Policy.Digest, name, policy.SchemaShort(rep.Policy.Schema))
+	if rep.EvidenceRegime != "" {
+		plugin := rep.EvidencePlugin
+		if plugin == "" {
+			plugin = "none"
+		}
+		// The tier parenthetical is load-bearing: a reader must not have
+		// to know that T0 means `streamed`, nor be left to assume that a
+		// stronger regime was available and declined. `isolated` is
+		// defined and NOT deliverable by this binary, so the sentence
+		// says that rather than pointing at a flag that would not help.
+		fmt.Fprintf(w, "evidence:  regime %s (%s; isolated not deliverable in this binary), plugin %s\n",
+			rep.EvidenceRegime, tierText(rep.EvidenceTier), plugin)
+	}
 	if rep.Winner != "" {
 		// An ESCALATE has a leader, not a winner: the ranking put it first,
 		// and a policy rule refused to call that a decision. Naming it
@@ -317,6 +387,24 @@ func writeExplain(w io.Writer, rep explainReport) {
 		fmt.Fprintf(w, "%s %s\n", label, rep.Winner)
 	}
 
+	writeInvariantDetail := func() {
+		var lines []string
+		for _, c := range rep.Candidates {
+			for _, inv := range c.Invariants {
+				if inv.Result == race.InvariantViolated {
+					lines = append(lines, fmt.Sprintf("  %s  %s  VIOLATED  %s", c.World, inv.Name, inv.Detail))
+				}
+			}
+		}
+		if len(lines) == 0 {
+			return
+		}
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "invariants:")
+		for _, line := range lines {
+			fmt.Fprintln(w, line)
+		}
+	}
 	if len(rep.Candidates) > 0 {
 		fmt.Fprintln(w, "")
 		fmt.Fprintln(w, "gates (ordered, first failure stops the ladder):")
@@ -325,12 +413,18 @@ func writeExplain(w io.Writer, rep explainReport) {
 		for _, g := range rep.Policy.Gates {
 			header = append(header, g.Label)
 		}
+		if invariantsDeclared(rep.Candidates) {
+			header = append(header, "INVARIANTS")
+		}
 		header = append(header, "RESULT")
 		fmt.Fprintln(tw, strings.Join(header, "\t"))
 		for _, c := range rep.Candidates {
 			row := []string{fmt.Sprintf("  %d", c.Rank), c.World, fmt.Sprintf("%d", c.Ordinal)}
 			for _, g := range c.Gates {
 				row = append(row, gateCell(g, rep.gateMetrics(g)))
+			}
+			if invariantsDeclared(rep.Candidates) {
+				row = append(row, invariantCell(c))
 			}
 			result := "FAIL"
 			if c.Pass {
@@ -341,6 +435,7 @@ func writeExplain(w io.Writer, rep explainReport) {
 		}
 		_ = tw.Flush()
 	}
+	writeInvariantDetail()
 
 	if len(rep.Trace) > 0 && rep.Winner != "" {
 		// An escalated race was not decided. Titling its ranking walk "why X
@@ -514,4 +609,13 @@ func evidenceNote(e explainEvidence) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, e.Metrics[k]))
 	}
 	return "  (" + strings.Join(parts, ", ") + ")"
+}
+
+// tierText names the isolation tier for the evidence line; a pre-M1c
+// receipt that recorded none says so rather than being guessed at.
+func tierText(tier string) string {
+	if tier == "" {
+		return "tier unrecorded"
+	}
+	return tier
 }

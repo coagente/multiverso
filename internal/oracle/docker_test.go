@@ -88,7 +88,7 @@ func openT1World(t *testing.T) backend.World {
 	if err != nil {
 		t.Fatalf("backend.New: %v", err)
 	}
-	w, err := b.Open(context.Background(), t.TempDir())
+	w, err := b.Open(context.Background(), t.TempDir(), backend.OpenOpts{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

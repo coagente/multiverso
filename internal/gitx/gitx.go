@@ -199,6 +199,52 @@ func WriteTree(dir string) (string, error) {
 	return TreePrefix + out, nil
 }
 
+// WriteTreeTemp snapshots dir's WORKING TREE as a git tree object through
+// a TEMPORARY index, and returns its TreePrefix-ed digest.
+//
+// The temporary index is the point (M1f): the tree-guard must be able to
+// ask "what does this worktree contain right now" without touching the
+// index the caller owns — an operator's staged work in `mvo guard`, or a
+// world's index that AG-4's patch capture is about to read. GIT_INDEX_FILE
+// points at a scratch file that is removed afterwards, and .gitignore
+// semantics stay exactly what `git add -A` sees, so the guard's view of
+// the tree and the captured patch's view of it cannot drift.
+func WriteTreeTemp(dir string) (string, error) {
+	tmp, err := os.CreateTemp("", "mvo-index-")
+	if err != nil {
+		return "", fmt.Errorf("gitx: temp index: %w", err)
+	}
+	idx := tmp.Name()
+	_ = tmp.Close()
+	// git refuses to read a zero-length file as an index, so start clean.
+	_ = os.Remove(idx)
+	defer os.Remove(idx)
+
+	env := append(gitEnv(), "GIT_INDEX_FILE="+idx)
+	runIdx := func(args ...string) (string, error) {
+		full := append(append([]string{}, baseArgs...), args...)
+		cmd := exec.Command("git", full...)
+		cmd.Dir = dir
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("gitx: git %s in %s: %w: %s",
+				strings.Join(args, " "), dir, err, strings.TrimSpace(stderr.String()))
+		}
+		return strings.TrimSpace(stdout.String()), nil
+	}
+	if _, err := runIdx("add", "-A"); err != nil {
+		return "", err
+	}
+	out, err := runIdx("write-tree")
+	if err != nil {
+		return "", err
+	}
+	return TreePrefix + out, nil
+}
+
 // AddAll stages everything in dir's worktree (git add -A), untracked files
 // included. Idempotent. Staging before diffing is what makes control-plane
 // diff capture see files the agent created (AG-4).
@@ -541,6 +587,36 @@ func LsTreeRecursive(repo, treeish string) ([]TreeEntry, error) {
 		entries = append(entries, TreeEntry{Mode: fields[0], Type: fields[1], SHA: fields[2], Name: name})
 	}
 	return entries, nil
+}
+
+// IgnoredFiles lists the repo-relative paths that exist in dir's working
+// tree but that git's exclude rules keep OUT of `git add -A` — and
+// therefore out of WriteTreeTemp's snapshot.
+//
+// The tree-guard compares git trees, which is what makes its evidence
+// unforgeable; the cost is that everything it can see has to be something
+// `git add -A` would stage. pytest has no such rule: it loads a
+// `conftest.py` that `.gitignore` names, and `.gitignore` is a file a
+// candidate may edit. Without this list `mvo guard` reports a clean tree
+// while a live harness file sits in it, which is a false clean verdict on
+// the one verb an evaluating maintainer runs before adopting anything.
+func IgnoredFiles(dir string) ([]string, error) {
+	// Deliberately NOT --directory: an ignored directory collapsed to one
+	// entry hides the very file this exists to find (a `*.egg-info/`
+	// carrying a pytest11 entry point is the worked example). Listing
+	// every ignored path is one git process, and being right matters more
+	// here than being brief.
+	out, err := run(dir, "ls-files", "--others", "--ignored", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, nil
 }
 
 // CatBlob returns the raw bytes of a blob object — no trimming (the bytes

@@ -2,6 +2,322 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-15 — M1f: moving the trust boundary
+
+**We red-teamed our own fix and it lost twice.** M1f shipped that morning
+claiming the candidate no longer writes its own evidence. By the afternoon an
+adversarial pass had landed **two** forgeries on trunk under the **shipped
+default policy**, each with `mvo verify HEAD` → `OK: attestation verified
+(7 checks)` and `mvo audit` → `OK`, and each with the bug fully intact. Both
+went in through the same door, and the door was a sentence in our own design
+doc that was simply false.
+
+**Decision 16 said the harness path set closes the entry-point-plugin
+surface. It does not, and it never could.** pytest imports `pytest11` entry
+points from *any* `*.egg-info` or `*.dist-info` directory on `sys.path`; the
+candidate's tree root is on `sys.path` when the oracle runs `python3 -m
+pytest`; and the module such metadata names may be called **anything**. A path
+set is a finite list of globs. "Any module named by any metadata directory" is
+not glob-shaped, so no version of the protected-paths gate was ever going to
+catch it — the tree-guard passed `evilmod.py` and `evil.egg-info/` as ordinary
+allowed additions, `harness_added=0`, `protected_modified=0`. The plugin loaded
+*after* `-p mvo_evidence`, in the same interpreter, popped
+`MVO_EVIDENCE_STREAM`/`_NONCE` out of the environment so our own observer
+configured inert, and authored a complete self-consistent forged stream, a
+matching JUnit file at the argv `--junit-xml` path, and `exitstatus = 0`. The
+suite receipt then recorded `evidence_regime: streamed`, `evidence_plugin:
+sha256:69b4301…` — **the honest embedded plugin's digest** — and
+`tests_passed: 8`. The label did the laundering, exactly as the study said it
+would: `execution.evidence_plugin` was an embedded constant, never re-derived
+from whatever actually wrote the bytes.
+
+**The fix is a capability removal, not a better glob.** Oracle pytest runs now
+carry `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, so the only plugins that load are the
+ones mvo names on argv. It is a policy field — `evidence.plugin_autoload`,
+`""` ⇒ `"off"`, tri-state for decision 4's reason — because sealing autoload
+is not free: a suite that genuinely needs `pytest-asyncio` or `pytest-django`
+collects nothing without it. `"on"` is the escape hatch, and it is a pinned,
+attested choice with a stated cost, the same shape as `crosscheck: "off"`.
+Depth behind it: `**/*.egg-info/**` and `**/*.dist-info/**` join the default
+harness set, so a candidate that ships distribution metadata into a repo that
+had none also dies at rung O-1, where a reviewer can see it. Both defences are
+under live test — the attack is now corpus vector `13-entrypoint_plugin`, it
+dies at the guard under the shipped default, and under `no-paths.json` (guard
+gate, guard oracle and invariant all absent) its plugin never loads at all and
+the receipt carries the real numbers: `tests_total=8, tests_failed=2,
+tests_passed=6`, REJECT at `status-pass@suite`. That second run is the only
+measurement in the corpus that exercises the evidence path, which is the whole
+reason the vector was worth adding rather than patching around.
+
+**The second break does not have a fix, so it has a row in the table
+instead.** `collect-equals-suite-total` was sold as the answer to the study's
+signature failure — a three-test repo reporting a 500-test suite. Make both
+oracles lie *consistently* and the invariant holds: the red team's second
+patch forged `collected=500` on the collect run (winning the stdout
+cross-check by writing a trailing `500 tests collected in 0.01s` at `atexit`,
+because `parseCollected` takes the last matching line and `atexit` runs after
+pytest's summary) and `tests_total=500, tests_passed=500` on the suite run, and
+`mvo explain` printed `INVARIANTS: ok` over an 8-test repository whose real
+suite is `2 failed, 6 passed`. **A cross-check between two sources both
+produced inside the trust boundary cannot detect a coherent forgery.** What
+the invariant actually buys is the careless adversary who forges one number
+and forgets the other — real, common, and why vector 09 was caught under M1e —
+and it is now written down as exactly that, in the design doc's decision 10,
+in the README's table and in `docs/concepts.md`. The 500-in-3 row is split:
+**DETECTED** when incoherent, **OPEN** when not. Closing it needs a count
+derived outside the test process — control-plane static AST collection — and
+that is not in M1.
+
+**`mvo guard`, the verb we pitch as the adoption wedge, was blind to
+`.gitignore`.** It snapshots the working tree through `git add -A`, which
+honours the in-tree ignore rules; pytest does not. A `conftest.py` physically
+present in the tree and named by `.gitignore` produced `examined: 1 path(s)`
+and `OK: no protected or harness path was modified` — a false clean verdict
+from the one command an evaluating maintainer runs to decide whether to trust
+the gate at all. The race path was already defended (a force-applied file is
+in the world's index, and the drift between that tree and a fresh snapshot is
+a `tree_drift`), which is why the gap was only ever in the advisory verb.
+`mvo guard` now lists such files as `IGNORED:` and refuses to print the clean
+verdict (`INCOMPLETE:`, exit 1), and `**/.gitignore` joins the harness set —
+it decides what the guard is able to see, which makes it harness in the
+sharpest sense available.
+
+**Three CAS references were outside the sweep, and each was a blob you could
+delete under an `OK`.** `execution.evidence_plugin` (decision 14 calls the
+plugin digest "an auditable fact, not a version guess"; a fact nothing
+re-reads is a version guess with a colon in it), `baseline.recorded`'s evidence
+stream (the observation record for `collected_base`, the denominator
+`collected-not-below` divides by — it was in CAS, referenced by nothing, and
+inflating `cas_unreferenced`), and `agent.finished.stderr` (named in no other
+event, and the only place a `CONFIG_ERROR` world's reason survives). All three
+are in the normative table now, all three are in the missing-injection test,
+and a two-race workspace that used to report `cas_unreferenced: 4` reports
+`0`.
+
+**`mvo audit` printed `OK:` and then failed.** `--require-decisions N` — the
+one flag decision 23 added for CI, whose entire purpose is to be scraped —
+was checked *after* the output block, so an empty workspace produced
+`OK: 2 events, 0 decisions replayed …` on stdout followed by exit 1. Any CI
+check keyed on `OK:` read a failed audit as a pass. The check is in the guard
+now and the failure prints `SHORTFALL:`. And `--key`, which the contract's CLI
+section specifies and the sweep section promises, did not exist:
+`mvo audit --key foo.pub` exited 2 with `flag provided but not defined`. It
+exists, an unreadable anchor is refused rather than silently downgraded, and
+both the human line and the JSON name which anchor was used — because
+"verified" against the workspace's own key is a **self-check a rogue clone
+reproduces**, which is precisely the confusion the study documented.
+
+**Two guard-receipt bugs that put false statements into signed rationales.**
+`result.detail` took `violations[0].Path` from a list sorted by `(kind, path)`,
+so the contract's "lexicographically first offending path" named the wrong
+file whenever the two orders disagreed — and the correct implementation,
+`GuardReport.FirstOffender`, was sitting there as dead code. And `tree_drift`
+incremented `protected_modified` with an empty path, so a receipt read
+`protected_modified=1 … (first: -)` when nothing protected had been touched.
+Drift is machinery — "an earlier oracle wrote into the tree, or something
+raced us" — and it is reachable: `11-cross_world_sabotage` mutates sibling
+worlds' trees, so an honest victim would have been convicted of editing a file
+it never touched. It now yields `status = error` with metrics **absent**, the
+same shape as an unreadable tree, and escalates as machinery.
+
+**And one that would have failed an honest repository on its first race.**
+`streamEnv` emitted an absolute `PYTHONPATH=<plugin dir>`; `os/exec`
+deduplicates env keys keeping the last, so appending that to `os.Environ()`
+silently discarded the operator's `PYTHONPATH` on every T0 run under the
+shipped default. A src-layout repo, an uninstalled package, or any repo whose
+tests import through `PYTHONPATH` would have collected zero tests on the very
+first race a new user ran, and blamed us for it correctly. It is prepended
+now. On T1 nothing is inherited by construction — the image owns its
+environment as it owns `PATH` — and that is stated in the contract rather than
+papered over.
+
+**The quickstart had gone factually false again, in the opposite direction.**
+The study's finding was two false sentences about what `mvo audit` checks; the
+fix made audit stronger and nobody re-read the page, so it now told readers
+that audit *does not* sweep CAS, printed transcripts showing `OK` after
+deleting an attestation blob (both are exit 1 today, asserted by step 9a),
+pinned the M1e default policy digest, taught a three-gate ladder ranked by
+`wall_ms_asc`, and listed a closed gate vocabulary missing two of its members.
+Every one of those is re-recorded against the shipped binary. **Step 3p is the
+part that matters**: accept.sh now greps the reader-facing pages for the
+current default digest, the known-gate list, and the absence of the retracted
+sweep claim. A grep is a poor proof of correctness and a perfectly good proof
+of non-rot, which is the failure that has now happened twice.
+
+**Smaller, and all of them real.** `testdata/toyrepo/policies/sealed.json`
+declared `evidence.regime: "isolated"`, a regime this binary cannot deliver,
+so the shipped example the docs point at validated clean, installed as the
+workspace default, and then refused every race — a workspace bricked by a file
+we told people to read. It is `"auto"` now, `mvo policy use` refuses an
+undeliverable regime at install time in the same sentence `race` used to
+produce, and accept.sh step 3q installs and races it. `mvo policy list`'s
+adoption hint disappeared for an operator who had run the first of its two
+commands and not the second, leaving them half-adopted and unprompted; it keys
+on the pin alone now and prints the remaining command with a `--dir`-correct
+path. `mvo explain`'s evidence line gained the tier parenthetical the contract
+calls load-bearing, in the form that is true today — `regime streamed
+(T0-worktree; isolated not deliverable in this binary)` — rather than pointing
+at a `--tier T1` that would not help. And the contract itself stopped
+presenting work that did not ship: acceptance steps 3l/3m/3n/11,
+`patches-forge-deep/` and `testdata/plainrepo/` are marked NOT SHIPPED with
+the unit tests that stand in for them, the module layout names the files the
+code actually lives in, `Result.Detail` is documented as the schema addition
+it is, the plugin directory's `0755` is recorded as an amendment against the
+specified `0555`, and "all eleven laundering vectors at rung O-1" is corrected
+to eleven of twelve, with `12-planted_artifact` at `status-pass@suite`.
+
+**Where the boundary is now.** Twelve of twelve laundering vectors stopped,
+eleven at rung O-1 with exactly one receipt each. Open, and said plainly: an
+adversary who patches the observer from inside the test process; a **coherent**
+forgery across both oracles; weakened or rewritten assertions once the guard
+is relaxed; and a backdoor that passes every honest test. The default policy
+digest moved twice inside this block, which is what pinning is for — every
+recorded intent still resolves its own policy from CAS and replays byte for
+byte, and `scripts/accept.sh` proves it against a real M0–M1e ledger.
+
+The lesson is cheaper to write than it was to learn: **a claim in a design
+doc is not a defence.** Decision 16's sentence about entry-point plugins was
+written, reviewed, shipped, and wrong, and the only thing that found it was
+someone trying to break the thing we had just declared fixed.
+
+---
+
+## 2026-08-15 — M1f: the trust boundary moved
+
+**The candidate no longer writes its own evidence.** The design partner study
+found that suite metrics were parsed from a JUnit file written inside the
+candidate's own writable tree, and the adversarial corpus we built *before*
+touching any of it measured the damage precisely: **eight of eleven laundering
+vectors landed on trunk with a signed attestation `mvo verify HEAD` accepted,
+eight of them leaving the bug fully in place.** Re-running that corpus today:
+**eleven of eleven stopped, ten at rung O-1 with exactly one receipt each, and
+only the honest fix lands.** The baseline diff is in
+[`testdata/adversarial/README.md`](testdata/adversarial/README.md) — red table
+and green table side by side, because "we changed the oracle" is not a result
+and "these rows moved from LANDS to CAUGHT" is.
+
+Three mechanisms, in the order a race meets them.
+
+**Rung O-1, `tree-guard`.** A registry oracle that executes nothing: it
+compares the intent's base tree against the candidate's, both git trees the
+control plane holds, under two declared path classes. `protected` (test files)
+is frozen against modification and deletion, additions allowed — adding a
+regression test is the behaviour we want. `harness` (`conftest.py`,
+`pytest.ini`, `pyproject.toml`, `sitecustomize.py`, `*.pth`, …) is frozen
+against modification, deletion **and creation**, because the study's forgery
+patch's entire content was a new `conftest.py`. Two `git ls-tree` walks, no
+process, and the one gate whose evidence an adversary provably cannot author.
+The glob grammar is closed and hand-written rather than a regexp, for M1e
+decision 6's reason: a policy is data that reaches the decision core.
+
+**The evidence stream.** A control-plane-owned pytest plugin, embedded in the
+binary and materialized read-only outside the candidate's tree, writes a
+framed event stream to a control-plane channel that mvo reads **live**.
+Nothing in the candidate's tree is read as a metric source after the process
+exits, which is the whole of the two vectors the study reproduced. Three
+structural rules, none policy-controlled: absence never passes (a 0-exit with
+no usable stream is `error`); the exit code is cross-examined against the
+stream; and JUnit XML is demoted to a *cross-check* whose disagreement is
+`error` — brittleness escalates, it never convicts and never acquits.
+
+**Cross-oracle invariants.** `collect-equals-suite-total` makes "500 tests in
+an eight-test repository" a contradiction rather than a signed fact, and
+`escalation.on_invariant_violation` is rule 0 — above every M1e rule — so a
+detected forgery reaches a human instead of being filed under "the tests
+didn't pass".
+
+**The shipped default changed, and that is what pinning is for.** It gains the
+guard gate and the invariant, and it **drops `wall_ms_asc`** in favour of
+`on_ranking_tie`: the study measured a cheat winning 6 of 10 identical races on
+~100 ms of jitter, each time with a signed rationale naming the stopwatch as
+decisive. A correct refusal beats a confident wrong answer. Existing intents
+keep the digest they pinned and replay exactly as before; upgrading the binary
+rewrites nothing on disk, and `mvo policy list` prints the two-command
+adoption path. `mvo audit` gained the CAS integrity sweep the study caught it
+lacking — it re-reads and re-hashes everything the ledger references from a
+declared table, so a deleted attestation blob and an edited artifact are now
+exit-1 failures naming the digest and the record that pointed at it — plus
+`--require-decisions N` for CI and `--cas-sweep=false`, which says it was
+skipped rather than rendering like a pass. `mvo guard` is the adoption wedge:
+two trees, one policy, exit 0 or 1, and no ledger write at all.
+
+**One design deviation, recorded because it is load-bearing.** M1f specified a
+FIFO for the evidence channel. A bind-mounted FIFO on Docker Desktop is a pipe
+*inside the VM*, unconnected to the host's read end, so the first in-container
+write blocks forever — the channel deadlocked under T1, the exact tier the
+`isolated` regime requires. The channel is now a control-plane-owned file
+tailed live. The properties that mattered were never the inode type: the
+reader holds one handle at a monotonically increasing offset and never
+rewinds, so the already-received prefix is immutable; a candidate that
+truncates and rewrites at exit desynchronizes the sequence, which makes the
+stream unusable — a failed gate, never a forged pass; and where a distinct
+oracle uid exists, the containing directory is unwritable by it, so the
+channel can be appended to and neither unlinked nor replaced.
+
+**The integration gate found the label lying, and that is fixed here.** `auto`
+resolved to `isolated` for every T1 race and `execution.evidence_regime`
+recorded it — while `t1World.Command` execs with workdir `/work` (read-write)
+and no `--user`. A real T1 race under the shipped default produced receipts
+reading `evidence_regime: "isolated"` next to `isolation_caps.user: "501:20"`,
+the invoking uid, which owns both the worktree and the evidence directory: not
+one of the three guarantees the regime table promises under `isolated` held,
+and `mvo explain` printed the claim to the operator. That is the study's
+finding with the *label* doing the laundering — a signed claim stronger than
+the evidence behind it — so a regime is now chosen strictly by the capability
+that ships. `auto` is `streamed` on every tier; a policy declaring `isolated`
+is refused at pre-flight as machinery, naming the missing exec path, rather
+than downgraded quietly. `internal/race/evidence_test.go` pins the table the
+design asked for and nobody wrote, including the guard rail that flipping
+`isolatedExecAvailable` must accompany the `--user` change.
+
+**A second integrity claim the gate found inverted.** The new CAS sweep reads
+`attestation.recorded.statement` as a standalone blob, which M1f's `admit` is
+the first to `Put`. Every M0–M1e ledger names a statement whose bytes live
+only inside the DSSE envelope, so `mvo audit` exited 1 on intact pre-M1f
+workspaces with `MISSING: … (statement)` — audit accusing a workspace of
+losing something it never lost, which is the over-claim this block removes,
+pointed the other way. The sweep now resolves that one reference through its
+container when it is not standalone, re-hashing the extracted bytes: strictly
+stronger than the direct read, because it also proves the bundle's signed
+payload is the statement the ledger names. Verified against a real M1e-built
+ledger: `25 events, 2 decisions replayed, 31 CAS objects verified`.
+
+**The corpus proves the guard, not the stream — so the missing step got
+built.** All eleven laundering vectors ship a harness file or edit a test, so
+all eleven die at rung O-1 and **not one reaches the evidence stream**, the
+mechanism the block is named after. Read carelessly, 11/12 credits the stream
+for the guard's work. Step 3k now races the study's vector 1 — the
+`conftest.py` writing a fabricated 500-test `junit.xml` at `atexit` — under
+`no-paths.json`, with the guard gate, the guard oracle and the invariant all
+absent: the receipt reads `tests_total=8, tests_failed=2, tests_passed=6`, the
+world fails `status-pass@suite`, and the decision is REJECT. Under M1e that
+same patch passed every hard gate and landed on trunk. The corpus README now
+says outright which column measures what.
+
+Building it surfaced a latent acceptance bug: step 9a's evidence-stream
+extractor `break`s out of its stdin loop, SIGPIPE-ing `sqlite3`, which
+`pipefail` turns into a 141 that aborts the script. It had only ever passed
+because the receipts fitted in the pipe buffer; one more race was enough. It
+now drains stdin. The same trap took the new T1 explain assertion (`mvo … |
+grep -q` exits on match and the SIGPIPE, not the match, decides the pipeline),
+which is why the script's own idiom captures first.
+
+**What is still open, said as plainly as the rest.** An adversary who patches
+the observer from inside the test process wins, and nothing in-process defeats
+in-process code; weakened and rewritten assertions are undetectable from test
+outcomes and wait on O3 mutation testing; and a backdoor that passes every
+honest test is ch. 13's actual problem, which M1 does not address. The
+`isolated` regime itself is open: the mounts are built, the exec path is not.
+`patches-forge-deep/` and steps 3l/3m/3n/11 remain unbuilt; the mechanisms
+they cover are under unit test, and step 3k covers the load-bearing half of
+3k/3l end to end.
+Every receipt therefore records **which evidence regime observed it** — today
+that is `streamed` for every pytest run, on T0 and T1 alike. `mvo explain`
+prints that line unconditionally, because a guarantee nobody can see the
+absence of is a guarantee nobody has, and the label is not exempt.
+
+---
+
 ## 2026-08-15 — Design partner study: three "no"s, and the hole they found
 
 **We ran M1 acceptance criterion 3 as a real experiment and it failed, which is the most useful thing that has happened to this project.** Three emulated design partners — a fintech platform engineer, a burnt-out OSS maintainer, and a staff engineer whose explicit brief was to break the value proposition — each built their own repo and attempted adoption reading only the README, quickstart and concepts docs. No source. No design docs. No PRD. A fourth agent then verified every claim against the code before any of it was believed. All three completed `init → intent → race → explain`; all three needed **three** support interactions against a bar of one; all three declined adoption. [The full study is published](docs/studies/2026-08-design-partner-study.md).

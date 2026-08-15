@@ -157,41 +157,106 @@ O2 (property/metamorphic) and O3 (mutation) are M2. The ladder's shape — spend
 
 ### What the gate ladder catches, and what it does not
 
-"Did it pass, or did it delete the tests?" is the question above, and the ladder answers exactly that one. **Test deletion is one laundering vector among several, and it is the only one M1 catches.** Every row below was run against the default policy on the shipped `testdata/toyrepo` fixture.
+**M1f moved the trust boundary.** Until it landed, pytest-suite metrics were
+parsed from an artifact written inside the candidate's own writable tree, and
+the [2026-08 design partner study](studies/2026-08-design-partner-study.md)
+reproduced five laundering vectors that walked straight through the default
+policy. The one-line summary that replaces the table that used to sit here:
 
-| Vector | Caught? | What the default policy sees |
+> **The candidate no longer writes its own evidence, and a candidate that
+> edits the harness no longer races. What remains open is a candidate that
+> lies from inside the code a human is about to review — which is where
+> review, mutation testing, and the AI-control literature take over.**
+
+Three mechanisms do the work, in the order a race meets them.
+
+**Rung O-1, the `tree-guard`.** Before any Python runs, the control plane
+compares two git trees it holds: the intent's base tree and the candidate's.
+The policy declares two frozen path classes — `protected` (test files: frozen
+against modification and deletion, additions allowed, because adding a
+regression test is the behaviour we want) and `harness` (`conftest.py`,
+`pytest.ini`, `pyproject.toml`, `sitecustomize.py`, `*.pth`, …: frozen against
+modification, deletion **and creation**, because a repository that has no
+conftest today must not acquire one from an untrusted generator). It executes
+nothing, it costs two `git ls-tree` walks, and it is the one gate whose
+evidence an adversary provably cannot author: the candidate chose the content,
+but it cannot change what the content *is*.
+
+**The evidence stream.** Metrics no longer come from a file read after the
+process exits. A control-plane-owned pytest plugin — embedded in the binary,
+materialized read-only outside the candidate's tree, loaded by argv before any
+candidate code — writes a framed event stream to a channel the control plane
+created and reads **live**, while the process runs. The reader holds one handle
+at a monotonically increasing offset and never rewinds, so the prefix it has
+already consumed cannot be retracted; a candidate that truncates and rewrites
+at `atexit` desynchronizes the record sequence, which makes the stream unusable
+— a failed gate, never a forged pass. Three structural rules follow, and none
+of them is policy-controlled:
+
+- **S1 — absence never passes.** No usable stream ⇒ every stream-derived
+  metric is absent, and a process that exited 0 with no usable stream is
+  `status = error`, never `pass`. So the cheapest attack on a streaming oracle
+  — silence the plugin — buys a failed gate, not a green one.
+- **S2 — the exit code is cross-examined, not trusted.** Exit 0 against a
+  stream reporting failures is `error`, with both numbers in the reason.
+- **S3 — the second source must agree.** JUnit XML is a *cross-check*, not a
+  source. When it disagrees with the stream the verdict is `error`:
+  brittleness escalates, it never convicts and never acquits.
+
+**Cross-oracle invariants.** `collect-equals-suite-total` compares O0's
+collected count with O1's test total. A three-test repository reporting a
+500-test suite is a contradiction the race states out loud:
+`escalation.on_invariant_violation` is rule 0, above every other rule, so a
+detected forgery reaches a human instead of being filed under "the tests
+didn't pass".
+
+The measured result, on the adversarial corpus built *before* the fix
+([`testdata/adversarial/`](../testdata/adversarial/README.md)): **twelve of
+twelve laundering vectors stopped, eleven of them at rung O-1 with exactly one
+receipt each (the twelfth, a pre-planted artifact, at `status-pass@suite`).
+Before M1f, eight of them landed on trunk with a signed attestation
+`mvo verify HEAD` accepted.** The corpus evidences the **STOPPED** rows below
+and only those: no vector in it ever reaches the evidence stream, so the
+DETECTED row is carried by `internal/oracle/evidence_test.go` and by
+acceptance step 3k, which races a forgery under a policy with the guard gate,
+the guard oracle and the invariant all removed.
+
+What is still open, stated as plainly as the rest:
+
+| Vector | Status | Why |
 |---|---|---|
-| **Delete tests** (remove functions, or the whole test file) | **YES** | `collected_delta` drops, `collected-not-below` fails before the suite is ever run — or `collected_total=0` (pytest exit 5) fails `collect-nonempty` |
-| **`@pytest.mark.skip` the failing tests** | **no** | Skipped tests are still *collected*: `collected_delta=+0`, suite exits 0. Recorded as `tests_passed=6, tests_skipped=2` — and `status-pass` passes |
-| **Weaken the assertions** (`assert x == 500` → `assert x >= 0`) | **no** | 8 collected, suite exits 0, `PASS` |
-| **Rewrite assertions to match the candidate's own wrong output** | **no** | Indistinguishable from a fix by any metric the ladder reads: `tests_passed=8`, `delta=+0`, `PASS`. In the run below this candidate *won the race* |
-| **A `conftest.py` that overrides the process exit code** | **no** | `status` comes from the **exit code**, not from the report: the receipt records `tests_failed=2` and `status=pass` in the same breath |
-| **A `conftest.py` that writes the JUnit artifact the oracle reads** | **no** | Every metric is fabricated. `tests_passed=8, tests_failed=0` with the bug untouched |
+| A new `conftest.py` (forged report, forged exit code) | **STOPPED** | `harness_added` at rung O-1, before any of its Python runs |
+| Editing, skipping or deleting a test | **STOPPED** | `protected_modified` / `protected_deleted` |
+| An `*.egg-info` / `*.dist-info` declaring a `pytest11` **entry-point plugin** | **STOPPED** | A red team landed this on trunk under the first cut of M1f: pytest imports entry-point plugins from any distribution metadata on `sys.path`, the candidate's tree root is on `sys.path`, and the module can be named anything — so no path glob was ever going to close it. Oracle runs now carry `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (`evidence.plugin_autoload`), which removes the capability rather than naming the file; the metadata directory is in the harness set as well. Corpus vector `13-entrypoint_plugin` |
+| The same forgeries moved into **application** code | **DETECTED** | S1/S2/S3: an absent stream, a lying exit code, or a disagreeing file is `status = error`, and every gate fails. Evidenced by unit tests and acceptance step 3k, not by the corpus |
+| A 3-test repo reporting a 500-test suite, forged **coherently** across both oracles | **OPEN** | `collect-equals-suite-total` compares two numbers that are BOTH authored inside the test process. It catches the adversary who forged one and forgot the other — which is most hand-written cheats — and not the one who forged both to agree. A red team reproduced the coherent version end to end. Closing it needs a count derived outside the test process (control-plane static AST collection); that is not in M1 |
+| Weakened or rewritten assertions, with the guard relaxed | **OPEN** | Not detectable from test outcomes at all. This is what O3 mutation testing (M2) is for: a suite that cannot kill mutants is a suite that stopped asserting |
+| Skips, with neither `paths-unmodified` nor `skips-not-above` declared | **OPEN** | A skipped test is still collected and still counted, so both sides of the invariant agree |
+| An adversary who patches the plugin from an imported module before the first failing test reports | **OPEN** | Stated in M1f's threat model in as many words. Nothing in-process defeats in-process code, and no cryptography here pretends otherwise |
+| A backdoor in application code that passes every honest test | **OPEN** | Research ch. 13's actual problem. Nothing in M1 addresses it |
 
-Four candidates — one honest fix and three of the cheats above — raced under the stock default policy:
+Because the guarantee depends on *how a run was observed*, every receipt
+records it: `execution.evidence_regime` is one of `control-plane` (the guard —
+no candidate code runs at all), `streamed` (any tier), or `in-tree` (M1e
+behaviour, explicitly declared only). **Every run of a pytest oracle today is
+`streamed`, on T0 and T1 alike** — and `mvo explain` prints it
+unconditionally, because a guarantee nobody can see the absence of is a
+guarantee nobody has.
 
-```console
-  RANK  WORLD          ORD  collect-nonempty@collect  collected-not-below@collect  status-pass@suite  RESULT
-  1     mv0:478f4a34…  3    pass (total=8)            pass (delta=+0)              pass               PASS
-  2     mv0:a4a47e05…  1    pass (total=8)            pass (delta=+0)              pass               PASS
-  3     mv0:5b7ad5d3…  2    pass (total=8)            pass (delta=+0)              pass               PASS
-  4     mv0:9040b45c…  4    pass (total=8)            pass (delta=+0)              pass               PASS
-```
+`evidence.plugin_autoload` rides beside the regime in the same pinned policy:
+`off` (the default) seals pytest's entry-point plugin discovery, `on` restores
+it for a repository whose suite genuinely needs an installed plugin — a
+deliberate, attested choice with a cost, printed by `mvo policy show`.
 
-Rank 1 — the winner — is the candidate that rewrote the assertions to match the bug. Rank 3 is the skip. Rank 4 is the exit-code override, whose own receipt reads `tests_failed=2, status=pass`.
-
-**The structural reason is worth stating plainly: pytest-suite metrics are parsed from an artifact written inside the candidate's own writable tree.** mvo scrubs `.mvo-oracle/` host-side before each run, so a *pre-planted* report is never read — but a candidate that runs code at all can write that file while the suite runs. A candidate that can execute can author its own receipt numbers.
-
-What that does and does not undermine: the *evidence chain* is sound. The receipt honestly records what the oracle observed, it is bound to the exact tree, it is signed, and it replays. The claim it does not support is that the numbers describe reality when the candidate is adversarial. Multiverso's answer to an untrusted generator today is **isolation and ordering**, not an untamperable oracle.
-
-What closes these:
-
-- **A `no-failed-tests` gate closes the exit-code override today** — it reads `tests_failed` from the JUnit report rather than the exit code, so the two disagree loudly. It is one line in a policy file; [Author your own policy](quickstart.md#author-your-own-policy) builds it. It does **not** close a forged report.
-- **Skips**: no gate in M1's closed vocabulary reads `tests_skipped`. A `skipped-not-above` gate is an M2 vocabulary addition.
-- **Weakened and rewritten assertions**: not detectable from test outcomes at all — this is what O3 mutation testing (M2) is for. A suite that cannot kill mutants is a suite that stopped asserting.
-- **A forged report**: needs the oracle to run outside the candidate's write surface, or to sign its output. Neither ships in M1; T1 containers isolate the *host*, not the report.
-
-Until then, the honest summary is: **the ladder raises the cost of laundering and records exactly what was measured. It is not an adversarial oracle, and a green table is not proof the candidate is honest.**
+A fourth regime, `isolated` — a distinct oracle uid, a read-only worktree, and
+a channel directory the oracle cannot write — is defined in the policy
+vocabulary and **is not yet deliverable**: the T1 mounts are built, but oracle
+execs do not yet carry `--user` or run from the read-only mount, so no run can
+honestly claim it. A policy that declares `evidence.regime: "isolated"` is
+therefore refused at pre-flight, as machinery, with the ledger untouched —
+rather than downgraded quietly to `streamed` while the receipt says otherwise.
+A receipt that overstates how it was observed is the exact failure this whole
+mechanism exists to remove, and the label is not exempt from it.
 
 > Why: the MVP toolchain and its verified tool versions, plus adaptive scheduling as the open problem — [ch. 19](../research/19-mvp-oracle-toolchain.md), [ch. 3](../research/03-adaptive-verification-scheduling.md), [ch. 8](../research/08-oracles-verification.md).
 

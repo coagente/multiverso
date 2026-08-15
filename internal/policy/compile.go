@@ -66,6 +66,26 @@ func Validate(p object.PolicyV1) error {
 		} else if o.Reruns > 0 && o.Kind != KindPytestSuite {
 			add(at+".reruns", "reruns is only meaningful for kind %q, not %q", KindPytestSuite, o.Kind)
 		}
+		// Rule 15: a tree-guard runs NO process, so every field that
+		// configures one is meaningless on it. A policy that sets one
+		// reads as if it demanded something it does not — the runtime
+		// surprise the closed vocabulary exists to prevent.
+		if o.Kind == KindTreeGuard {
+			for _, bad := range []struct {
+				field string
+				set   bool
+			}{
+				{"argv", len(o.Argv) > 0},
+				{"args", len(o.Args) > 0},
+				{"coverage", o.Coverage},
+				{"reruns", o.Reruns != 0},
+				{"timeout_ms", o.TimeoutMS != 0},
+			} {
+				if bad.set {
+					add(at+"."+bad.field, "kind %q runs no process: %s must be unset", KindTreeGuard, bad.field)
+				}
+			}
+		}
 		if !knownKind || o.Name == "" {
 			continue
 		}
@@ -109,6 +129,11 @@ func Validate(p object.PolicyV1) error {
 		if !declared[g.Oracle] {
 			add(at+".oracle", "gate names oracle %q, which the policy does not declare", g.Oracle)
 			continue
+		}
+		// Rule 12: a paths-unmodified gate with nothing to guard is a gate
+		// that can only ever pass, which is worse than no gate at all.
+		if g.Gate == GatePathsUnmodified && len(p.Paths.Protected)+len(p.Paths.Harness) == 0 {
+			add(at, "%s requires policy.paths to declare at least one pattern", GatePathsUnmodified)
 		}
 		spec, usable := byName[g.Oracle]
 		if !ok || !usable {
@@ -161,7 +186,152 @@ func Validate(p object.PolicyV1) error {
 				"requires evidence from oracle %q, which the policy does not declare", name)
 		}
 	}
+
+	// --- M1f: paths, invariants, evidence -------------------------------
+	validatePaths(p.Paths, add)
+	validateInvariants(p, byName, declared, add)
+	validateEnum("evidence.regime", p.Evidence.Regime, KnownRegimes(), add)
+	validateEnum("evidence.crosscheck", p.Evidence.Crosscheck, KnownCrosschecks(), add)
+	validateEnum("evidence.plugin_autoload", p.Evidence.PluginAutoload, KnownPluginAutoload(), add)
+	validateEnum("paths.protected_additions", p.Paths.ProtectedAdditions, KnownAdditions(), add)
 	return errors.Join(probs...)
+}
+
+type addProblem func(field, format string, a ...any)
+
+// validateEnum refuses an unknown tri-state value BY NAME, with the known
+// set. "" is always legal: it is the sentinel for the compiled M1f default
+// (decision 4), never a missing value.
+func validateEnum(field, value string, allowed []string, add addProblem) {
+	if value == "" {
+		return
+	}
+	for _, ok := range allowed {
+		if value == ok {
+			return
+		}
+	}
+	add(field, "unknown value %q (known: %s)", value, known(allowed))
+}
+
+// validatePaths applies rule 13: every pattern parses under the decision-7
+// grammar, and an unparseable pattern names the pattern AND the offending
+// construct.
+func validatePaths(spec object.PathSpec, add addProblem) {
+	for _, cls := range []struct {
+		field    string
+		patterns []string
+	}{
+		{"paths.protected", spec.Protected},
+		{"paths.harness", spec.Harness},
+	} {
+		for i, raw := range cls.patterns {
+			if _, err := ParsePattern(raw); err != nil {
+				add(fmt.Sprintf("%s[%d]", cls.field, i), "%v", err)
+			}
+		}
+	}
+}
+
+// validateInvariants applies rules 9–11.
+func validateInvariants(p object.PolicyV1, byName map[string]object.OracleSpec,
+	declared map[string]bool, add addProblem) {
+	seen := map[string]bool{}
+	for i, inv := range p.Invariants {
+		at := fmt.Sprintf("invariants[%d]", i)
+		roles := InvariantRoles(inv.Name)
+		if roles == nil {
+			add(at+".name", "unknown invariant %q (known: %s)", inv.Name, known(KnownInvariants()))
+			continue
+		}
+		// Rule 9: the declared role set must be matched EXACTLY. A missing
+		// role cannot be defaulted (which instance would it name?) and an
+		// extra role is a policy that believes it configured something.
+		got := make([]string, 0, len(inv.Oracles))
+		for role := range inv.Oracles {
+			got = append(got, role)
+		}
+		sort.Strings(got)
+		if !slicesEqual(roles, got) {
+			add(at+".oracles", "invariant %q declares roles [%s], got [%s]",
+				inv.Name, known(roles), known(got))
+			continue
+		}
+		// Rule 11: two invariants that name the same thing over the same
+		// instances are one invariant written twice.
+		fingerprint := inv.Name
+		for _, role := range roles {
+			fingerprint += "\x00" + role + "=" + inv.Oracles[role]
+		}
+		if seen[fingerprint] {
+			add(at, "duplicate invariant %q over the same oracles", inv.Name)
+			continue
+		}
+		seen[fingerprint] = true
+
+		specs := make(map[string]object.OracleSpec, len(roles))
+		bad := false
+		for _, role := range roles {
+			name := inv.Oracles[role]
+			if !declared[name] {
+				add(at+".oracles."+role,
+					"names oracle %q, which the policy does not declare", name)
+				bad = true
+				continue
+			}
+			spec, usable := byName[name]
+			if !usable {
+				bad = true
+				continue // the oracle's own kind is already reported
+			}
+			specs[role] = spec
+			// Rule 9's instance-level test (M1e rule 5, reused): an oracle
+			// that CAN emit a metric but is configured never to is just as
+			// unsatisfiable as one whose kind never emits it at all.
+			for _, m := range InvariantMetrics(inv.Name, role) {
+				if !SpecEmits(spec, m) {
+					add(at+".oracles."+role,
+						"invariant %q needs metric %q from role %q, which oracle %q (kind %q) does not emit",
+						inv.Name, m, role, name, spec.Kind)
+					bad = true
+				}
+			}
+		}
+		if bad {
+			continue
+		}
+		// Rule 10: an invariant that fires on a correct configuration is a
+		// bug generator.
+		if eq := invariantDefs[inv.Name].equalArg; len(eq) == 2 {
+			a, b := specs[eq[0]], specs[eq[1]]
+			if !slicesEqual(nonNil(a.Args), nonNil(b.Args)) {
+				add(at, "%s: oracles %q and %q must declare identical args (got %s and %s)",
+					inv.Name, eq[0], eq[1], quoteList(a.Args), quoteList(b.Args))
+			}
+		}
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// quoteList renders an args list the way the policy file spells it, so a
+// load error can be pasted next to the document that caused it.
+func quoteList(in []string) string {
+	parts := make([]string, 0, len(in))
+	for _, s := range in {
+		parts = append(parts, fmt.Sprintf("%q", s))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // emits reports whether a kind's metric vocabulary contains m.
@@ -277,15 +447,41 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 		return Selector{ID: o.Kind, Config: o.Config}
 	}
 
+	// The path grammar compiles once, here, where a pattern error is a load
+	// error and not a silent no-match at 3 a.m. Validate already reported
+	// every unparseable pattern, so a residual error is machinery.
+	paths, err := compilePaths(p.Paths.Protected, p.Paths.Harness, p.Paths.ProtectedAdditions)
+	if err != nil {
+		return Policy{}, Problem{Field: "paths", Detail: err.Error()}
+	}
+	out.Paths = paths
+	out.Evidence = EvidencePlan{
+		Regime:         p.Evidence.Regime,
+		Crosscheck:     p.Evidence.Crosscheck,
+		PluginAutoload: p.Evidence.PluginAutoload,
+	}
+	if out.Evidence.Regime == "" {
+		out.Evidence.Regime = RegimeAuto
+	}
+	if out.Evidence.Crosscheck == "" {
+		out.Evidence.Crosscheck = CrosscheckRequire
+	}
+	if out.Evidence.PluginAutoload == "" {
+		// The sentinel resolves to the STRONGER setting (decision 4): an
+		// M1e-era policy, which cannot name this field, gets the seal.
+		out.Evidence.PluginAutoload = AutoloadOff
+	}
+
 	var required []string
 	for _, g := range p.HardGates {
 		out.Gates = append(out.Gates, Gate{
-			Predicate: g.Gate,
-			Oracle:    g.Oracle,
-			Basis:     g.Basis,
-			Threshold: g.Threshold,
-			Label:     g.Gate + "@" + g.Oracle,
-			Sel:       selFor(g.Oracle),
+			Predicate:       g.Gate,
+			Oracle:          g.Oracle,
+			Basis:           g.Basis,
+			Threshold:       g.Threshold,
+			Label:           g.Gate + "@" + g.Oracle,
+			Sel:             selFor(g.Oracle),
+			RefuseAdditions: paths.ProtectedAdditions == AdditionsRefuse,
 		})
 		required = append(required, g.Oracle)
 	}
@@ -297,10 +493,31 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 	out.Keys = keys
 	required = append(required, keyOracles...)
 
+	// Invariants compile name-sorted, then by their rendered role map, so
+	// two policies that declare the same set in a different order evaluate
+	// and EXPLAIN in the same order.
+	specs := append([]object.InvariantSpec(nil), p.Invariants...)
+	sort.Slice(specs, func(i, j int) bool {
+		if specs[i].Name != specs[j].Name {
+			return specs[i].Name < specs[j].Name
+		}
+		return roleKey(specs[i]) < roleKey(specs[j])
+	})
+	for _, spec := range specs {
+		inv := Invariant{Name: spec.Name, Roles: map[string]Selector{}}
+		for _, role := range InvariantRoles(spec.Name) {
+			name := spec.Oracles[role]
+			inv.Roles[role] = selFor(name)
+			required = append(required, name)
+		}
+		out.Invariants = append(out.Invariants, inv)
+	}
+
 	out.Esc = Escalation{
 		MinCandidatesPassing:       p.Escalation.MinCandidatesPassing,
 		OnRankingTie:               p.Escalation.OnRankingTie,
 		OnAllWorldsFailedMachinery: p.Escalation.OnAllWorldsFailedMachinery,
+		OnInvariantViolation:       p.Escalation.OnInvariantViolation,
 	}
 	reqNames := append([]string{}, p.Escalation.RequireEvidence...)
 	sort.Strings(reqNames)
@@ -397,23 +614,91 @@ func compileV0(dig string, p object.Policy) Policy {
 // tested but stay out of the default: a default gate that fails when a
 // plugin is missing would trade honesty for brittleness at the moment a new
 // user first meets the tool.
+// M1f amends it in four ways, each answering a measured finding of the
+// 2026-08 design partner study:
+//
+//   - the tree-guard is rung O-1, so a candidate that edited a test or
+//     added a conftest.py is stopped before any Python runs — five
+//     forgeries for five tree walks;
+//   - collect-equals-suite-total makes a 500-test receipt in an
+//     eight-test repository a detected contradiction rather than a signed
+//     fact, and on_invariant_violation routes it to a human;
+//   - wall_ms_asc is GONE from the shipped ranking. The study measured an
+//     assertion-weakening cheat winning 6 of 10 identical races on ~100 ms
+//     of jitter, each time with a signed rationale naming the stopwatch as
+//     the decisive key. on_ranking_tie replaces it: a correct refusal
+//     beats a confident wrong answer;
+//   - evidence.regime "auto" and crosscheck "require" say, in the pinned
+//     artifact, how the numbers were observed.
+//
+// skips-not-above is deliberately NOT here: it is absolute, so a threshold
+// of 0 would fail every repository with a legitimate platform skip on the
+// first race a new user ever runs. Vector 3 is closed in the default by
+// the protected-paths gate; skips-not-above is what closes it for
+// operators who deliberately relax that gate.
 func Default() object.PolicyV1 {
 	return object.PolicyV1{
 		Schema: object.SchemaPolicyV1,
 		Name:   "default",
 		Oracles: []object.OracleSpec{
 			{Name: "collect", Kind: KindPytestCollect, Argv: []string{}, Args: []string{}, Coverage: true},
+			{Name: "guard", Kind: KindTreeGuard, Argv: []string{}, Args: []string{}},
 			{Name: "suite", Kind: KindPytestSuite, Argv: []string{}, Args: []string{}, Coverage: true},
 		},
 		HardGates: []object.GateSpec{
+			{Gate: GatePathsUnmodified, Oracle: "guard", Basis: object.BasisConstruction},
 			{Gate: GateCollectNonempty, Oracle: "collect", Basis: object.BasisConstruction},
 			{Gate: GateCollectedNotBelow, Oracle: "collect", Basis: object.BasisConstruction},
 			{Gate: GateStatusPass, Oracle: "suite", Basis: object.BasisConstruction},
 		},
-		Ranking: []string{KeyGatePass, KeyTestsPassedDesc, KeyWallMSAsc},
+		Ranking: []string{KeyGatePass, KeyTestsPassedDesc},
 		Escalation: object.EscalationSpec{
 			RequireEvidence:            []string{},
 			OnAllWorldsFailedMachinery: true,
+			OnInvariantViolation:       true,
+			OnRankingTie:               true,
+		},
+		Paths: object.PathSpec{
+			// Frozen against modification and deletion; ADDITIONS are
+			// allowed, because a candidate that adds a regression test is
+			// doing the right thing (decision 6).
+			Protected: []string{"**/*_test.py", "**/test_*.py", "test/**", "tests/**"},
+			// Frozen against modification, deletion AND creation. The
+			// study's forgery patch's entire content was a new
+			// conftest.py, and a repository that has no conftest today
+			// must not acquire one from an untrusted generator.
+			// pyproject.toml is root-only: a sub-package's pyproject.toml
+			// is not the pytest config, and sealing it would block
+			// ordinary dependency work (decision 17).
+			// *.egg-info/*.dist-info are here because that is how a
+			// candidate DECLARES a pytest11 entry-point plugin from inside
+			// its own tree. The seal that actually closes the surface is
+			// evidence.plugin_autoload (a glob cannot: the plugin MODULE
+			// may be named anything), but a candidate that ships
+			// distribution metadata into a repo that had none is a fact a
+			// reviewer should see, and this makes it one.
+			//
+			// .gitignore is sealed for a sharper reason than any other
+			// entry: it decides what `git add -A` stages, and the guard's
+			// whole evidence is a git tree. A candidate that may edit it
+			// can hide a harness file from the only oracle that cannot be
+			// forged — pytest loads a conftest.py that .gitignore names,
+			// and the tree comparison never sees it.
+			Harness: []string{
+				"**/*.dist-info/**", "**/*.egg-info/**", "**/*.pth",
+				"**/.gitignore", "**/conftest.py", "**/sitecustomize.py",
+				"pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini",
+			},
+			ProtectedAdditions: AdditionsAllow,
+		},
+		Invariants: []object.InvariantSpec{{
+			Name:    InvariantCollectEqualsSuiteTotal,
+			Oracles: map[string]string{RoleCollect: "collect", RoleSuite: "suite"},
+		}},
+		Evidence: object.EvidenceSpec{
+			Regime:         RegimeAuto,
+			Crosscheck:     CrosscheckRequire,
+			PluginAutoload: AutoloadOff,
 		},
 	}
 }
@@ -438,7 +723,26 @@ func Command(argv []string, timeoutMS int64) object.PolicyV1 {
 		},
 		Ranking:    []string{KeyGatePass, KeyWallMSAsc},
 		Escalation: object.EscalationSpec{RequireEvidence: []string{}},
+		// {} and "" rather than null: the empty list is "declares
+		// nothing", null is a lie about the shape of the record (the
+		// EP-2 rule, applied to the policy artifact).
+		Paths:      object.PathSpec{Protected: []string{}, Harness: []string{}},
+		Invariants: []object.InvariantSpec{},
 	}
+}
+
+// roleKey renders an invariant spec's role map as a stable sort key.
+func roleKey(spec object.InvariantSpec) string {
+	roles := make([]string, 0, len(spec.Oracles))
+	for role := range spec.Oracles {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	out := ""
+	for _, role := range roles {
+		out += role + "=" + spec.Oracles[role] + "\x00"
+	}
+	return out
 }
 
 func nonNil(s []string) []string {

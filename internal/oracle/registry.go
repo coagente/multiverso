@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/coagente/multiverso/internal/cas"
+	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
 )
 
@@ -22,12 +23,14 @@ const (
 	KindCommand       = policy.KindCommand
 	KindPytestCollect = policy.KindPytestCollect
 	KindPytestSuite   = policy.KindPytestSuite
+	KindTreeGuard     = policy.KindTreeGuard
 )
 
 // Correlation families a kind's receipts carry.
 const (
 	FamilySuite   = policy.FamilySuite
 	FamilyCollect = policy.FamilyCollect
+	FamilyTree    = policy.FamilyTree
 )
 
 // Metric names the pytest kinds emit (EP-2). Absence is meaningful: a
@@ -95,6 +98,41 @@ type Params struct {
 	// inventing a denominator, because a delta against a fiction is worse
 	// than no delta at all.
 	Baseline int64
+
+	// --- M1f -----------------------------------------------------------
+	// Paths is the compiled path grammar the tree-guard walks; Repo,
+	// BaseTree and CandidateTree are the per-WORLD inputs that made oracle
+	// construction per-world rather than per-race (decision 18): the guard
+	// needs the candidate's tree digest, and smuggling per-world state
+	// through the Oracle interface or a type assertion would have been the
+	// alternative.
+	Paths         policy.PathSet
+	Repo          string
+	BaseTree      string
+	CandidateTree string
+
+	// Regime is the RESOLVED evidence regime for this run (never "auto":
+	// the orchestrator resolves auto against the tier before building the
+	// instance, so a receipt never records a word that means "it
+	// depends"). Crosscheck is the policy's compiled setting.
+	Regime     string
+	Crosscheck string
+	// PluginAutoload is the policy's compiled evidence.plugin_autoload.
+	// "" is read as policy.AutoloadOff — the seal, never the hole: a
+	// caller that forgot to thread it must not silently reopen the
+	// entry-point surface.
+	PluginAutoload string
+	// EvidenceDir and ScratchDir are control-plane-owned HOST directories;
+	// InWorld* are where the world sees them (identical on T0). PluginDir
+	// holds the materialized observer and PluginDigest is its content
+	// address, recorded in every receipt it produced.
+	EvidenceDir     string
+	ScratchDir      string
+	InWorldEvidence string
+	InWorldScratch  string
+	PluginDir       string
+	InWorldPlugin   string
+	PluginDigest    string
 }
 
 // New builds the oracle instance a compiled policy declares. An unknown
@@ -136,6 +174,52 @@ func New(p Params) (Oracle, error) {
 			Config:  s.Config,
 		}, nil
 	}
+	if s.Kind == KindTreeGuard {
+		switch {
+		case p.Repo == "":
+			return nil, fmt.Errorf("oracle: %s: no repository to read trees from", s.Kind)
+		case p.BaseTree == "":
+			return nil, fmt.Errorf("oracle: %s: no base tree (the denominator is the intent's base in a race and the pre-apply trunk tree at admission)", s.Kind)
+		case p.Paths.Empty():
+			return nil, fmt.Errorf("oracle: %s: the policy declares no protected or harness pattern", s.Kind)
+		}
+		return &guardOracle{
+			spec:  s,
+			store: p.CAS,
+			paths: p.Paths,
+			repo:  p.Repo,
+			base:  p.BaseTree,
+			tree:  p.CandidateTree,
+		}, nil
+	}
+	regime := p.Regime
+	if regime == "" || regime == policy.RegimeAuto {
+		// A receipt must never record a word that means "it depends". An
+		// unresolved regime here is a caller that did not resolve it, and
+		// `streamed` is the honest floor — it needs nothing but a FIFO.
+		regime = object.RegimeStreamed
+	}
+	if p.EvidenceDir == "" {
+		// No channel was supplied, so no stream can exist. The regime a
+		// receipt records must be what ACTUALLY happened, so this is
+		// `in-tree` — the M1e path — and it is labelled as such rather
+		// than claiming a boundary that was never drawn. `isolated` is the
+		// one regime that may not degrade quietly: a policy that demands
+		// it is refused instead.
+		if regime == object.RegimeIsolated {
+			return nil, fmt.Errorf("oracle: %s: evidence regime %q requires a control-plane evidence channel, and none was supplied",
+				s.Kind, object.RegimeIsolated)
+		}
+		regime = object.RegimeInTree
+	}
+	crosscheck := p.Crosscheck
+	if crosscheck == "" {
+		crosscheck = policy.CrosscheckRequire
+	}
+	autoload := p.PluginAutoload
+	if autoload == "" {
+		autoload = policy.AutoloadOff
+	}
 	return &pytestOracle{
 		kind:     s.Kind,
 		spec:     s,
@@ -143,5 +227,17 @@ func New(p Params) (Oracle, error) {
 		timeout:  timeout,
 		baseline: p.Baseline,
 		cap:      artifactCapBytes,
+		ev: evidencePlan{
+			regime:          regime,
+			crosscheck:      crosscheck,
+			autoload:        autoload,
+			hostEvidence:    p.EvidenceDir,
+			hostScratch:     p.ScratchDir,
+			inWorldEvidence: p.InWorldEvidence,
+			inWorldScrap:    p.InWorldScratch,
+			pluginDir:       p.PluginDir,
+			inWorldPlugin:   p.InWorldPlugin,
+			pluginDigest:    p.PluginDigest,
+		},
 	}, nil
 }

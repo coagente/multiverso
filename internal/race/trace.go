@@ -18,6 +18,11 @@ const (
 	RuleRequireEvidence          = "require_evidence"
 	RuleMinCandidatesPassing     = "min_candidates_passing"
 	RuleOnRankingTie             = "on_ranking_tie"
+	// RuleOnInvariantViolation is M1f rule 0, the highest precedence.
+	// Failing alone is not enough: a silent REJECT would file a DETECTED
+	// FORGERY under the same heading as "the tests didn't pass", and the
+	// operator would never learn that something lied to them.
+	RuleOnInvariantViolation = "on_invariant_violation"
 )
 
 // Comparison step results.
@@ -58,6 +63,9 @@ type CandidateTrace struct {
 	Metrics    map[string]int64 `json:"metrics"`
 	Keys       []KeyValue       `json:"keys"`
 	PatchBytes int64            `json:"patch_bytes"`
+	// Invariants is nil under every policy that declares none — every
+	// policy M1e could write — so an M1e explain report is unchanged.
+	Invariants []InvariantResult `json:"invariants,omitempty"`
 
 	world   object.World
 	counted map[policy.Selector]countedReceipt
@@ -176,6 +184,10 @@ func Trace(pol policy.Policy, worlds []object.RecordedWorld, receipts []object.R
 		}
 		c.Metrics = mergedMetrics(c.counted)
 		evalGates(pol, &c)
+		// Step 3b: invariants, per world that passed every hard gate.
+		// pass(W) ≡ every hard gate passed ∧ every declared invariant
+		// holds.
+		evalInvariants(pol, &c)
 		if c.Pass {
 			t.PassCount++
 		}
@@ -528,6 +540,32 @@ func comparisonText(k policy.Key, winner, other KeyValue) string {
 // replaces REJECT; rules 2-4 replace SELECT.
 func escalate(pol policy.Policy, t *RaceTrace) EscalationResult {
 	esc := pol.Esc
+	// 0. A world's own evidence contradicts itself. This outranks
+	//    everything, including the machinery rule: "these candidates are
+	//    bad" and "the machinery broke" are both wrong descriptions of a
+	//    three-test repository reporting a 500-test suite. Unreachable
+	//    under any M1e policy, which is what makes inserting a rule at the
+	//    front of a fixed precedence list safe for replay.
+	if esc.OnInvariantViolation {
+		var clauses []string
+		n := 0
+		for i := range t.Candidates {
+			c := &t.Candidates[i]
+			v := violatedInvariants(c)
+			if len(v) == 0 {
+				continue
+			}
+			n++
+			clauses = append(clauses, fmt.Sprintf("%s violated %s (%s)", c.World, v[0].Name, v[0].Detail))
+		}
+		if n > 0 {
+			return EscalationResult{
+				Rule: RuleOnInvariantViolation,
+				Detail: fmt.Sprintf("%d of %d worlds produced self-contradictory evidence: %s",
+					n, len(t.Candidates), strings.Join(clauses, ", ")),
+			}
+		}
+	}
 	// 1. The machinery never produced a verdict. REJECT means "the
 	//    candidates are bad"; saying so when nothing was measured would be a
 	//    lie about the evidence.

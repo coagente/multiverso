@@ -83,9 +83,16 @@ type raceRun struct {
 	cfg     Config
 	intent  object.Intent
 	pol     policy.Policy
-	oracles []ladderRung // the required oracles, in ladder order
 	adapter string
 	raceDir string
+	// ev is the race's resolved observation plumbing (M1f): the regime
+	// every receipt will record, and the materialized observer's digest.
+	ev evidenceSetup
+	// baseline is collected_delta's denominator, measured once on the base
+	// tree; oracle instances are built PER WORLD (M1f decision 18), so it
+	// is held here rather than baked into a shared ladder.
+	baseline      int64
+	oracleTimeout time.Duration
 
 	recMu  sync.Mutex // one total order over every ledger append in the race path
 	repoMu sync.Mutex // git worktree add/remove/prune contend on repo-level locks
@@ -107,6 +114,11 @@ type slot struct {
 	world    object.World
 	run      *agent.RunResult
 	receipts []object.RecordedReceipt // ladder order
+	// evRoot and scratchRoot are this world's control-plane directories:
+	// the FIFO the plugin writes to, and the scratch the cross-check files
+	// land in. Both are created before the world is opened, because a T1
+	// container's mounts are fixed at open time.
+	evRoot, scratchRoot string
 }
 
 // ladderRung is one required oracle instance, named by the policy.
@@ -276,10 +288,23 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// race.started) and the baseline measurement (which must follow it), so
 	// both are paid for once. It is torn down before phase A: no candidate
 	// competes with it for a worker or a container.
+	// M1f pre-flight, alongside M1e's pytest probe and for the same
+	// reason: a policy that requires more isolation than the tier can give
+	// aborts as MACHINERY, one line, ledger untouched. Resolving the
+	// regime here also means no receipt ever records the word "auto".
+	r.ev, err = r.setupEvidence(pol, cfg.Backend.Tier())
+	if err != nil {
+		r.dropEvidenceDirs()
+		os.Remove(r.raceDir)
+		return nil, err
+	}
+	r.oracleTimeout = oracleTimeout
+
 	var base *baseWorld
 	if needsBaseWorld(pol) {
 		base, err = r.openBaseWorld(raceCtx)
 		if err != nil {
+			r.dropEvidenceDirs()
 			os.Remove(r.raceDir)
 			return nil, err
 		}
@@ -288,6 +313,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		// events.
 		if err := preflight(raceCtx, pol, base.wh, execDesc(cfg.Backend), intent.Budget.MaxWallMS); err != nil {
 			base.close(r)
+			r.dropEvidenceDirs()
 			os.Remove(r.raceDir)
 			return nil, err
 		}
@@ -313,6 +339,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		"policy":            pol.Digest,
 	}); err != nil {
 		base.close(r)
+		r.dropEvidenceDirs()
 		os.Remove(r.raceDir)
 		return nil, err
 	}
@@ -320,21 +347,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// The base-state collect measurement: collected_delta's denominator
 	// (decision 13). It runs after race.started, before phase A, and only
 	// when a collected-not-below gate makes the delta mean something.
-	baseline := int64(0)
 	if base != nil {
-		baseline, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
+		r.baseline, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
 		base.close(r)
 		if err != nil {
+			r.dropEvidenceDirs()
 			os.Remove(r.raceDir)
 			return nil, err
 		}
-	}
-	// The ladder is built once and shared: the instances are immutable
-	// configuration, and one instance per kind is what makes every world's
-	// receipts comparable (same resolved config digest).
-	if r.oracles, err = buildLadder(pol, cfg, oracleTimeout, baseline); err != nil {
-		os.Remove(r.raceDir)
-		return nil, err
 	}
 
 	// Cleanup ladder (NFR-3): every opened world handle is closed however
@@ -359,6 +379,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				_ = removeWorld(cfg.Repo, r.slots[i].dir) // best effort on error paths
 			}
 		}
+		r.dropEvidenceDirs()
 		_ = os.Remove(r.raceDir) // fails harmlessly if a world survived
 	}()
 
@@ -455,6 +476,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}
 		}
 		r.repoMu.Unlock()
+		r.dropEvidenceDirs()
 		if err := os.Remove(r.raceDir); err != nil {
 			return nil, fmt.Errorf("race: cleanup: %w", err)
 		}
@@ -481,7 +503,13 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 	}
 	s.dir, s.added = dir, true
 
-	wh, err := cfg.Backend.Open(ctx, dir)
+	// The evidence directories are created BEFORE the world is opened: a
+	// T1 container's mounts are fixed at open time, and the FIFO must live
+	// in a directory the world can reach but not own.
+	if s.evRoot, s.scratchRoot, err = r.worldEvidenceDirs(ordinal); err != nil {
+		return err
+	}
+	wh, err := cfg.Backend.Open(ctx, dir, r.openOptsFor(s.evRoot, s.scratchRoot))
 	if err != nil {
 		return fmt.Errorf("race: world %d: %w", ordinal, err)
 	}
@@ -641,14 +669,25 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 	return nil
 }
 
-// buildLadder instantiates the oracles the policy REQUIRES, in ladder order
-// (M1e decision 12): declared-but-unrequired oracles are never built and
-// never run, because evidence waste is a measured PRD metric. The v0 dialect
-// has exactly one rung — the supplied legacy oracle — since a v0 policy
-// declares no instances at all.
-func buildLadder(pol policy.Policy, cfg Config, timeout time.Duration, baseline int64) ([]ladderRung, error) {
+// buildLadder instantiates the oracles the policy REQUIRES for ONE world,
+// in ladder order (M1e decision 12): declared-but-unrequired oracles are
+// never built and never run, because evidence waste is a measured PRD
+// metric. The v0 dialect has exactly one rung — the supplied legacy oracle
+// — since a v0 policy declares no instances at all.
+//
+// Per WORLD, not per race (M1f decision 18). The tree-guard needs the
+// candidate's tree digest and its own evidence channel, both of which are
+// per-world; the alternative was smuggling per-world state through the
+// Oracle interface or a type assertion, and this is two lines with no I/O
+// cost.
+func (r *raceRun) buildLadder(s *slot) ([]ladderRung, error) {
+	pol, cfg := r.pol, r.cfg
 	if pol.Dialect == policy.DialectV0 {
 		return []ladderRung{{name: policy.FamilySuite, oracle: cfg.LegacyOracle}}, nil
+	}
+	tier := object.TierT0Worktree
+	if s.wh != nil {
+		tier = s.wh.Tier()
 	}
 	rungs := make([]ladderRung, 0, len(pol.Required))
 	for _, name := range pol.Required {
@@ -658,9 +697,27 @@ func buildLadder(pol policy.Policy, cfg Config, timeout time.Duration, baseline 
 			// naming an undeclared oracle.
 			return nil, fmt.Errorf("race: policy %s requires oracle %q, which it does not declare", pol.Digest, name)
 		}
-		o, err := oracle.New(oracle.Params{
-			Spec: spec, CAS: cfg.CAS, Timeout: timeout, Baseline: baseline,
-		})
+		p := oracle.Params{
+			Spec: spec, CAS: cfg.CAS, Timeout: r.oracleTimeout, Baseline: r.baseline,
+			Paths: pol.Paths, Repo: cfg.Repo,
+			// The guard's denominator in a race is the intent's base tree
+			// (M1f decision 19): "did this patch touch the harness" is a
+			// question about what the patch does to what is landing.
+			BaseTree: r.intent.Base.Tree, CandidateTree: s.world.Tree,
+			Regime: r.ev.regime, Crosscheck: r.ev.crosscheck, PluginAutoload: r.ev.autoload,
+			PluginDir: r.ev.pluginDir, PluginDigest: r.ev.pluginDigest,
+			InWorldPlugin: inWorldPath(tier, backend.InWorldPlugin, ""),
+		}
+		if s.evRoot != "" {
+			p.EvidenceDir = filepath.Join(s.evRoot, spec.Kind)
+			p.ScratchDir = filepath.Join(s.scratchRoot, spec.Kind)
+			p.InWorldEvidence = inWorldPath(tier, backend.InWorldEvidence, spec.Kind)
+			p.InWorldScratch = inWorldPath(tier, backend.InWorldScratch, spec.Kind)
+		}
+		if p.InWorldPlugin == "" {
+			p.InWorldPlugin = r.ev.pluginDir
+		}
+		o, err := oracle.New(p)
 		if err != nil {
 			return nil, fmt.Errorf("race: %w", err)
 		}
@@ -678,7 +735,11 @@ func buildLadder(pol policy.Policy, cfg Config, timeout time.Duration, baseline 
 func (r *raceRun) verify(ctx context.Context, i int) error {
 	s := &r.slots[i]
 	defer func() { _ = s.wh.Close() }() // idempotent; the deferred sweep is defense in depth
-	for _, rung := range r.oracles {
+	rungs, err := r.buildLadder(s)
+	if err != nil {
+		return err
+	}
+	for _, rung := range rungs {
 		rec, err := rung.oracle.Run(ctx, s.wh)
 		if err != nil {
 			return fmt.Errorf("race: oracle %s in %s: %w", rung.name, s.dir, err)

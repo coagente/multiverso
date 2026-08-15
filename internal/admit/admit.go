@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -262,9 +263,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// EVERY hard-gate oracle of the pinned policy runs, in gate order, with
 	// NO short-circuit: there is one candidate and the operator deserves the
 	// full gate picture in the REJECT payload.
+	landingEv, dropEv, err := openLandingEvidence(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer dropEv()
+
 	var gateReceipts []object.RecordedReceipt
 	for _, spec := range specs {
-		o, err := newLandingOracle(cfg, spec, oracleTimeout, baseline)
+		o, err := newLandingOracle(cfg, pol, spec, oracleTimeout, baseline,
+			landingEv, trunkTree, landingTree)
 		if err != nil {
 			return nil, err
 		}
@@ -330,6 +338,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("admit: encode statement: %w", err)
 	}
 	stmtDig := object.DigestBytes(payload)
+	// The statement's own canonical bytes reach CAS beside the bundle. The
+	// bundle carries them base64'd inside the DSSE envelope, which is not
+	// resolvable by digest: `attestation.recorded` names the statement, and
+	// M1f's audit sweep re-reads and re-hashes everything the ledger names.
+	// A reference nothing can resolve is a reference audit cannot check.
+	if _, err := cfg.CAS.Put(payload); err != nil {
+		return nil, fmt.Errorf("admit: store statement: %w", err)
+	}
 	env, err := signing.Sign(cfg.Signer, signing.PayloadTypeInToto, payload)
 	if err != nil {
 		return nil, fmt.Errorf("admit: %w", err)
@@ -429,6 +445,26 @@ func landingSpecs(store *cas.Store, pol policy.Policy, sel object.Decision) ([]p
 		if len(specs) == 0 {
 			return nil, fmt.Errorf("admit: policy %s declares no hard-gate oracle", pol.Digest)
 		}
+		// M1f: an invariant may name an instance no gate names, and an
+		// invariant whose evidence was never produced is VIOLATED (the
+		// honesty rule). Running those oracles too is what makes the
+		// landing invariant evaluable rather than automatically false.
+		seen := make(map[string]bool, len(specs))
+		for _, s := range specs {
+			seen[s.Name] = true
+		}
+		for _, inv := range pol.Invariants {
+			for _, role := range inv.RoleNames() {
+				for _, o := range pol.Oracles {
+					sel := policy.Selector{ID: o.Kind, Config: o.Config}
+					if sel != inv.Roles[role] || seen[o.Name] {
+						continue
+					}
+					seen[o.Name] = true
+					specs = append(specs, o)
+				}
+			}
+		}
 		return specs, nil
 	}
 	argv, err := LandingOracleArgv(store, sel)
@@ -446,11 +482,58 @@ func landingSpecs(store *cas.Store, pol policy.Policy, sel object.Decision) ([]p
 	}}, nil
 }
 
+// landingEvidence is the admission's control-plane observation plumbing:
+// the FIFO directory, the scratch, and the materialized observer. It lives
+// BESIDE the landing worktree, never inside it — a channel inside the tree
+// that is about to be written as a commit would land in trunk, and would
+// be seen by the tree-guard as a file the candidate added.
+type landingEvidence struct {
+	evRoot, scratchRoot  string
+	pluginDir, pluginDig string
+}
+
+func openLandingEvidence(cfg Config) (landingEvidence, func(), error) {
+	root, err := os.MkdirTemp(cfg.AdmitDir, "admit-ev-")
+	if err != nil {
+		return landingEvidence{}, func() {}, fmt.Errorf("admit: evidence dir: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(root) }
+	le := landingEvidence{
+		evRoot:      filepath.Join(root, "ev"),
+		scratchRoot: filepath.Join(root, "scratch"),
+	}
+	if err := os.MkdirAll(le.evRoot, 0o755); err != nil {
+		cleanup()
+		return landingEvidence{}, func() {}, fmt.Errorf("admit: evidence dir: %w", err)
+	}
+	if err := os.MkdirAll(le.scratchRoot, 0o777); err != nil {
+		cleanup()
+		return landingEvidence{}, func() {}, fmt.Errorf("admit: scratch dir: %w", err)
+	}
+	dir, dig, err := oracle.MaterializePlugin(filepath.Join(filepath.Dir(cfg.AdmitDir), "plugin"))
+	if err != nil {
+		cleanup()
+		return landingEvidence{}, func() {}, fmt.Errorf("admit: %w", err)
+	}
+	if _, err := cfg.CAS.Put(oracle.PluginSource()); err != nil {
+		cleanup()
+		return landingEvidence{}, func() {}, fmt.Errorf("admit: store evidence plugin: %w", err)
+	}
+	le.pluginDir, le.pluginDig = dir, dig
+	return le, cleanup, nil
+}
+
 // newLandingOracle builds one landing gate. A spec with no resolved config
 // digest is the v0 path — no policy named the instance — and takes M0's
 // CommandOracle verbatim, so a v0 admission's receipt keeps digesting to the
 // bytes M1a recorded and old ledgers keep replaying.
-func newLandingOracle(cfg Config, spec policy.Oracle, timeout time.Duration, baseline int64) (oracle.Oracle, error) {
+//
+// The landing tree-guard's base tree is the PRE-APPLY TRUNK TREE (M1f
+// decision 19), the same denominator logic as the collect baseline: "did
+// this patch touch the harness" is a question about what the patch does to
+// what is landing, and at admission that is trunk.
+func newLandingOracle(cfg Config, pol policy.Policy, spec policy.Oracle, timeout time.Duration,
+	baseline int64, ev landingEvidence, trunkTree, landingTree string) (oracle.Oracle, error) {
 	if spec.Config == "" {
 		return &oracle.CommandOracle{
 			Argv:    append([]string(nil), spec.Argv...),
@@ -458,9 +541,19 @@ func newLandingOracle(cfg Config, spec policy.Oracle, timeout time.Duration, bas
 			CAS:     cfg.CAS,
 		}, nil
 	}
-	o, err := oracle.New(oracle.Params{
+	p := oracle.Params{
 		Spec: spec, CAS: cfg.CAS, Timeout: timeout, Baseline: baseline,
-	})
+		Paths: pol.Paths, Repo: cfg.Repo,
+		BaseTree: trunkTree, CandidateTree: landingTree,
+		Regime: object.RegimeStreamed, Crosscheck: pol.Evidence.Crosscheck,
+		PluginAutoload: pol.Evidence.PluginAutoload,
+		PluginDir:      ev.pluginDir, InWorldPlugin: ev.pluginDir, PluginDigest: ev.pluginDig,
+	}
+	if ev.evRoot != "" && pol.Evidence.Regime != object.RegimeInTree {
+		p.EvidenceDir = filepath.Join(ev.evRoot, spec.Kind)
+		p.ScratchDir = filepath.Join(ev.scratchRoot, spec.Kind)
+	}
+	o, err := oracle.New(p)
 	if err != nil {
 		return nil, fmt.Errorf("admit: %w", err)
 	}
@@ -495,6 +588,9 @@ func measureBaseline(ctx context.Context, cfg Config, pol policy.Policy, dir, tr
 	if err := appendEvent(cfg.Ledger, "baseline.recorded", map[string]any{
 		"collected_total": total,
 		"duration_ms":     rec.Execution.DurationMS,
+		// The landing baseline's own observation record, inside the
+		// audited closure for the same reason the race's is (sweep table).
+		"evidence_stream": artifact(3),
 		"exit_code":       rec.Execution.ExitCode,
 		"intent":          cfg.Intent,
 		"oracle": map[string]any{

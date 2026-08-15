@@ -1,0 +1,3 @@
+mvo-evidence/v0	deadbeefdeadbeefdeadbeefdeadbeef
+1	session_start	{"argv_digest":"sha256:aa","pid":41,"pytest":"8.4.1","rootdir":"/work-ro"}
+2	session_finish	{"duration_ms":1,"errored":0,"exitstatus":0,"failed":0,"passed":0,"skipped":0,"total":0}

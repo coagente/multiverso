@@ -93,6 +93,16 @@ func rationaleV1(pol policy.Policy, t *RaceTrace, base string) string {
 		details := make([]string, 0, len(t.Candidates))
 		for i := range t.Candidates {
 			c := &t.Candidates[i]
+			// A world that cleared every gate and still did not pass was
+			// stopped by an invariant, and the sentence must say which.
+			// Emitted only on inputs no M1e policy can produce (M1f
+			// decision 3's compatibility rule).
+			if c.failIdx < 0 {
+				if clause := invariantClause(c); clause != "" {
+					details = append(details, clause)
+					continue
+				}
+			}
 			label, reason := "", ""
 			if c.failIdx >= 0 {
 				label, reason = c.Gates[c.failIdx].Label, c.Gates[c.failIdx].Detail

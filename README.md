@@ -58,18 +58,46 @@ The interesting run is the one where a candidate goes green by **deleting tests*
 
 ### What the ladder catches, and what it does not
 
-Test deletion is **one** laundering vector, and in M1 it is the only one the default policy catches. All of the following were verified against the shipped fixture and sail through as `PASS`:
+The [2026-08 design partner study](docs/studies/2026-08-design-partner-study.md)
+found the hole and named it: **the candidate wrote its own evidence.** Suite
+metrics were parsed from a JUnit file written inside the candidate's own
+writable tree, and mvo content-addressed it after the process exited. Eight of
+eleven laundering vectors landed on trunk with a signed attestation
+`mvo verify HEAD` accepted.
 
-| Vector | Caught by the default policy? |
+M1f moved the boundary. Today:
+
+| Vector | Verdict |
 |---|---|
-| Delete tests (functions, or the whole file) | **yes** — `collected_delta` drops, or exit 5 |
-| `@pytest.mark.skip` the failing tests | **no** — skipped tests are still collected; `delta=+0`, exit 0 |
-| Weaken the assertions | **no** |
-| Rewrite assertions to match the candidate's own wrong output | **no** — and in our four-candidate run this one *won* |
-| A `conftest.py` overriding the process exit code | **no** — `status` reads the exit code; the same receipt records `tests_failed=2, status=pass` |
-| A `conftest.py` writing the JUnit report the oracle reads | **no** — every metric fabricated |
+| A new `conftest.py` — forged JUnit report, forged exit code | **STOPPED** — `harness_added` at rung O-1, before any of its Python runs |
+| Delete, skip, weaken or rewrite a test | **STOPPED** — `protected_modified` / `protected_deleted`, same rung |
+| An `*.egg-info` declaring a `pytest11` **entry-point plugin** | **STOPPED** — the run sets `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, so the module never loads; the metadata directory is also in the harness set. A red team landed this one on trunk before it was closed |
+| The same forgeries moved into **application** code | **DETECTED** — metrics come from a stream the control plane reads live; an absent stream, a lying exit code, or a disagreeing file is `status = error`. Covered by `internal/oracle/evidence_test.go` and by acceptance step 3k (guard gate off) — **not** by the corpus, whose vectors all die a rung earlier |
+| A 3-test repo reporting a 500-test suite, forged **coherently** on both oracles | **OPEN** — the cross-oracle invariant compares two numbers the same in-process adversary authors, so it catches the careless forgery and not the careful one. A red team walked through it |
+| Weakened assertions with the path guard deliberately relaxed | **OPEN** — not detectable from test outcomes at all; this is what O3 mutation testing (M2) is for |
+| An adversary who patches the observer from inside the test process | **OPEN** — and said so in the threat model, three times, because it will be misread once |
 
-The structural reason: **pytest-suite metrics are parsed from an artifact written inside the candidate's own writable tree**, so a candidate that runs code can author its own receipt numbers. Adding a `no-failed-tests` gate closes the exit-code override today (verified); skips, weakened assertions and forged reports need M2 (a `skipped-not-above` gate, O3 mutation, and an oracle that runs outside the candidate's write surface).
+Three mechanisms: a `tree-guard` oracle that compares two git trees the
+control plane holds and executes nothing; a control-plane-owned pytest plugin
+writing a framed event stream to a channel read **live**, so there is no
+end-of-run read to forge; and cross-oracle invariants, so a three-test
+repository reporting a 500-test suite escalates to a human instead of being
+signed — as long as the forgery is *incoherent*; two numbers the same
+adversary writes can be made to agree, and the table above says so. Every receipt records **which evidence regime observed it** — today
+that is `streamed` for every pytest run, on T0 and T1 alike, because the
+stronger `isolated` regime (a distinct oracle uid, a read-only worktree) is
+defined but **not yet deliverable**, and a policy demanding it is refused
+rather than quietly downgraded. A guarantee nobody can see the absence of is a
+guarantee nobody has — and that applies to the label as much as to the thing.
+
+The measurement for the **STOPPED** rows lives in
+[`testdata/adversarial/`](testdata/adversarial/README.md): a thirteen-vector
+corpus built *before* the fix, with the red baseline and the green one side by
+side. `scripts/adversarial.sh` re-runs it. The corpus does **not** evidence the
+DETECTED row — every vector in it dies at rung O-1 or at the suite gate, so
+none reaches the evidence stream; that row rests on
+`internal/oracle/evidence_test.go` plus acceptance step 3k, which races a
+forgery under a policy with the guard removed.
 
 **→ [The full itemized table, with the run that produced it](docs/concepts.md#what-the-gate-ladder-catches-and-what-it-does-not)**
 

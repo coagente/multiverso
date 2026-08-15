@@ -59,6 +59,23 @@ type Policy struct {
 	Esc      Escalation // compiled escalation rules
 	Oracles  []Oracle   // declared instances, name-sorted
 	Required []string   // oracle names the race must run, in ladder order
+	// M1f. Paths is the compiled path grammar the tree-guard oracle walks;
+	// Invariants is the compiled cross-oracle set Decide evaluates after
+	// the gates; Evidence says how future runs are OBSERVED and never
+	// enters Decide (decision 3). A v0 policy and an M1e v1 policy both
+	// compile to the M1e-identical defaults: no invariants, an empty path
+	// set, regime auto, crosscheck require.
+	Paths      PathSet
+	Invariants []Invariant // name-sorted, then role-map-sorted
+	Evidence   EvidencePlan
+}
+
+// EvidencePlan is the compiled EvidenceSpec: the "" sentinels resolved to
+// their M1f defaults exactly once, where they can be tested (decision 4).
+type EvidencePlan struct {
+	Regime         string // RegimeAuto | object.Regime*
+	Crosscheck     string // CrosscheckRequire | CrosscheckOff
+	PluginAutoload string // AutoloadOff | AutoloadOn
 }
 
 // Gate is one ordered hard gate.
@@ -73,6 +90,31 @@ type Gate struct {
 	// dialect: what M0 could not attest, it did not admit, and replay must
 	// reproduce that (M1e decision 7).
 	AlwaysFails bool
+	// RefuseAdditions mirrors paths.protected_additions into the gate that
+	// reads it, so the predicate stays a pure function of (gate, receipt)
+	// and never reaches back into the policy document.
+	RefuseAdditions bool
+}
+
+// guardCountMetrics are the five counts whose non-zero value is ALWAYS a
+// violation, in the order the fail reason prints them. protected_added is
+// deliberately not here: it is a violation only under
+// protected_additions == "refuse" (M1f decision 6).
+var guardCountMetrics = []string{
+	MetricProtectedModified, MetricProtectedDeleted,
+	MetricHarnessModified, MetricHarnessDeleted, MetricHarnessAdded,
+}
+
+// firstOffender is the lexicographically first offending path the guard
+// recorded in result.detail — enough to act on in a table cell, with the
+// whole list one artifact away. A receipt that names none (an older
+// implementation, or a hand-written fixture) renders "-": the counts are
+// still the verdict.
+func (g Gate) firstOffender(rec *object.Receipt) string {
+	if rec == nil || rec.Result.Detail == "" {
+		return "-"
+	}
+	return rec.Result.Detail
 }
 
 // Selector picks a world's counted receipt for one oracle instance (M1e
@@ -101,6 +143,7 @@ type Escalation struct {
 	OnRankingTie               bool
 	RequireEvidence            []Requirement // name-sorted
 	OnAllWorldsFailedMachinery bool
+	OnInvariantViolation       bool // M1f rule 0 — highest precedence
 }
 
 // Requirement names an oracle whose evidence the winner must carry.
@@ -409,6 +452,45 @@ func (g Gate) Eval(rec *object.Receipt) (bool, string) {
 			return true, ""
 		}
 		return false, fmt.Sprintf("coverage_bp=%d (want >= %d)", bp, g.Threshold)
+	case GateSkipsNotAbove:
+		skipped, ok := metric(MetricTestsSkipped)
+		if !ok {
+			return false, absent(MetricTestsSkipped)
+		}
+		if skipped <= g.Threshold {
+			return true, ""
+		}
+		return false, fmt.Sprintf("tests_skipped=%d (want <= %d)", skipped, g.Threshold)
+	case GatePathsUnmodified:
+		// The gate passes iff every VIOLATING count is 0 and
+		// paths_examined is present. protected_added is a violation only
+		// when the policy refuses additions: a candidate that adds a
+		// regression test is doing the right thing (decision 6).
+		examined, ok := metric(MetricPathsExamined)
+		if !ok {
+			return false, absent(MetricPathsExamined)
+		}
+		_ = examined
+		counts := make([]int64, 0, 6)
+		for _, name := range guardCountMetrics {
+			v, ok := metric(name)
+			if !ok {
+				return false, absent(name)
+			}
+			counts = append(counts, v)
+		}
+		added, ok := metric(MetricProtectedAdded)
+		if !ok {
+			return false, absent(MetricProtectedAdded)
+		}
+		violating := counts[0]+counts[1]+counts[2]+counts[3]+counts[4] > 0 ||
+			(g.RefuseAdditions && added > 0)
+		if !violating {
+			return true, ""
+		}
+		return false, fmt.Sprintf(
+			"protected_modified=%d protected_deleted=%d harness_modified=%d harness_deleted=%d harness_added=%d (first: %s)",
+			counts[0], counts[1], counts[2], counts[3], counts[4], g.firstOffender(rec))
 	default:
 		// Unreachable by construction: validation refused every unknown
 		// predicate at load, and the v0 dialect compiles its unknown gates

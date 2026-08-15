@@ -29,8 +29,38 @@ type Backend interface {
 	// orchestrator has already created at dir. T0: a no-op wrapper.
 	// T1: docker run of the keeper container. Errors are machinery
 	// failures and abort the race.
-	Open(ctx context.Context, dir string) (World, error)
+	Open(ctx context.Context, dir string, opts OpenOpts) (World, error)
 }
+
+// OpenOpts carries M1f's evidence plumbing into the world (the T1 mount
+// layout). Every field may be empty, which is the T0 case and the M1c
+// behaviour byte-for-byte: on the bare host the in-world paths ARE the
+// host paths, so nothing needs mounting.
+//
+// The layout on T1, in full:
+//
+//	/work         the worktree                    rw   the agent (phase A)
+//	/work-ro      the SAME worktree               ro   nobody — the oracle's cwd
+//	/mvo/evidence <raceDir>/ev/<world>/<kind>/    dir 0755, invoking uid
+//	/mvo/scratch  <raceDir>/scratch/<world>/…     0777, the test process
+//	/mvo/plugin   <wsDir>/plugin/<digest>/        ro, 0555
+//
+// M1c decision 3's "one mutable state" is preserved: /work and /work-ro
+// are the same host directory, mounted twice.
+type OpenOpts struct {
+	EvidenceDir string // host dir, control-plane-owned; bind → /mvo/evidence
+	ScratchDir  string // host dir, oracle-uid-writable;  bind → /mvo/scratch
+	PluginDir   string // host dir, read-only;            bind → /mvo/plugin
+}
+
+// In-world mount points (T1). Under T0 the in-world path of each of these
+// is the host path itself.
+const (
+	InWorldRO       = "/work-ro"
+	InWorldEvidence = "/mvo/evidence"
+	InWorldScratch  = "/mvo/scratch"
+	InWorldPlugin   = "/mvo/plugin"
+)
 
 // World is one provisioned world's execution surface.
 type World interface {

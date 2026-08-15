@@ -4,7 +4,7 @@
 >
 > Two conventions in the blocks below.
 >
-> - **Digests, timings and commit shas will differ on your machine.** An intent digest includes its creation timestamp and base commit, and every world, decision and evidence digest descends from one. Only the *policy* digests are stable, because a policy is a file whose bytes you control: a stock `mvo init` always mints `mv0:c1f0b72f…` for the default.
+> - **Digests, timings and commit shas will differ on your machine.** An intent digest includes its creation timestamp and base commit, and every world, decision and evidence digest descends from one. Only the *policy* digests are stable, because a policy is a file whose bytes you control: a stock `mvo init` always mints `mv0:f207c3fa…` for the default.
 > - **`mv0:1234abcd…` in this document means a digest truncated for page width.** mvo itself always prints all 64 hex characters, in every verb, including inside `evidence:` and `rationale:` lines.
 >
 > Modulo those two things, output should match line for line.
@@ -90,7 +90,7 @@ The two candidates in `patches/` are what an agent might plausibly produce:
 
 ```console
 $ mvo init --dir "$DEMO"
-initialized /tmp/mvo-demo/.multiverso (default policy mv0:c1f0b72f24aec3968626c782b5f0cc540124f35131cebaa6f3de7ff3b2a60487)
+initialized /tmp/mvo-demo/.multiverso (default policy mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543)
 signing key: /tmp/mvo-demo/.multiverso/keys/local.key (PRIVATE, unencrypted — never commit or copy it)
 git ignore:  /tmp/mvo-demo/.gitignore (rule already present; nothing written)
 ```
@@ -149,26 +149,42 @@ The policy is what will judge every candidate, and it is pinned into the intent 
 
 ```console
 $ mvo policy show default --dir "$DEMO"
-digest:    mv0:c1f0b72f24aec3968626c782b5f0cc540124f35131cebaa6f3de7ff3b2a60487
+digest:    mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543
 schema:    multiverso.dev/policy/v1
 name:      default
 gates (ordered):
-  1. collect-nonempty@collect         oracle=collect basis>=construction threshold=0
-  2. collected-not-below@collect      oracle=collect basis>=construction threshold=0
-  3. status-pass@suite                oracle=suite basis>=construction threshold=0
-ranking:   gate_pass,tests_passed_desc,wall_ms_asc,world_digest_asc
-escalation: on_all_worlds_failed_machinery
+  1. paths-unmodified@guard           oracle=guard basis>=construction threshold=0
+  2. collect-nonempty@collect         oracle=collect basis>=construction threshold=0
+  3. collected-not-below@collect      oracle=collect basis>=construction threshold=0
+  4. status-pass@suite                oracle=suite basis>=construction threshold=0
+ranking:   gate_pass,tests_passed_desc,world_digest_asc
+escalation: on_invariant_violation, on_all_worlds_failed_machinery, on_ranking_tie
 oracles:
   collect      kind=pytest-collect config=mv0:0544af0df9926013d520bd5b9347c6fd0f33080fffafba45476d4fa8256dc1fd argv=python3 -m pytest
+  guard        kind=tree-guard config=mv0:00fafab73e7e7852e6df8940d0a6387f8680917eb2a2677d7fcbf1ca8f2fcf5a argv=
   suite        kind=pytest-suite config=mv0:a6a5a160ea28c4c8386691caa64d493bef58adb411c2bd07332231c144cf20f7 argv=python3 -m pytest
-required:  collect,suite
+required:  guard,collect,suite
+paths (frozen against the candidate):
+  protected  (modify/delete) **/*_test.py **/test_*.py test/** tests/**
+  harness    (modify/delete/create) **/*.dist-info/** **/*.egg-info/** **/*.pth **/.gitignore **/conftest.py **/sitecustomize.py pyproject.toml pytest.ini setup.cfg tox.ini
+  additions  allow
+invariants (cross-oracle):
+  collect-equals-suite-total   roles collect,suite
+evidence:  regime auto, crosscheck require, plugin_autoload off
 source:    /tmp/mvo-demo/.multiverso/policies/default.json
 {"escalation":{"min_candidates_passing":0,…}}
 ```
 
-Read that as: **collect the tests → check nobody deleted any → run the suite**, in that order, stopping at the first failure. Then rank the survivors lexicographically: passing beats failing, more passing tests beats fewer, faster beats slower, and if all of that ties, the world digest breaks it deterministically.
+Read that as: **check the candidate did not touch the harness or the tests → collect the tests → check nobody deleted any → run the suite**, in that order, stopping at the first failure. Then rank the survivors lexicographically: passing beats failing, more passing tests beats fewer, and if all of that ties, `on_ranking_tie` escalates to a human rather than letting the world digest pick a winner.
 
-The gate order is the whole trick. `collected-not-below` runs *before* `status-pass`, so a candidate that makes the suite green by deleting tests is stopped by the counts and its suite is never even run. You will see that happen in [§4](#what-a-rejection-looks-like).
+Four things in that output are worth a second look, because they are the whole of what M1f changed:
+
+- **Rung O-1, `paths-unmodified@guard`, runs before any Python does.** It compares two git trees the control plane holds — the intent's base and the candidate's — and executes nothing. A candidate that edits a test or drops in a `conftest.py` is stopped here, for the cost of two tree walks, and never reaches a collect or a suite run.
+- **`paths`** is what it compares. `protected` is frozen against modification and deletion (adding a regression test is allowed and encouraged); `harness` is frozen against modification, deletion **and creation** — a repo with no `conftest.py` today must not acquire one from an untrusted generator.
+- **`ranking` has no `wall_ms_asc`.** It was the default third key until a study measured an assertion-weakening cheat beating the honest fix 6 races out of 10 on ~100 ms of scheduler jitter, each time with a signed rationale naming the stopwatch as decisive. Wall time is noise; a tie-break on noise is a coin flip wearing a signature. `on_ranking_tie` escalates instead. The key is still in the vocabulary if you want it.
+- **`evidence`** says how a run will be *observed*: metrics come from a control-plane-owned pytest plugin streaming to a channel mvo reads live, `crosscheck require` makes JUnit XML a second opinion rather than a source, and `plugin_autoload off` sets `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` in the run so a candidate cannot ship an `*.egg-info` that loads its own plugin into the test process. If your suite genuinely needs an installed plugin (`pytest-asyncio`, `pytest-django`), set it to `"on"` — deliberately, in the pinned artifact, knowing what it costs.
+
+The gate order is the whole trick. `collected-not-below` runs *before* `status-pass`, so a candidate that makes the suite green by deleting tests is stopped by the counts and its suite is never even run — and under the shipped default `paths-unmodified` stops it one rung earlier still. You will see both in [§4](#what-a-rejection-looks-like).
 
 `mvo policy list` shows every policy the workspace knows, and which one is the default.
 
@@ -219,29 +235,23 @@ Add `--parallel N` to run the worlds concurrently.
 
 **What is order-independent, and what is not.** The decision inputs are digest-sorted before the pure function sees them, so *shuffling the inputs cannot change the result*: concurrency cannot reorder them, and re-running `mvo audit` over the same recorded inputs reproduces the same decision bytes forever. That is a real guarantee, and it is the one the ledger rests on.
 
-**It does not make the winner stable across runs.** The default ranking's third key is `wall_ms_asc`, which reads *measured wall time*. Two candidates that tie on every hard gate and on `tests_passed` are separated by scheduling noise, so the winner can differ from run to run — same patches, same policy, same machine. In a scratch copy of the toy repo (`$TIE`, made exactly like `$DEMO` above), racing the two equally-correct `patches-tie` candidates ten times under the default policy, the winner changed twice:
+**It does not make the winner stable across runs — unless the ranking says so.** A ranking key that reads a *measured* quantity is a key that reads noise. The default's third key used to be `wall_ms_asc`, and a design partner study measured what that costs: in a repo with a real off-by-one bug, an assertion-weakening cheat and the honest fix both passed every hard gate, tied on `tests_passed`, and were separated by ~100 ms of scheduler jitter — the cheat won 6 races out of 10, each time with a signed rationale naming `wall_ms_asc (3809 < 3922)` as the decisive key.
+
+The shipped default no longer does that. Its ranking is `[gate_pass, tests_passed_desc]` and `escalation.on_ranking_tie` is **on**, so a genuine tie is reported as a tie:
 
 ```console
-$ for i in $(seq 1 10); do
-    I="$(mvo intent new --dir "$TIE" --title "run$i")"
-    mvo race "$I" --dir "$TIE" --agent script --patches "$TIE/patches-tie" >/dev/null
-    mvo explain "$I" --dir "$TIE" | awk '/^  1  /{print "winner ordinal " $3}'
-  done
-winner ordinal 2
-winner ordinal 1
-winner ordinal 2
-winner ordinal 2
-winner ordinal 2
-winner ordinal 1
-winner ordinal 2
-winner ordinal 2
-winner ordinal 2
-winner ordinal 2
+$ I="$(mvo intent new --dir "$TIE" --title "tie")"
+$ mvo race "$I" --dir "$TIE" --agent script --patches "$TIE/patches-tie"
+ESCALATE (decision mv0:…, 2 worlds)
+
+$ mvo explain "$I" --dir "$TIE" | sed -n '/^escalation/,+2p'
+escalation: on_ranking_tie
+            mv0:f595… and mv0:f717… tie on every ranking key [gate_pass,tests_passed_desc]; only world_digest_asc would order them
 ```
 
-Nothing is wrong there: the policy said "prefer the faster one", the candidates were equally correct, and the timings genuinely differed. But if you read `wall_ms_asc` as a tiebreak of last resort, you are trusting a coin flip.
+A correct refusal beats a confident wrong answer. `world_digest_asc` is still appended as the final key so the *ordering* stays deterministic and replayable — but the rendering calls it "tie-break only — not a decision", and the escalation is what the operator acts on.
 
-**If you need a stable answer, do not let a measured quantity be the last key.** Drop `wall_ms_asc` from your ranking and turn on `escalation.on_ranking_tie`, so a real tie is reported as a tie instead of resolved by noise — that is exactly what [When mvo refuses to decide](#when-mvo-refuses-to-decide) builds:
+`wall_ms_asc` is still in the vocabulary. If you put it back, you are choosing a stopwatch as a tiebreak, and you should say so out loud in your policy review:
 
 ```json
 {"escalation": {"on_ranking_tie": true},
@@ -271,26 +281,29 @@ $ mvo explain "$INTENT" --dir "$DEMO"
 decision:  mv0:03a60e9594b34ab6646cb7c1d79f22e501d4ef8732d567e1524fe51f052ad73a
 type:      SELECT
 intent:    mv0:223b311241502607f2114f0c8c6859a84ff5c328292fa849aebff67db1e9374c  (fix mean())
-policy:    mv0:c1f0b72f24aec3968626c782b5f0cc540124f35131cebaa6f3de7ff3b2a60487  (default, policy/v1)
+policy:    mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543  (default, policy/v1)
+evidence:  regime streamed (T0-worktree; isolated not deliverable in this binary), plugin sha256:69b43012e0335506…
 winner:    mv0:18ba934906021f6660486bf0e41f966668a7615021707b83c8263349683cd41a
 
 gates (ordered, first failure stops the ladder):
-  RANK  WORLD                                                                 ORD  collect-nonempty@collect  collected-not-below@collect  status-pass@suite   RESULT
-  1     mv0:18ba934906021f6660486bf0e41f966668a7615021707b83c8263349683cd41a  1    pass (total=8)            pass (delta=+0)              pass                PASS
-  2     mv0:ad21cf57cb0b64d2ebf46f9226e025d22b9ad8807295e3ac124f2ea824827db0  2    pass (total=8)            pass (delta=+0)              FAIL (status=fail)  FAIL
+  RANK  WORLD                                                                 ORD  paths-unmodified@guard  collect-nonempty@collect  collected-not-below@collect  status-pass@suite   INVARIANTS  RESULT
+  1     mv0:18ba934906021f6660486bf0e41f966668a7615021707b83c8263349683cd41a  1    pass                    pass (total=8)            pass (delta=+0)              pass                ok          PASS
+  2     mv0:ad21cf57cb0b64d2ebf46f9226e025d22b9ad8807295e3ac124f2ea824827db0  2    pass                    pass (total=8)            pass (delta=+0)              FAIL (status=fail)  n/a         FAIL
 
-why mv0:18ba934906021f6660486bf0e41f966668a7615021707b83c8263349683cd41a won  (ranking [gate_pass, tests_passed_desc, wall_ms_asc, world_digest_asc]):
+why mv0:18ba934906021f6660486bf0e41f966668a7615021707b83c8263349683cd41a won  (ranking [gate_pass, tests_passed_desc, world_digest_asc]):
   vs mv0:ad21cf57cb0b64d2ebf46f9226e025d22b9ad8807295e3ac124f2ea824827db0 (rank 2): decided at key 1 gate_pass (pass > fail)
 
-evidence:  mv0:0af6fb304d460076f88ca6d9d0e490a1ed0d15bfaf359f03284821cdd50a357a  (pytest-suite@mv0:ad21cf57…, fail, coverage_bp=4651, duration_ms=84, tests_errored=0, tests_failed=2, tests_passed=6, tests_skipped=0, tests_total=8)
+evidence:  mv0:0af6fb304d460076f88ca6d9d0e490a1ed0d15bfaf359f03284821cdd50a357a  (pytest-suite@mv0:ad21cf57…, fail, coverage_bp=8406, duration_ms=34, tests_errored=0, tests_failed=2, tests_failed_first_run=2, tests_passed=6, tests_passed_after_rerun=0, tests_skipped=0, tests_total=8)
            mv0:33506af05411db8d660a35d90288657abe475a973b2989497368fd7c0fcb041a  (pytest-collect@mv0:ad21cf57…, pass, collected_base=8, collected_delta=0, collected_total=8)
+           mv0:88077843c967808e185d21e9d9fe8758c2330e7e5e3a16093fb397ecc36bfc18  (tree-guard@mv0:18ba9349…, pass, harness_added=0, harness_deleted=0, harness_modified=0, paths_examined=2, protected_added=0, protected_deleted=0, protected_modified=0)
            mv0:9b4f5a5bdcc2b9593bfd4f05da2d1787785619a581ec36ffdda082978f5323ad  (pytest-collect@mv0:18ba9349…, pass, collected_base=8, collected_delta=0, collected_total=8)
-           mv0:c6375e2def2a09efb82065b1477d8eb84bab3f9981144e32f27c0c051414ee4e  (pytest-suite@mv0:18ba9349…, pass, coverage_bp=4651, duration_ms=58, tests_errored=0, tests_failed=0, tests_passed=8, tests_skipped=0, tests_total=8)
-rationale: 1/2 worlds passed hard gates [collect-nonempty@collect,collected-not-below@collect,status-pass@suite]; selected mv0:18ba9349… (sole world passing all hard gates); ranking [gate_pass,tests_passed_desc,wall_ms_asc,world_digest_asc]
+           mv0:c6375e2def2a09efb82065b1477d8eb84bab3f9981144e32f27c0c051414ee4e  (pytest-suite@mv0:18ba9349…, pass, coverage_bp=8261, duration_ms=26, tests_errored=0, tests_failed=0, tests_failed_first_run=0, tests_passed=8, tests_passed_after_rerun=0, tests_skipped=0, tests_total=8)
+           mv0:d3326332d586437c43a81d3a764cc84b4d25f4bf10134398e9b0e073bf3370a0  (tree-guard@mv0:ad21cf57…, pass, harness_added=0, harness_deleted=0, harness_modified=0, paths_examined=2, protected_added=0, protected_deleted=0, protected_modified=0)
+rationale: 1/2 worlds passed hard gates [paths-unmodified@guard,collect-nonempty@collect,collected-not-below@collect,status-pass@suite]; selected mv0:18ba9349… (sole world passing all hard gates); ranking [gate_pass,tests_passed_desc,world_digest_asc]
 freshness: FRESH (base 4bd0d29c3feb == main head)
 ```
 
-`patch-b` broke `clamp()`, two tests failed, `status-pass` failed, done. Nothing in that table is stored: the gate results, the ranking walk and the metrics are all recomputed at render time from the ledger, CAS and the pinned policy, by the same pure functions the decision used. Improving the renderer can never change a decision.
+`patch-b` broke `clamp()`, two tests failed, `status-pass` failed, done. Both candidates carry a `tree-guard` receipt too: neither touched a test file or a harness file, so both cleared rung O-1 and paid for the Python runs. Nothing in that table is stored: the gate results, the ranking walk and the metrics are all recomputed at render time from the ledger, CAS and the pinned policy, by the same pure functions the decision used. Improving the renderer can never change a decision.
 
 `--diffs N` appends the top-N candidates' captured patches, so you can read the change without leaving the tool:
 
@@ -439,7 +452,7 @@ attestation/sha256_1174b22f….dsse.json
 decisions/mv0_079ba7c6….dsse.json
 decisions/mv0_2817978c….dsse.json
 intent/mv0_86d5e41e….json
-policy/mv0_c1f0b72f….json
+policy/mv0_f207c3fa….json
 receipts/mv0_0aecadf9….dsse.json
 …
 worlds/mv0_3a355409….json
@@ -462,52 +475,83 @@ If a leaked key is your threat model, M1's answer today is: keep the key on one 
 
 ### 9. `mvo audit`
 
-Replay the whole ledger:
+Replay the whole ledger and re-hash everything it points at:
 
 ```console
 $ mvo audit --dir "$DEMO"
-OK: 25 events, 2 decisions replayed
+OK: 28 events, 2 decisions replayed, 44 CAS objects verified, 1 attestation signature(s) verified against the workspace key
 
 $ mvo audit --dir "$DEMO" --json
-{"schema":"multiverso.dev/audit-report/v0","events":25,"decisions":2,"admissions":1,"chain_ok":true,"replay_identical":true,"mismatches":[]}
+{"schema":"multiverso.dev/audit-report/v1","events":28,"decisions":2,"admissions":1,
+ "chain_ok":true,"replay_identical":true,
+ "cas_checked":44,"cas_missing":[],"cas_corrupt":[],"cas_unreferenced":0,
+ "attestations_checked":1,"attestations_verified":1,"attestations_verified_against":"workspace",
+ "mismatches":[]}
 ```
 
-Two independent properties:
+Three independent properties:
 
 - **`chain_ok`** recomputes every payload digest and chain hash over the event log. **Insertions and edits are detected** — any edited row breaks its own hash and every hash after it. **Tail truncation is detected only against a naive `delete`**: the check is that the last seq equals SQLite's `AUTOINCREMENT` high-water mark, and that mark lives in the ordinary, writable `sqlite_sequence` table. An operator with write access to the DB who deletes the tail *and* resets the mark gets a clean `OK`. An unwitnessed local chain therefore proves the log was not corrupted; it cannot prove it is *complete* against someone who can write to the file. Completeness needs an external witness — publishing the closure to a remote (`mvo publish`) is M1's only such anchor.
 - **`replay_identical`** re-runs the shipped decision functions over the recorded inputs and compares type, subject, evidence and rationale **byte for byte** against what was recorded. A divergence prints the mismatch and exits 1.
+- **`cas_checked` / `cas_missing` / `cas_corrupt`** is the integrity sweep: every CAS object the ledger references is re-read and re-hashed, from a **declared table** that is part of [the M1f contract](design/M1f-trust-boundary.md#the-referenced-set--normative) rather than a best-effort walk. Missing or corrupt is **exit 1**.
 
 #### What `mvo audit` actually checks
 
-`audit` reads the **ledger**. It replays decisions from ledger payloads and loads each decision's pinned policy from CAS. **It does not sweep `cas/` for integrity** — it never re-hashes artifact blobs, so a deleted or edited patch, transcript, JUnit report or attestation bundle is not detected:
+`audit` reads the **ledger**, and then the closure the ledger points at. Both tamper shapes are failures now:
 
 ```console
-$ printf 'TOTAL GARBAGE NOT EVEN JSON' > .multiverso/cas/sha256/11/74b22f…   # the attestation bundle itself
+$ printf 'TOTAL GARBAGE NOT EVEN JSON' > .multiverso/cas/sha256/d0/286dd4…   # the attestation bundle itself
 $ mvo audit --dir "$DEMO"
-OK: 25 events, 2 decisions replayed
+CORRUPT: sha256:d0286dd4… cas: get sha256:d0286dd4…: content corrupted: bytes hash to sha256:3b4a6342…, referenced by attestation.recorded seq 27 (bundle)
+mvo: audit: CAS sweep found 0 missing and 1 corrupt of 44 referenced objects
 $ echo $?
-0
+1
 
-$ rm .multiverso/cas/sha256/11/74b22f…                                        # now delete it outright
+$ rm .multiverso/cas/sha256/d0/286dd4…                                        # now delete it outright
 $ mvo audit --dir "$DEMO"
-OK: 25 events, 2 decisions replayed
-$ echo $?
-0
-```
-
-Use **`mvo verify <commit>`** for the blobs an attestation actually depends on — it catches both cases at the first check:
-
-```console
-$ mvo verify HEAD --dir "$DEMO"
-mvo: verify: bundle_digest: cas: get sha256:1174b22f…: no such file or directory
+MISSING: sha256:d0286dd4… referenced by attestation.recorded seq 27 (bundle)
+mvo: audit: CAS sweep found 1 missing and 0 corrupt of 44 referenced objects
 $ echo $?
 1
 ```
 
+Earlier versions of this page said audit did **not** do this, and that was true when it was written: a deleted attestation blob produced a clean `OK`. It does not any more, and the assertion is in `scripts/accept.sh` (step 9a) so it cannot quietly stop being true again.
+
+**What the sweep proves, and what it does not.** It proves the **recorded closure is intact and self-consistent**. It cannot prove that something *was* recorded which never was: an adversary with write access to the ledger cannot forge the chain, but an operator who never ran an oracle has nothing for audit to miss. Objects in `cas/` that nothing references are **counted** (`cas_unreferenced`) and never failed — CAS legitimately holds more than the ledger names, from publication working sets and prior prunes.
+
+Three flags matter here:
+
+| flag | what it does |
+|---|---|
+| `--cas-sweep=false` | skip the sweep on a large ledger and a slow disk. The human line then says `(CAS sweep skipped)` and the JSON reports `"cas_checked":0` — **a skipped check never renders like a passed one** |
+| `--require-decisions N` | exit 1 unless at least N decisions replayed. The CI knob |
+| `--key PATH` | the trust anchor for the attestation signatures |
+
+**`--key` is the difference between a check and a self-check.** Without it, audit verifies each DSSE bundle against **this workspace's own public key** — which a rogue clone reproduces exactly, since it signed the thing itself. That is why the human line names the anchor (`verified against the workspace key`) and the JSON reports `attestations_verified_against`. Pass `--key /path/to/trusted.pub` to make "verified" a statement about provenance.
+
 Two further limits worth knowing before you wire `audit` into anything:
 
-- **`audit` verifies THIS WORKSPACE's ledger. It is not an admission check.** It takes no commit argument, and it exits 0 on an empty workspace — a fresh `mvo init` with zero races prints `OK: 2 events, 0 decisions replayed (no races in this workspace — nothing was verified)` and returns 0. **Never wire it into a merge queue as the check that a commit is attested**: it would pass vacuously for anyone who deletes `.multiverso/` or never creates it, enforcing nothing while looking like it enforces everything. The verb that answers "is *this commit* attested" is `mvo verify <commit>`.
-- `mvo audit <commit>` and an `--expect-admissions` flag would each fix a real gap here. Neither exists in M1, and both are out of scope for this pass — see [Status](../README.md#status).
+- **`audit` verifies THIS WORKSPACE's ledger. It is not an admission check.** It takes no commit argument, and it exits 0 on an empty workspace:
+
+  ```console
+  $ mvo audit --dir "$FRESH"
+  OK: 2 events, 0 decisions replayed, 1 CAS objects verified (no races in this workspace — nothing was decided)
+  $ echo $?
+  0
+  ```
+
+  **Never wire that into a merge queue as the check that a commit is attested**: it would pass vacuously for anyone who deletes `.multiverso/` or never creates it, enforcing nothing while looking like it enforces everything. Use `--require-decisions` to make the vacuous case loud:
+
+  ```console
+  $ mvo audit --dir "$FRESH" --require-decisions 1
+  SHORTFALL: 0 decisions replayed, --require-decisions 1
+  mvo: audit: 0 decisions replayed, --require-decisions 1
+  $ echo $?
+  1
+  ```
+
+  Note that stdout carries **no `OK:` line** there. That is deliberate and tested: a CI check grepping for `OK:` must not read a failed audit as a pass.
+- The verb that answers "is *this commit* attested" is still `mvo verify <commit>`. `mvo audit <commit>` does not exist in M1 — see [Status](../README.md#status).
 
 ### 10. Thirty seconds of paranoia
 
@@ -568,7 +612,7 @@ git -C "$SHELLREPO" init -q -b main && git -C "$SHELLREPO" add -A && git -C "$SH
 
 ```console
 $ mvo init --dir "$SHELLREPO"
-initialized /tmp/mvo-shell/.multiverso (default policy mv0:c1f0b72f…)
+initialized /tmp/mvo-shell/.multiverso (default policy mv0:f207c3fa…)
 
 $ SH="$(mvo intent new --dir "$SHELLREPO" --title "fix add()" \
       --desc "add() subtracts instead of adding" \
@@ -667,7 +711,7 @@ PY
 
 That renames it to `strict`, keeps the three default gates and appends two — a `no-failed-tests` gate and a coverage floor of 40% (thresholds are integer basis points — no floats anywhere in canonical JSON) — and ranks by coverage before test count.
 
-That `no-failed-tests` gate is worth more than it looks. The default `status-pass` gate reads the suite's **process exit code**; `no-failed-tests` reads `tests_failed` out of the JUnit report. A candidate that ships a `conftest.py` forcing `exitstatus = 0` passes the first and fails the second:
+That `no-failed-tests` gate is worth more than it looks — though under the shipped default it is now the *third* thing standing between you and an exit-code forgery, not the first. A candidate that ships a `conftest.py` forcing `exitstatus = 0` is stopped at rung O-1 by `paths-unmodified@guard` (`harness_added`) before its Python ever runs, and if you deliberately relax that gate the run's metrics come from the control plane's evidence stream rather than from the process's exit code, so `status-pass` fails on its own (rule S2: exit 0 against a stream reporting failures is `status = error`). `no-failed-tests` is what closes the same vector for a policy that has relaxed *both* — it reads `tests_failed` directly:
 
 ```console
   RANK  WORLD          ORD  …  status-pass@suite  no-failed-tests@suite                  RESULT
@@ -711,7 +755,7 @@ A typo is caught at load, not at 3 a.m.:
 
 ```console
 $ mvo policy validate testdata/toyrepo/policies/bad-gate.json
-mvo: policy validate: testdata/toyrepo/policies/bad-gate.json: hard_gates[1].gate: unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, status-pass)
+mvo: policy validate: testdata/toyrepo/policies/bad-gate.json: hard_gates[1].gate: unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)
 ```
 
 Install it as the workspace default (or skip this and pin it per intent with `mvo intent new --policy strict`):
@@ -722,7 +766,7 @@ default policy mv0:fe226d5dda210a9c5d0ebaef3d155846b80ef20281970b345ddf052a0ab49
 
 $ mvo policy list --dir "$GUARD"
 NAME     DIGEST             SCHEMA     GATES                                    RANKING                            STATE
-default  mv0:c1f0b72f…      policy/v1  collect-nonempty@collect,…               gate_pass,tests_passed_desc,…      recorded
+default  mv0:f207c3fa…      policy/v1  paths-unmodified@guard,…                 gate_pass,tests_passed_desc        recorded
 strict   mv0:fe226d5d…      policy/v1  …,no-failed-tests@suite,coverage-at-…    gate_pass,coverage_desc,…          recorded (default)
 ```
 
@@ -747,7 +791,7 @@ why mv0:d71da43c… won  (ranking [gate_pass, coverage_desc, tests_passed_desc, 
     2  coverage_desc  4665  >  4651  WINNER mv0:d71da43c…   ← decided here
 ```
 
-**The vocabularies are closed.** Gates: `collect-nonempty`, `collected-not-below`, `coverage-at-least`, `no-failed-tests`, `status-pass`. Ranking keys: `gate_pass`, `tests_passed_desc`, `coverage_desc`, `wall_ms_asc`, `cost_asc`, `patch_size_asc`, `world_digest_asc`. Oracle kinds: `command`, `pytest-collect`, `pytest-suite`. Freshness bases: `construction`, `dependency`, `probabilistic` (M1's oracles emit only `construction`). Escalation rules: `min_candidates_passing`, `on_ranking_tie`, `require_evidence`, `on_all_worlds_failed_machinery`. There is no expression language and there will not be one.
+**The vocabularies are closed.** Gates: `collect-nonempty`, `collected-not-below`, `coverage-at-least`, `no-failed-tests`, `paths-unmodified`, `skips-not-above`, `status-pass`. Ranking keys: `gate_pass`, `tests_passed_desc`, `coverage_desc`, `wall_ms_asc`, `cost_asc`, `patch_size_asc`, `world_digest_asc`. Oracle kinds: `command`, `pytest-collect`, `pytest-suite`, `tree-guard`. Freshness bases: `construction`, `dependency`, `probabilistic` (M1's oracles emit only `construction`). Escalation rules: `min_candidates_passing`, `on_ranking_tie`, `require_evidence`, `on_all_worlds_failed_machinery`, `on_invariant_violation`. Cross-oracle invariants: `collect-equals-suite-total`, `suite-parts-sum-to-total`. Path classes: `protected`, `harness`, with `protected_additions` ∈ {`allow`, `refuse`}. Evidence: `regime` ∈ {`auto`, `isolated`, `streamed`, `in-tree`}, `crosscheck` ∈ {`require`, `off`}, `plugin_autoload` ∈ {`off`, `on`}. There is no expression language and there will not be one.
 
 ### When mvo refuses to decide
 
@@ -1194,7 +1238,8 @@ Two things that snippet does deliberately. It passes **`--key`** with a public k
 | `mvo explain <intent> [--json] [--diffs N]` | the full argument, derived at render time |
 | `mvo admit <intent>` | re-gate on the landing tree, land it, sign an attestation |
 | `mvo verify <commit> [--key PUB] [--json]` | seven offline checks. **`--key` is the trust anchor** — without it the default key makes verification a tautology inside the workspace that produced the attestation |
-| `mvo audit [--json]` | hash chain + byte-exact replay of every decision **in this workspace's ledger**. Takes no commit, does **not** check `cas/`, and exits 0 on an empty workspace — [never a merge-queue check](#what-mvo-audit-actually-checks) |
+| `mvo audit [--json] [--key PUB] [--require-decisions N] [--cas-sweep=BOOL]` | hash chain + byte-exact replay of every decision **in this workspace's ledger**, plus a re-hash of every CAS object the ledger references. Takes no commit and exits 0 on an empty workspace — [never a merge-queue check](#what-mvo-audit-actually-checks). Without `--key` the signature check is a **self-check** against the workspace's own key, and the output says so |
+| `mvo guard --base <rev> [--tree <rev>] [--policy P] [--json]` | the adoption wedge: compare two trees under a policy's path sets, exit 0 clean / 1 violating. No ledger writes, no race. `mvo guard --base HEAD~50` answers "would this gate have blocked my last fifty commits" |
 | `mvo version` | build revision of this binary |
 | `mvo publish <intent> [--remote R]` | push the signed closure to a remote namespace |
 | `mvo fetch-race <short> [--key PUB]` | verify a published race in any clone |

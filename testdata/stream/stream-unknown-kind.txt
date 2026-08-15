@@ -1,0 +1,6 @@
+mvo-evidence/v0	0123456789abcdef0123456789abcdef
+1	session_start	{"argv_digest":"sha256:aa","pid":41,"pytest":"8.4.1","rootdir":"/work-ro"}
+2	collected	{"count":1}
+3	monitor_verdict	{"suspicion":7}
+4	test	{"duration_ms":1,"nodeid":"t.py::a","outcome":"passed","run":1}
+5	session_finish	{"duration_ms":9,"errored":0,"exitstatus":0,"failed":0,"passed":1,"skipped":0,"total":1}

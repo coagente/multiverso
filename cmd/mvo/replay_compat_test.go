@@ -149,7 +149,13 @@ func TestAuditReplaysPreM1eLedger(t *testing.T) {
 	ws.Close()
 
 	// Replay: the M1e binary must reproduce that decision exactly.
-	stdout, stderr, code := mvo(t, "audit", "--dir", repo)
+	// --cas-sweep=false: this fixture is a hand-built ledger whose blob
+	// references are synthetic, so there is nothing in CAS to sweep. What
+	// is under test here is REPLAY compatibility, and the sweep is a
+	// separate axis with its own tests — a skipped check that renders
+	// identically to a passed one is exactly what M1f removes, which is
+	// why it has to be asked for by name.
+	stdout, stderr, code := mvo(t, "audit", "--dir", repo, "--cas-sweep=false")
 	if code != exitOK {
 		t.Fatalf("audit exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
 	}
@@ -268,7 +274,13 @@ func TestAuditReplaysBothPolicySchemas(t *testing.T) {
 	}
 	ws.Close()
 
-	stdout, stderr, code := mvo(t, "audit", "--dir", repo)
+	// --cas-sweep=false: this fixture is a hand-built ledger whose blob
+	// references are synthetic, so there is nothing in CAS to sweep. What
+	// is under test here is REPLAY compatibility, and the sweep is a
+	// separate axis with its own tests — a skipped check that renders
+	// identically to a passed one is exactly what M1f removes, which is
+	// why it has to be asked for by name.
+	stdout, stderr, code := mvo(t, "audit", "--dir", repo, "--cas-sweep=false")
 	if code != exitOK {
 		t.Fatalf("audit exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
 	}

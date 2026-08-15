@@ -143,16 +143,38 @@ type OracleRef struct {
 	Config  string `json:"config"` // digest of argv+timeout
 }
 
+// Evidence regimes (Execution.EvidenceRegime, EvidenceSpec.Regime). The
+// regime is a property of ONE oracle run, decided by capability at run
+// time and RECORDED, never assumed (M1f decision 13/14): a receipt that
+// does not say how it was observed invites the reader to assume the
+// strongest reading, which is exactly the failure the 2026-08 design
+// partner study found.
+const (
+	RegimeControlPlane = "control-plane" // no candidate code executes at all
+	RegimeIsolated     = "isolated"      // T1 + distinct oracle uid + read-only worktree
+	RegimeStreamed     = "streamed"      // framed stream over a FIFO; any tier
+	RegimeInTree       = "in-tree"       // M1e behaviour, explicitly declared only
+)
+
 // Execution records how the oracle ran. Argv is the IN-WORLD invocation
 // (the verification command is the evidence; any docker exec wrapper is
 // transport, reproducible from tier + caps + image digest — M1c decision
 // 12). IsolationCaps is always serialized (PRD §5.3; no omitempty games).
+//
+// EvidenceRegime and EvidencePlugin join the envelope in M1f (decision
+// 14), next to the field they are most like: they say HOW the numbers in
+// result.metrics were observed and by which observer. Both are always
+// serialized. Replay of pre-M1f ledgers is unaffected — M1e decision 1
+// pairs every recorded object with the digest it was recorded under and
+// never re-serializes.
 type Execution struct {
-	Argv          []string      `json:"argv"`
-	ExitCode      int           `json:"exit_code"`
-	DurationMS    int64         `json:"duration_ms"`
-	IsolationTier string        `json:"isolation_tier"`
-	IsolationCaps IsolationCaps `json:"isolation_caps"`
+	Argv           []string      `json:"argv"`
+	ExitCode       int           `json:"exit_code"`
+	DurationMS     int64         `json:"duration_ms"`
+	IsolationTier  string        `json:"isolation_tier"`
+	IsolationCaps  IsolationCaps `json:"isolation_caps"`
+	EvidenceRegime string        `json:"evidence_regime"`
+	EvidencePlugin string        `json:"evidence_plugin"` // plugin content address; "" when none ran
 }
 
 // Result is the oracle's verdict plus evidence artifacts and the metrics
@@ -164,10 +186,18 @@ type Execution struct {
 // construction — a nil map canonicalizes to null, which no M1e-recorded
 // receipt may contain (use NewResult).
 type Result struct {
-	Status    string            `json:"status"`    // "pass" | "fail" | "error"
-	Metrics   map[string]int64  `json:"metrics"`   // parsed metric name -> value
-	Tools     map[string]string `json:"tools"`     // structured source -> version
-	Artifacts []string          `json:"artifacts"` // CAS digests, fixed kind order
+	Status  string            `json:"status"`  // "pass" | "fail" | "error"
+	Metrics map[string]int64  `json:"metrics"` // parsed metric name -> value
+	Tools   map[string]string `json:"tools"`   // structured source -> version
+	// Detail is the control-plane's one-line, NON-NUMERIC summary of the
+	// verdict — the single string a pure gate predicate may quote when a
+	// count is not enough to act on. M1f's paths-unmodified gate needs the
+	// name of the first offending path in its fail reason, and Decide has
+	// no CAS access: a name that is not in the receipt cannot reach a
+	// rationale. Always serialized; "" for every kind that has nothing to
+	// add, which is every kind but tree-guard.
+	Detail    string   `json:"detail"`
+	Artifacts []string `json:"artifacts"` // CAS digests, fixed kind order
 }
 
 // NewResult builds a Result with non-nil metric and tool maps and the given
@@ -182,6 +212,7 @@ func NewResult(status string, artifacts ...string) Result {
 		Status:    status,
 		Metrics:   map[string]int64{},
 		Tools:     map[string]string{},
+		Detail:    "",
 		Artifacts: artifacts,
 	}
 }
@@ -246,13 +277,72 @@ type Policy struct {
 // they accept; a lexicographic ranking spec (NEVER a weighted sum); and a
 // closed set of escalation conditions. Every field is always serialized;
 // every list is order-significant.
+// The three M1f fields are ADDITIVE (M1f decision 3): an additive v1 field
+// is legal iff its compiled default reproduces M1e semantics exactly, and
+// no new rationale text may be emitted on any input an M1e policy can
+// produce. `invariants` defaults empty (no new evaluation, no new
+// sentence); `paths` is only consulted by a gate no M1e policy can name;
+// `evidence` selects how FUTURE runs are observed and never enters Decide.
 type PolicyV1 struct {
-	Schema     string         `json:"schema"`     // SchemaPolicyV1
-	Name       string         `json:"name"`       // authored name, e.g. "default"
-	Oracles    []OracleSpec   `json:"oracles"`    // declared instances, name-sorted
-	HardGates  []GateSpec     `json:"hard_gates"` // ORDERED: ladder and evaluation order
-	Ranking    []string       `json:"ranking"`    // ORDERED lexicographic keys
-	Escalation EscalationSpec `json:"escalation"`
+	Schema     string          `json:"schema"`     // SchemaPolicyV1
+	Name       string          `json:"name"`       // authored name, e.g. "default"
+	Oracles    []OracleSpec    `json:"oracles"`    // declared instances, name-sorted
+	HardGates  []GateSpec      `json:"hard_gates"` // ORDERED: ladder and evaluation order
+	Ranking    []string        `json:"ranking"`    // ORDERED lexicographic keys
+	Escalation EscalationSpec  `json:"escalation"`
+	Paths      PathSpec        `json:"paths"`      // M1f: the two frozen path classes
+	Invariants []InvariantSpec `json:"invariants"` // M1f: name-sorted, closed vocabulary
+	Evidence   EvidenceSpec    `json:"evidence"`   // M1f: how a run is OBSERVED
+}
+
+// PathSpec declares the two frozen path classes (M1f decision 6).
+// `protected` is frozen against modification and deletion; `harness` is
+// frozen against modification, deletion AND creation — a repository with
+// no conftest.py today must not acquire one from an untrusted generator.
+// Patterns use the closed glob grammar (decision 7), no regexp.
+//
+// ProtectedAdditions is a tri-state STRING, never a bool: "" must be
+// distinguishable from an explicit "allow", or an old policy would become
+// silently less checked the moment a field was added (decision 4).
+type PathSpec struct {
+	Protected          []string `json:"protected"`
+	Harness            []string `json:"harness"`
+	ProtectedAdditions string   `json:"protected_additions"` // "" ⇒ "allow" | "refuse"
+}
+
+// InvariantSpec names one closed invariant and binds its ROLES to declared
+// oracle instances. The vocabulary fixes which metric each role supplies
+// and how they are compared; the policy only says which instance fills
+// which role (M1f decision 10).
+type InvariantSpec struct {
+	Name    string            `json:"name"`    // closed vocabulary
+	Oracles map[string]string `json:"oracles"` // role -> declared oracle name
+}
+
+// EvidenceSpec selects how a run is OBSERVED. It never enters Decide; it
+// constrains future runs only (M1f decision 3). Both fields are tri-state
+// strings for decision 4's reason.
+type EvidenceSpec struct {
+	Regime     string `json:"regime"`     // "" ⇒ "auto" | "isolated" | "streamed" | "in-tree"
+	Crosscheck string `json:"crosscheck"` // "" ⇒ "require" | "off"
+	// PluginAutoload governs pytest's setuptools ENTRY-POINT plugin
+	// autoloading inside the oracle run. "" ⇒ "off": the run sets
+	// PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, and the only plugins that load are
+	// the ones mvo names on argv.
+	//
+	// M1f shipped without this and the red team walked straight through:
+	// pytest imports pytest11 entry points declared by ANY *.egg-info or
+	// *.dist-info on sys.path, the candidate tree root IS on sys.path, and
+	// the plugin module may be named anything — so no finite harness glob
+	// closes the surface. An entry-point plugin loads after `-p
+	// mvo_evidence`, in the same interpreter, and can take the channel over
+	// before the observer ever configures.
+	//
+	// "on" restores autoloading for repositories whose suites genuinely
+	// need an installed plugin (pytest-asyncio, pytest-django). It is a
+	// PINNED, ATTESTED policy choice with a stated cost, exactly like
+	// crosscheck: "off" — not a runtime flag.
+	PluginAutoload string `json:"plugin_autoload"` // "" ⇒ "off" | "on"
 }
 
 // OracleSpec declares one oracle instance. Kind selects the registry
@@ -285,6 +375,12 @@ type EscalationSpec struct {
 	OnRankingTie               bool     `json:"on_ranking_tie"`         // max_risk/ambiguity
 	RequireEvidence            []string `json:"require_evidence"`       // oracle names, sorted
 	OnAllWorldsFailedMachinery bool     `json:"on_all_worlds_failed_machinery"`
+	// OnInvariantViolation is M1f rule 0 — the HIGHEST precedence, above
+	// on_all_worlds_failed_machinery (M1f decision 11). A silent REJECT
+	// would file a detected forgery under "the tests didn't pass".
+	// Inserting a rule at the front of the list cannot change any
+	// historical evaluation: no M1e policy can declare an invariant.
+	OnInvariantViolation bool `json:"on_invariant_violation"`
 }
 
 // RecordedWorld and RecordedReceipt are the identity-carrying forms of a

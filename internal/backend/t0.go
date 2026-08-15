@@ -15,8 +15,11 @@ type t0Backend struct{}
 // Tier implements Backend.
 func (t0Backend) Tier() string { return object.TierT0Worktree }
 
-// Open implements Backend: a T0 world is the directory itself.
-func (t0Backend) Open(_ context.Context, dir string) (World, error) {
+// Open implements Backend: a T0 world is the directory itself. OpenOpts
+// is ignored by construction — on the bare host the evidence, scratch and
+// plugin directories are reachable at their host paths, so there is
+// nothing to map and the M1c identity mapping is preserved byte-for-byte.
+func (t0Backend) Open(_ context.Context, dir string, _ OpenOpts) (World, error) {
 	return HostDir(dir), nil
 }
 

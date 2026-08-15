@@ -28,6 +28,15 @@ func CASKey(dig string) (string, error) {
 	return "sha256:" + hexPart, nil
 }
 
+// CASKeyBytes returns the CAS key ("sha256:<hex>") of raw bytes — the same
+// key cas.Store.Put assigns them. It is the artifact spelling of a digest,
+// used where the bytes are an artifact rather than a canonical object (the
+// embedded pytest plugin's content address, M1f decision 14).
+func CASKeyBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // Canonical returns the canonical JSON encoding of v. Any value accepted
 // by encoding/json is normalized through generic decoding so that struct
 // field order never influences the output.

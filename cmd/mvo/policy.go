@@ -12,6 +12,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
+	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -137,7 +138,40 @@ func cmdPolicyList(args []string, stdout, stderr io.Writer) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("policy list: %w", err)
 	}
+	writeAdoptionHint(stdout, ws)
 	return nil
+}
+
+// writeAdoptionHint says so, in words, when the workspace default predates
+// this binary's built-in default (M1f decision 21). Upgrading the binary
+// does NOT rewrite .multiverso/policies/default.json — mutating an
+// operator's pinned artifact behind their back is precisely the thing
+// content addressing exists to prevent — so adoption is two explicit
+// commands, and this is where they are printed.
+func writeAdoptionHint(w io.Writer, ws *workspace.Workspace) {
+	shipped, err := builtinPolicy("default")
+	if err != nil {
+		return
+	}
+	current := ws.Config.DefaultPolicy
+	// The ONLY thing that ends adoption is the workspace actually racing
+	// under the shipped digest. Keying the early return on the file as well
+	// silently dropped the hint for an operator who had run the first of
+	// the two commands and not the second — exactly halfway, still racing
+	// under the old pinned digest, and no longer told so.
+	if current == "" || current == shipped.Digest {
+		return
+	}
+	file := ws.PolicyFile("default")
+	remainder := fmt.Sprintf("mvo policy show default --builtin --json > %s && mvo policy use default", file)
+	if b, err := os.ReadFile(file); err == nil && object.DigestBytes(b) == shipped.Digest {
+		// The file is already the shipped policy; only the pin is stale.
+		remainder = "mvo policy use default"
+	}
+	fmt.Fprintf(w, "mvo: policy list: the workspace default %s predates this binary's built-in default %s\n",
+		current, shipped.Digest)
+	fmt.Fprintf(w, "     (adds paths-unmodified@guard, collect-equals-suite-total, on_ranking_tie; drops wall_ms_asc)\n")
+	fmt.Fprintf(w, "     adopt with: %s\n", remainder)
 }
 
 // resolvedPolicy is a policy found by reference, with the bytes it was
@@ -194,6 +228,12 @@ func cmdPolicyShow(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("policy show", stderr)
 	dir := fs.String("dir", ".", "repository directory")
 	jsonOut := fs.Bool("json", false, "print only the canonical policy bytes")
+	// --builtin prints the BINARY's policy of that name regardless of what
+	// the workspace file says. This is how M1f decision 21's adoption
+	// two-liner is written down, and how an operator diffs their pinned
+	// default against the shipped one: upgrading the binary must never
+	// rewrite an operator's pinned artifact behind their back.
+	builtin := fs.Bool("builtin", false, "print this binary's built-in policy of that name")
 	if err := parseFlags(fs, rest); err != nil {
 		return err
 	}
@@ -204,18 +244,25 @@ func cmdPolicyShow(args []string, stdout, stderr io.Writer) error {
 		return usagef("policy show: a policy name or digest is required")
 	}
 
-	ws, err := workspace.Open(*dir)
-	if err != nil {
-		return fmt.Errorf("policy show: %w", err)
-	}
-	defer ws.Close()
-	st, err := loadState(ws.Ledger)
-	if err != nil {
-		return fmt.Errorf("policy show: %w", err)
-	}
-	rp, err := resolvePolicy(ws, st, refArg)
-	if err != nil {
-		return fmt.Errorf("policy show: %w", err)
+	var rp resolvedPolicy
+	if *builtin {
+		var err error
+		if rp, err = builtinPolicy(refArg); err != nil {
+			return fmt.Errorf("policy show: %w", err)
+		}
+	} else {
+		ws, err := workspace.Open(*dir)
+		if err != nil {
+			return fmt.Errorf("policy show: %w", err)
+		}
+		defer ws.Close()
+		st, err := loadState(ws.Ledger)
+		if err != nil {
+			return fmt.Errorf("policy show: %w", err)
+		}
+		if rp, err = resolvePolicy(ws, st, refArg); err != nil {
+			return fmt.Errorf("policy show: %w", err)
+		}
 	}
 	// --json prints ONLY the policy's bytes, with no trailing newline of our
 	// own: the round trip
@@ -233,6 +280,24 @@ func cmdPolicyShow(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "source:    %s\n", rp.Source)
 	fmt.Fprintf(stdout, "%s\n", rp.Bytes)
 	return nil
+}
+
+// builtinPolicy renders the binary's own policy of that name. Only the
+// shipped default has one: `command` is synthesized per intent from an
+// argv, so there is nothing constant to print.
+func builtinPolicy(name string) (resolvedPolicy, error) {
+	if name != "default" {
+		return resolvedPolicy{}, fmt.Errorf("no built-in policy %q (this binary ships: default)", name)
+	}
+	b, err := object.Canonical(policy.Default())
+	if err != nil {
+		return resolvedPolicy{}, err
+	}
+	pol, err := policy.Decode(b)
+	if err != nil {
+		return resolvedPolicy{}, err
+	}
+	return resolvedPolicy{Digest: object.DigestBytes(b), Bytes: b, Pol: pol, Source: "built-in"}, nil
 }
 
 // writePolicySummary renders what a policy MEANS: the ordered gates with
@@ -272,11 +337,58 @@ func writePolicySummary(w io.Writer, pol policy.Policy) {
 			o.Name, o.Kind, o.Config, strings.Join(append(o.Argv, o.Args...), " "))
 	}
 	fmt.Fprintf(w, "required:  %s\n", strings.Join(pol.Required, ","))
+	writePathsAndInvariants(w, pol)
+	// Unconditional: a reader must not have to know that T0 means
+	// `streamed`. A guarantee nobody can see the absence of is a
+	// guarantee nobody has (M1f decision 13).
+	fmt.Fprintf(w, "evidence:  regime %s, crosscheck %s, plugin_autoload %s\n",
+		pol.Evidence.Regime, pol.Evidence.Crosscheck, pol.Evidence.PluginAutoload)
+}
+
+// writePathsAndInvariants renders the two M1f sections, and only when the
+// policy declares them: an M1e-era policy's rendering is unchanged.
+func writePathsAndInvariants(w io.Writer, pol policy.Policy) {
+	if !pol.Paths.Empty() {
+		fmt.Fprintln(w, "paths (frozen against the candidate):")
+		for _, cls := range []struct {
+			label    string
+			patterns []policy.Pattern
+			note     string
+		}{
+			{"protected", pol.Paths.Protected, "modify/delete"},
+			{"harness", pol.Paths.Harness, "modify/delete/create"},
+		} {
+			if len(cls.patterns) == 0 {
+				continue
+			}
+			raws := make([]string, 0, len(cls.patterns))
+			for _, p := range cls.patterns {
+				raws = append(raws, p.Raw)
+			}
+			fmt.Fprintf(w, "  %-10s (%s) %s\n", cls.label, cls.note, strings.Join(raws, " "))
+		}
+		fmt.Fprintf(w, "  %-10s %s\n", "additions", pol.Paths.ProtectedAdditions)
+	}
+	if len(pol.Invariants) > 0 {
+		fmt.Fprintln(w, "invariants (cross-oracle):")
+		for _, inv := range pol.Invariants {
+			roles := make([]string, 0, len(inv.Roles))
+			for _, role := range inv.RoleNames() {
+				roles = append(roles, role)
+			}
+			fmt.Fprintf(w, "  %-28s roles %s\n", inv.Name, strings.Join(roles, ","))
+		}
+	}
 }
 
 // escalationRules lists the rules that are ON, in evaluation order.
 func escalationRules(e policy.Escalation) []string {
 	var out []string
+	// Rule 0 first: it is the highest precedence, and an operator reading
+	// this line reads it in the order the rules actually fire.
+	if e.OnInvariantViolation {
+		out = append(out, "on_invariant_violation")
+	}
 	if e.OnAllWorldsFailedMachinery {
 		out = append(out, "on_all_worlds_failed_machinery")
 	}
@@ -407,6 +519,13 @@ func cmdPolicyUse(args []string, stdout, stderr io.Writer) error {
 	}
 	if err := requireHardGates(pol); err != nil {
 		return fmt.Errorf("policy use: %s: hard_gates: %w", filepath.Base(path), err)
+	}
+	// Refused at INSTALL time, where the operator can act on it. A policy
+	// declaring a regime this binary cannot deliver used to validate
+	// cleanly, install cleanly, and then refuse every race — a workspace
+	// bricked until someone edited the file back.
+	if err := race.CheckRegime("policy use", pol); err != nil {
+		return err
 	}
 
 	dig := object.DigestBytes(b)

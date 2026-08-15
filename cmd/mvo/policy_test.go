@@ -108,7 +108,7 @@ func TestPolicyShow(t *testing.T) {
 	}
 	// The shipped default is the v1 ladder: it names its own oracles, and
 	// the rendering shows the resolved-config digest their receipts carry.
-	for _, want := range []string{"collect-nonempty@collect", "kind=pytest-collect", "required:  collect,suite"} {
+	for _, want := range []string{"collect-nonempty@collect", "kind=pytest-collect", "required:  guard,collect,suite"} {
 		if !strings.Contains(human, want) {
 			t.Errorf("default policy rendering missing %q:\n%s", want, human)
 		}
@@ -161,7 +161,7 @@ func TestPolicyValidate(t *testing.T) {
 		t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, exitFail, stdout, stderr)
 	}
 	wantLine := "mvo: policy validate: " + badPath + `: hard_gates[1].gate: unknown gate "suite-passes" ` +
-		`(known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, status-pass)`
+		`(known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)`
 	if strings.TrimRight(stderr, "\n") != wantLine {
 		t.Errorf("stderr =\n %q\nwant\n %q", strings.TrimRight(stderr, "\n"), wantLine)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -25,9 +26,10 @@ import (
 // 13, which must follow it) — so a race pays for one worktree and, under T1,
 // one keeper, not two.
 type baseWorld struct {
-	dir   string
-	added bool
-	wh    backend.World
+	dir                 string
+	added               bool
+	wh                  backend.World
+	evRoot, scratchRoot string
 }
 
 // openBaseWorld creates the base worktree and opens it behind the backend.
@@ -40,7 +42,20 @@ func (r *raceRun) openBaseWorld(ctx context.Context) (*baseWorld, error) {
 		return nil, fmt.Errorf("race: base world: %w", err)
 	}
 	bw := &baseWorld{dir: dir, added: true}
-	wh, err := r.cfg.Backend.Open(ctx, dir)
+	// The denominator is observed the same way the candidates are: a
+	// baseline measured through a different evidence path is not a
+	// baseline for THIS race's numbers.
+	bw.evRoot = filepath.Join(r.raceDir, "ev", "base")
+	bw.scratchRoot = filepath.Join(r.raceDir, "scratch", "base")
+	if err := os.MkdirAll(bw.evRoot, 0o755); err != nil {
+		bw.close(r)
+		return nil, fmt.Errorf("race: base world: %w", err)
+	}
+	if err := os.MkdirAll(bw.scratchRoot, 0o777); err != nil {
+		bw.close(r)
+		return nil, fmt.Errorf("race: base world: %w", err)
+	}
+	wh, err := r.cfg.Backend.Open(ctx, dir, r.openOptsFor(bw.evRoot, bw.scratchRoot))
 	if err != nil {
 		bw.close(r)
 		return nil, fmt.Errorf("race: base world: %w", err)
@@ -172,7 +187,23 @@ func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *ba
 	if !ok {
 		return 0, nil
 	}
-	o, err := oracle.New(oracle.Params{Spec: spec, CAS: r.cfg.CAS, Timeout: timeout})
+	tier := r.cfg.Backend.Tier()
+	p := oracle.Params{
+		Spec: spec, CAS: r.cfg.CAS, Timeout: timeout,
+		Regime: r.ev.regime, Crosscheck: r.ev.crosscheck, PluginAutoload: r.ev.autoload,
+		PluginDir: r.ev.pluginDir, PluginDigest: r.ev.pluginDigest,
+		InWorldPlugin: inWorldPath(tier, backend.InWorldPlugin, ""),
+	}
+	if bw.evRoot != "" && r.ev.regime != object.RegimeInTree {
+		p.EvidenceDir = filepath.Join(bw.evRoot, spec.Kind)
+		p.ScratchDir = filepath.Join(bw.scratchRoot, spec.Kind)
+		p.InWorldEvidence = inWorldPath(tier, backend.InWorldEvidence, spec.Kind)
+		p.InWorldScratch = inWorldPath(tier, backend.InWorldScratch, spec.Kind)
+	}
+	if p.InWorldPlugin == "" {
+		p.InWorldPlugin = r.ev.pluginDir
+	}
+	o, err := oracle.New(p)
 	if err != nil {
 		return 0, fmt.Errorf("race: baseline: %w", err)
 	}
@@ -194,6 +225,12 @@ func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *ba
 	if err := r.appendEventLocked("baseline.recorded", map[string]any{
 		"collected_total": total,
 		"duration_ms":     rec.Execution.DurationMS,
+		// The baseline collect run streams like any other run, and
+		// collected_base is the denominator collected-not-below divides
+		// by. Naming its stream here is what puts that observation inside
+		// the audited closure instead of leaving it an orphan blob in the
+		// sweep's unreferenced count. "" under the in-tree regime.
+		"evidence_stream": artifact(3),
 		"exit_code":       rec.Execution.ExitCode,
 		"intent":          r.cfg.Intent,
 		"oracle": map[string]any{

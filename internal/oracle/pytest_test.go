@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -224,21 +225,29 @@ func TestSuiteArgvGoldens(t *testing.T) {
 		junit = "--junit-xml=.mvo-oracle/pytest-suite/junit.xml"
 		rlog  = "--report-log=.mvo-oracle/pytest-suite/reportlog.jsonl"
 	)
+	// Under the autoload seal (the compiled default, and the zero value
+	// here — a caller that forgot to thread the setting must not reopen the
+	// entry-point surface) nothing loads by entry point, so every optional
+	// plugin mvo itself asks for has to be named on argv or its flag would
+	// be an unknown option.
+	pReportlog := []string{"-p", moduleReportlog}
+	pReruns := []string{"-p", moduleReruns}
 	tests := []struct {
-		name  string
-		spec  policy.Oracle
-		tools map[string]string
-		want  []string
-		plan  suitePlan
+		name     string
+		spec     policy.Oracle
+		tools    map[string]string
+		autoload string
+		want     []string
+		plan     suitePlan
 	}{
 		{
 			name:  "every plugin present",
 			spec:  policy.Oracle{Coverage: true, Reruns: 2, Args: []string{"-x"}},
 			tools: fullProbe,
-			want: []string{
+			want: concat([]string{
 				"python3", "-m", "coverage", "run", "-m", "pytest",
-				junit, "-p", "no:cacheprovider", rlog, "--reruns", "2", "-x",
-			},
+				junit, "-p", "no:cacheprovider",
+			}, pReportlog, []string{rlog}, pReruns, []string{"--reruns", "2", "-x"}),
 			plan: suitePlan{coverage: true, reportlog: true, reruns: true},
 		},
 		{
@@ -261,16 +270,16 @@ func TestSuiteArgvGoldens(t *testing.T) {
 			name:  "reportlog without rerunfailures: log but no reruns",
 			spec:  policy.Oracle{Reruns: 3},
 			tools: map[string]string{ToolPytest: "9.1.1", ToolReportlog: "0.4.0"},
-			want:  []string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider", rlog},
-			plan:  suitePlan{reportlog: true},
+			want: concat([]string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider"},
+				pReportlog, []string{rlog}),
+			plan: suitePlan{reportlog: true},
 		},
 		{
 			name:  "coverage present but not requested",
 			spec:  policy.Oracle{Coverage: false},
 			tools: fullProbe,
-			want: []string{
-				"python3", "-m", "pytest", junit, "-p", "no:cacheprovider", rlog,
-			},
+			want: concat([]string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider"},
+				pReportlog, []string{rlog}),
 			plan: suitePlan{reportlog: true},
 		},
 		{
@@ -280,22 +289,37 @@ func TestSuiteArgvGoldens(t *testing.T) {
 			name:  "non -m prefix is never coverage-wrapped",
 			spec:  policy.Oracle{Coverage: true, Argv: []string{"/usr/local/bin/pytest"}},
 			tools: fullProbe,
-			want: []string{
-				"/usr/local/bin/pytest", junit, "-p", "no:cacheprovider", rlog,
-			},
+			want: concat([]string{"/usr/local/bin/pytest", junit, "-p", "no:cacheprovider"},
+				pReportlog, []string{rlog}),
 			plan: suitePlan{reportlog: true},
 		},
 		{
 			name:  "zero reruns never asks for reruns",
 			spec:  policy.Oracle{Reruns: 0},
 			tools: fullProbe,
-			want:  []string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider", rlog},
-			plan:  suitePlan{reportlog: true},
+			want: concat([]string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider"},
+				pReportlog, []string{rlog}),
+			plan: suitePlan{reportlog: true},
+		},
+		{
+			// plugin_autoload: "on" is the escape hatch for a repository
+			// whose suite genuinely needs an installed plugin. The entry
+			// point loads it, so naming it again on argv would be
+			// redundant — and the entry-point surface is open, which is
+			// what the policy said.
+			name:     "autoload on: nothing is named on argv",
+			spec:     policy.Oracle{Reruns: 2},
+			tools:    fullProbe,
+			autoload: policy.AutoloadOn,
+			want: []string{"python3", "-m", "pytest", junit, "-p", "no:cacheprovider",
+				rlog, "--reruns", "2"},
+			plan: suitePlan{reportlog: true, reruns: true},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := &pytestOracle{kind: KindPytestSuite, spec: tt.spec}
+			o := &pytestOracle{kind: KindPytestSuite, spec: tt.spec,
+				ev: evidencePlan{autoload: tt.autoload}}
 			got := o.planSuite(tt.tools)
 			if !reflect.DeepEqual(got.argv, tt.want) {
 				t.Errorf("suite argv =\n  %v\nwant\n  %v", got.argv, tt.want)
@@ -765,4 +789,81 @@ func truncate(b []byte) string {
 		return string(b[:60]) + "…"
 	}
 	return string(b)
+}
+
+// concat flattens argv fragments — the goldens read better as
+// "prefix + the plugin the seal forced onto argv + the flag it enables".
+func concat(parts ...[]string) []string {
+	out := []string{}
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// M1f-a: the operator's PYTHONPATH must SURVIVE into the oracle run.
+//
+// os/exec deduplicates env keys keeping the LAST occurrence, so an
+// absolute `PYTHONPATH=<plugin dir>` appended to os.Environ() silently
+// discarded the ambient value. Since `auto` resolves to `streamed` on
+// every tier, that was every pytest run under the shipped default: a
+// src-layout repo, an uninstalled package, or any repo whose tests import
+// through PYTHONPATH collected zero tests on the first race a new user
+// ever ran.
+func TestWorldEnvPrependsRatherThanClobbersPYTHONPATH(t *testing.T) {
+	t.Setenv(envPyPath, filepath.Join("user", "src"))
+	o := &pytestOracle{kind: KindPytestSuite, ev: evidencePlan{
+		regime: object.RegimeStreamed, inWorldPlugin: filepath.Join("mvo", "plugin"),
+		hostEvidence: t.TempDir(),
+	}}
+	env := o.worldEnv(backend.HostDir(t.TempDir()), o.streamEnv("/ev/stream", "abc123"))
+
+	// The child sees the LAST occurrence of a key.
+	got := ""
+	for _, kv := range env {
+		if name, val, ok := strings.Cut(kv, "="); ok && name == envPyPath {
+			got = val
+		}
+	}
+	want := filepath.Join("mvo", "plugin") + string(os.PathListSeparator) + filepath.Join("user", "src")
+	if got != want {
+		t.Errorf("PYTHONPATH = %q, want %q — the plugin dir first, the operator's value kept", got, want)
+	}
+}
+
+// The entry-point seal, which is what actually closed the red team's
+// attack: pytest imports pytest11 entry points from any *.egg-info /
+// *.dist-info on sys.path, the candidate tree root IS on sys.path, and the
+// module they name may be called anything — so no harness glob closes the
+// surface.
+func TestStreamEnvSealsEntryPointAutoload(t *testing.T) {
+	base := evidencePlan{regime: object.RegimeStreamed, hostEvidence: t.TempDir(), inWorldPlugin: "/mvo/plugin"}
+	t.Run("sealed by default, with or without a channel", func(t *testing.T) {
+		for _, nonce := range []string{"", "abc123"} {
+			o := &pytestOracle{kind: KindPytestSuite, ev: base}
+			if !slices.Contains(o.streamEnv("/ev/stream", nonce), envNoAutoload+"=1") {
+				t.Errorf("nonce %q: env carries no %s; a run with no stream still reports a "+
+					"collected count and an exit code, and an entry-point plugin can author both",
+					nonce, envNoAutoload)
+			}
+		}
+	})
+	t.Run("the empty compiled value is the seal, never the hole", func(t *testing.T) {
+		plan := base
+		plan.autoload = ""
+		o := &pytestOracle{kind: KindPytestSuite, ev: plan}
+		if !slices.Contains(o.streamEnv("/ev/stream", "abc123"), envNoAutoload+"=1") {
+			t.Error("a caller that forgot to thread plugin_autoload reopened the entry-point surface")
+		}
+	})
+	t.Run("plugin_autoload on is the declared, attested escape hatch", func(t *testing.T) {
+		plan := base
+		plan.autoload = policy.AutoloadOn
+		o := &pytestOracle{kind: KindPytestSuite, ev: plan}
+		for _, kv := range o.streamEnv("/ev/stream", "abc123") {
+			if strings.HasPrefix(kv, envNoAutoload+"=") {
+				t.Errorf("plugin_autoload=on still set %s: the policy said the surface is open", kv)
+			}
+		}
+	})
 }

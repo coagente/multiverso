@@ -1,0 +1,19 @@
+diff --git a/test_stats.py b/test_stats.py
+index e580fdb..1436094 100644
+--- a/test_stats.py
++++ b/test_stats.py
+@@ -4,11 +4,12 @@ import stats
+ 
+ 
+ def test_mean_single():
+-    assert stats.mean([3]) == 3.0
++    with pytest.raises(ZeroDivisionError):
++        stats.mean([3])
+ 
+ 
+ def test_mean_pair():
+-    assert stats.mean([2, 4]) == 3.0
++    assert stats.mean([2, 4]) == 6.0
+ 
+ 
+ def test_mean_empty_raises():

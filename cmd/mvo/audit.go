@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,10 +9,12 @@ import (
 	"sort"
 
 	"github.com/coagente/multiverso/internal/admit"
+	"github.com/coagente/multiverso/internal/audit"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
+	"github.com/coagente/multiverso/internal/signing"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -22,17 +25,37 @@ type auditMismatch struct {
 }
 
 type auditReport struct {
-	Schema          string          `json:"schema"`
-	Events          int             `json:"events"`
-	Decisions       int             `json:"decisions"`
-	Admissions      int             `json:"admissions"` // decisions replayed via the admission path (M1a, additive)
-	ChainOK         bool            `json:"chain_ok"`
-	ReplayIdentical bool            `json:"replay_identical"`
-	Mismatches      []auditMismatch `json:"mismatches"`
-	Error           string          `json:"error,omitempty"`
+	Schema          string `json:"schema"`
+	Events          int    `json:"events"`
+	Decisions       int    `json:"decisions"`
+	Admissions      int    `json:"admissions"` // decisions replayed via the admission path (M1a, additive)
+	ChainOK         bool   `json:"chain_ok"`
+	ReplayIdentical bool   `json:"replay_identical"`
+	// M1f: the CAS integrity sweep over everything the ledger references.
+	// There is deliberately NO field claiming the closure is complete with
+	// respect to the world — audit verifies what was recorded, and cannot
+	// verify that something was recorded which never was.
+	CASChecked           int             `json:"cas_checked"`
+	CASMissing           []audit.Problem `json:"cas_missing"`
+	CASCorrupt           []audit.Problem `json:"cas_corrupt"`
+	CASUnreferenced      int             `json:"cas_unreferenced"`
+	AttestationsChecked  int             `json:"attestations_checked"`
+	AttestationsVerified int             `json:"attestations_verified"`
+	// AttestationsVerifiedAgainst names the trust anchor the signatures
+	// were checked with: "workspace" is a SELF-check that a rogue clone
+	// reproduces byte-for-byte, and the study documented exactly that
+	// confusion ("a fresh workspace signing with its own key produces a
+	// visually identical OK"). A reader must be able to tell the two apart
+	// without reading the source.
+	AttestationsVerifiedAgainst string          `json:"attestations_verified_against"`
+	Mismatches                  []auditMismatch `json:"mismatches"`
+	Error                       string          `json:"error,omitempty"`
 }
 
-const schemaAuditReport = "multiverso.dev/audit-report/v0"
+// The schema bumps to v1: a report, not a content-addressed object, so
+// there are no replay implications — but scripts pinning the string must
+// update, which is why it moves rather than silently gaining fields.
+const schemaAuditReport = "multiverso.dev/audit-report/v1"
 
 // cmdAudit verifies the ledger hash chain and recomputes every recorded
 // decision from its recorded evidence (NFR-1): Type, Subject, Evidence and
@@ -41,6 +64,17 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("audit", stderr)
 	dir := fs.String("dir", ".", "repository directory")
 	jsonOut := fs.Bool("json", false, "emit a machine-readable report")
+	// The CI knob decision 23 argues for: "nothing verified" keeps exit 0
+	// and keeps saying so in words, because `audit` is the obvious verb to
+	// wire into a smoke test and redefining it for everyone is not the fix
+	// for an over-claim. A required minimum is stated explicitly instead.
+	requireDecisions := fs.Int("require-decisions", 0, "fail unless at least N decisions replay")
+	casSweep := fs.Bool("cas-sweep", true, "re-read and re-hash every CAS object the ledger references")
+	// The trust anchor, spelled the same way `mvo verify --key` and
+	// `mvo fetch-race --key` spell it. Without it audit can only check the
+	// workspace's signatures against the workspace's OWN key, which a rogue
+	// clone reproduces — a self-check, and the output must say so.
+	keyPath := fs.String("key", "", "trusted public key PEM (default: the workspace's own key — a SELF-check)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -123,31 +157,170 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	}
 	report.ReplayIdentical = len(report.Mismatches) == 0
 
+	// The sweep: everything the ledger references, re-read and re-hashed.
+	sweepRan := false
+	if *casSweep {
+		sweep, err := audit.Sweep(ws.Ledger, ws.CAS)
+		if err != nil {
+			return fail(err)
+		}
+		sweepRan = true
+		report.CASChecked = sweep.Checked
+		report.CASMissing = sweep.Missing
+		report.CASCorrupt = sweep.Corrupt
+		report.CASUnreferenced = sweep.Unreferenced
+		checked, verified, against, err := verifyAttestations(ws, *keyPath)
+		if err != nil {
+			return fail(err)
+		}
+		report.AttestationsChecked, report.AttestationsVerified = checked, verified
+		report.AttestationsVerifiedAgainst = against
+	}
+	if report.CASMissing == nil {
+		report.CASMissing = []audit.Problem{}
+	}
+	if report.CASCorrupt == nil {
+		report.CASCorrupt = []audit.Problem{}
+	}
+	casOK := len(report.CASMissing) == 0 && len(report.CASCorrupt) == 0
+	// The block's own rule: a skipped check must never render identically
+	// to a passed one, and the OK line appears iff every check this
+	// invocation was asked for passed. --require-decisions is one of those
+	// checks, so it belongs in the guard and not in a switch after the
+	// line has already been printed: any CI check keyed on `OK:` would
+	// otherwise read a failed audit as a pass.
+	requireOK := *requireDecisions <= 0 || report.Decisions >= *requireDecisions
+
 	if *jsonOut {
 		if err := emitJSON(stdout, report); err != nil {
 			return fmt.Errorf("audit: %w", err)
 		}
-	} else if report.ReplayIdentical {
+	} else if report.ReplayIdentical && casOK && requireOK {
 		// The OK line appears iff the replay is identical (M0 CLI contract).
 		// Zero decisions is a vacuous pass — nothing was verified because
 		// there was nothing to verify — and it must not look like the real
 		// thing. `audit` is the obvious verb to wire into a required check,
 		// and as shipped it exits 0 on any workspace with no races.
+		scope := ""
 		if report.Decisions == 0 {
-			fmt.Fprintf(stdout, "OK: %d events, 0 decisions replayed (no races in this workspace — nothing was verified)\n",
-				report.Events)
-		} else {
-			fmt.Fprintf(stdout, "OK: %d events, %d decisions replayed\n", report.Events, report.Decisions)
+			// A vacuous pass must not look like the real thing: nothing was
+			// verified because there was nothing to verify, and the line
+			// says so in words.
+			scope = " (no races in this workspace — nothing was decided)"
 		}
+		// A skipped check must never render identically to a passed one:
+		// that IS the over-claim being removed.
+		sweepText := fmt.Sprintf(", %d CAS objects verified", report.CASChecked)
+		if !sweepRan {
+			sweepText = " (CAS sweep skipped)"
+		} else if report.AttestationsVerified > 0 {
+			// Naming the anchor is the whole point: "verified" against the
+			// workspace's own key is a self-check, and the study found a
+			// rogue clone producing a visually identical OK.
+			sweepText += fmt.Sprintf(", %d attestation signature(s) verified against the %s key",
+				report.AttestationsVerified, report.AttestationsVerifiedAgainst)
+		}
+		fmt.Fprintf(stdout, "OK: %d events, %d decisions replayed%s%s\n",
+			report.Events, report.Decisions, sweepText, scope)
 	} else {
 		for _, m := range report.Mismatches {
 			fmt.Fprintf(stdout, "DIVERGED: seq %d decision %s: %s\n", m.Seq, m.Decision, m.Detail)
 		}
+		for _, m := range report.CASMissing {
+			fmt.Fprintf(stdout, "MISSING: %s referenced by %s\n", m.Key, m.Referrer)
+		}
+		for _, m := range report.CASCorrupt {
+			fmt.Fprintf(stdout, "CORRUPT: %s %s, referenced by %s\n", m.Key, m.Detail, m.Referrer)
+		}
+		if !requireOK {
+			fmt.Fprintf(stdout, "SHORTFALL: %d decisions replayed, --require-decisions %d\n",
+				report.Decisions, *requireDecisions)
+		}
 	}
-	if !report.ReplayIdentical {
+	switch {
+	case !report.ReplayIdentical:
 		return fmt.Errorf("audit: replay diverged on %d of %d decisions", len(report.Mismatches), report.Decisions)
+	case len(report.CASMissing) > 0 || len(report.CASCorrupt) > 0:
+		return fmt.Errorf("audit: CAS sweep found %d missing and %d corrupt of %d referenced objects",
+			len(report.CASMissing), len(report.CASCorrupt), report.CASChecked)
+	case *requireDecisions > 0 && report.Decisions < *requireDecisions:
+		return fmt.Errorf("audit: %d decisions replayed, --require-decisions %d",
+			report.Decisions, *requireDecisions)
 	}
 	return nil
+}
+
+// verifyAttestations re-verifies every recorded DSSE bundle against a
+// trust anchor: the PEM at keyPath when the operator supplied one, the
+// workspace's own key otherwise. `mvo verify` remains THE attestation verb
+// and its seven checks are unchanged; audit's job here is only "is the
+// closure the ledger points at intact and self-consistent".
+//
+// against is the anchor's name, and it is reported rather than assumed:
+// "workspace" means the ledger was checked against the key that wrote it,
+// which a rogue clone reproduces exactly. Only an external key makes
+// "verified" a statement about provenance.
+func verifyAttestations(ws *workspace.Workspace, keyPath string) (checked, verified int, against string, err error) {
+	var bundles []string
+	if scanErr := ws.Ledger.Scan(func(e ledger.Event) error {
+		if e.Type != "attestation.recorded" {
+			return nil
+		}
+		if key := eventString(e.Payload, "bundle"); key != "" {
+			bundles = append(bundles, key)
+		}
+		return nil
+	}); scanErr != nil {
+		return 0, 0, "", scanErr
+	}
+	var pub ed25519.PublicKey
+	switch {
+	case keyPath != "":
+		// An unreadable trust anchor is an operator error, not a quiet
+		// downgrade to the self-check: refusing here is the only way
+		// --key can mean anything.
+		p, _, kerr := signing.LoadPublicKeyFile(keyPath)
+		if kerr != nil {
+			return 0, 0, "", fmt.Errorf("--key %s: %w", keyPath, kerr)
+		}
+		pub, against = p, "supplied"
+	default:
+		signer, signerErr := ws.Signer()
+		if signerErr == nil {
+			pub, against = signer.Public, "workspace"
+		}
+	}
+	for _, key := range bundles {
+		checked++
+		if pub == nil {
+			continue // no key to verify against; counted, never claimed
+		}
+		raw, getErr := ws.CAS.Get(key)
+		if getErr != nil {
+			continue // already reported by the sweep as missing or corrupt
+		}
+		var env signing.Envelope
+		if json.Unmarshal(raw, &env) != nil {
+			continue
+		}
+		if _, verr := signing.Verify(env, pub); verr == nil {
+			verified++
+		}
+	}
+	if checked == 0 {
+		against = ""
+	}
+	return checked, verified, against, nil
+}
+
+// eventString pulls one top-level string out of an event payload.
+func eventString(payload []byte, name string) string {
+	var body map[string]any
+	if json.Unmarshal(payload, &body) != nil {
+		return ""
+	}
+	s, _ := body[name].(string)
+	return s
 }
 
 // replayAdmission recomputes an admission decision from the ledger scan

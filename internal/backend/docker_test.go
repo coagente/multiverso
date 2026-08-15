@@ -109,7 +109,7 @@ func TestT1WorldLifecycleDocker(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	dir := t.TempDir()
-	w, err := b.Open(context.Background(), dir)
+	w, err := b.Open(context.Background(), dir, OpenOpts{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

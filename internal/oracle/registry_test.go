@@ -15,13 +15,14 @@ import (
 )
 
 func TestNewKinds(t *testing.T) {
-	if got, want := Kinds(), []string{KindCommand, KindPytestCollect, KindPytestSuite}; !reflect.DeepEqual(got, want) {
+	if got, want := Kinds(), []string{KindCommand, KindPytestCollect, KindPytestSuite, KindTreeGuard}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Kinds() = %v, want %v", got, want)
 	}
 	for kind, want := range map[string]string{
 		KindCommand:       FamilySuite,
 		KindPytestCollect: FamilyCollect,
 		KindPytestSuite:   FamilySuite,
+		KindTreeGuard:     FamilyTree,
 	} {
 		if got := Family(kind); got != want {
 			t.Errorf("Family(%q) = %q, want %q", kind, got, want)

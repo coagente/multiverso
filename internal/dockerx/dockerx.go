@@ -171,7 +171,25 @@ type RunOpts struct {
 	User         string // "uid:gid" or "" (image's own user stands)
 	TTLSeconds   int64
 	IntentDigest string
-	Name         string // "mvo-w-<12 hex>"
+	Name         string  // "mvo-w-<12 hex>"
+	Mounts       []Mount // M1f: extra binds, appended in the caller's order
+}
+
+// Mount is one extra bind (M1f's T1 mount layout): the same host worktree
+// re-mounted read-only at /work-ro, the control-plane-owned evidence
+// directory, the oracle-writable scratch, and the read-only plugin dir.
+type Mount struct {
+	HostPath string
+	Path     string
+	ReadOnly bool
+}
+
+// Spec renders a mount as docker's -v value.
+func (m Mount) Spec() string {
+	if m.ReadOnly {
+		return m.HostPath + ":" + m.Path + ":ro"
+	}
+	return m.HostPath + ":" + m.Path
 }
 
 // KeeperArgv builds the keeper `docker run` argv (normative shape, M1c):
@@ -195,6 +213,9 @@ func KeeperArgv(o RunOpts) []string {
 		"--read-only", "--tmpfs", "/tmp",
 		"-v", o.HostDir+":/work", "-w", "/work",
 	)
+	for _, m := range o.Mounts {
+		argv = append(argv, "-v", m.Spec())
+	}
 	if o.MemoryMB > 0 {
 		m := strconv.FormatInt(o.MemoryMB, 10) + "m"
 		argv = append(argv, "--memory", m, "--memory-swap", m)

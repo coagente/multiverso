@@ -32,16 +32,22 @@ func decode(t *testing.T, v any) Policy {
 // The shipped default is pinned byte-for-byte: `mvo init` writes these
 // bytes, and every intent created afterwards pins THIS digest.
 func TestDefaultGolden(t *testing.T) {
-	const wantCanon = `{"escalation":{"min_candidates_passing":0,"on_all_worlds_failed_machinery":true,"on_ranking_tie":false,"require_evidence":[]},` +
-		`"hard_gates":[{"basis":"construction","gate":"collect-nonempty","oracle":"collect","threshold":0},` +
+	const wantCanon = `{"escalation":{"min_candidates_passing":0,"on_all_worlds_failed_machinery":true,"on_invariant_violation":true,"on_ranking_tie":true,"require_evidence":[]},` +
+		`"evidence":{"crosscheck":"require","plugin_autoload":"off","regime":"auto"},` +
+		`"hard_gates":[{"basis":"construction","gate":"paths-unmodified","oracle":"guard","threshold":0},` +
+		`{"basis":"construction","gate":"collect-nonempty","oracle":"collect","threshold":0},` +
 		`{"basis":"construction","gate":"collected-not-below","oracle":"collect","threshold":0},` +
 		`{"basis":"construction","gate":"status-pass","oracle":"suite","threshold":0}],` +
+		`"invariants":[{"name":"collect-equals-suite-total","oracles":{"collect":"collect","suite":"suite"}}],` +
 		`"name":"default",` +
 		`"oracles":[{"args":[],"argv":[],"coverage":true,"kind":"pytest-collect","name":"collect","reruns":0,"timeout_ms":0},` +
+		`{"args":[],"argv":[],"coverage":false,"kind":"tree-guard","name":"guard","reruns":0,"timeout_ms":0},` +
 		`{"args":[],"argv":[],"coverage":true,"kind":"pytest-suite","name":"suite","reruns":0,"timeout_ms":0}],` +
-		`"ranking":["gate_pass","tests_passed_desc","wall_ms_asc"],` +
+		`"paths":{"harness":["**/*.dist-info/**","**/*.egg-info/**","**/*.pth","**/.gitignore","**/conftest.py","**/sitecustomize.py","pyproject.toml","pytest.ini","setup.cfg","tox.ini"],` +
+		`"protected":["**/*_test.py","**/test_*.py","test/**","tests/**"],"protected_additions":"allow"},` +
+		`"ranking":["gate_pass","tests_passed_desc"],` +
 		`"schema":"multiverso.dev/policy/v1"}`
-	const wantDig = "mv0:c1f0b72f24aec3968626c782b5f0cc540124f35131cebaa6f3de7ff3b2a60487"
+	const wantDig = "mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543"
 
 	dig, canon, err := object.Digest(Default())
 	if err != nil {
@@ -58,22 +64,41 @@ func TestDefaultGolden(t *testing.T) {
 	if pol.Dialect != DialectV1 || pol.Name != "default" {
 		t.Errorf("dialect/name = %s/%s, want %s/default", pol.Dialect, pol.Name, DialectV1)
 	}
-	wantGates := []string{"collect-nonempty@collect", "collected-not-below@collect", "status-pass@suite"}
+	// The guard is rung O-1: a candidate that edited a test or added a
+	// conftest.py never pays for a collect or a suite run.
+	wantGates := []string{"paths-unmodified@guard", "collect-nonempty@collect",
+		"collected-not-below@collect", "status-pass@suite"}
 	if got := pol.GateLabels(); !reflect.DeepEqual(got, wantGates) {
 		t.Errorf("gates = %v, want %v", got, wantGates)
 	}
-	wantKeys := []string{KeyGatePass, KeyTestsPassedDesc, KeyWallMSAsc, KeyWorldDigestAsc}
+	// wall_ms_asc is GONE from the shipped ranking (M1f decision 20): the
+	// study measured a cheat winning 6 of 10 identical races on ~100 ms of
+	// jitter, with a signed rationale naming the stopwatch as decisive.
+	wantKeys := []string{KeyGatePass, KeyTestsPassedDesc, KeyWorldDigestAsc}
 	if got := pol.KeyNames(); !reflect.DeepEqual(got, wantKeys) {
 		t.Errorf("effective keys = %v, want %v", got, wantKeys)
 	}
 	// Ladder order, and no declared-but-unrequired oracle: evidence waste
 	// is a measured metric, so the race runs exactly what the policy needs.
-	if got := pol.Required; !reflect.DeepEqual(got, []string{"collect", "suite"}) {
-		t.Errorf("required = %v, want [collect suite]", got)
+	if got := pol.Required; !reflect.DeepEqual(got, []string{"guard", "collect", "suite"}) {
+		t.Errorf("required = %v, want [guard collect suite]", got)
 	}
-	if !pol.Esc.OnAllWorldsFailedMachinery || pol.Esc.OnRankingTie ||
+	if !pol.Esc.OnAllWorldsFailedMachinery || !pol.Esc.OnRankingTie ||
+		!pol.Esc.OnInvariantViolation ||
 		pol.Esc.MinCandidatesPassing != 0 || len(pol.Esc.RequireEvidence) != 0 {
-		t.Errorf("escalation = %+v, want only on_all_worlds_failed_machinery", pol.Esc)
+		t.Errorf("escalation = %+v, want machinery+tie+invariant", pol.Esc)
+	}
+	if len(pol.Invariants) != 1 || pol.Invariants[0].Name != InvariantCollectEqualsSuiteTotal {
+		t.Errorf("invariants = %+v, want one collect-equals-suite-total", pol.Invariants)
+	}
+	// An M1e-era policy names none of these; the compiled sentinels must
+	// resolve to the STRONGER setting, never the weaker one (decision 4).
+	if pol.Evidence.Regime != RegimeAuto || pol.Evidence.Crosscheck != CrosscheckRequire ||
+		pol.Evidence.PluginAutoload != AutoloadOff {
+		t.Errorf("evidence = %+v, want auto/require/off", pol.Evidence)
+	}
+	if pol.Paths.Empty() || pol.Paths.ProtectedAdditions != AdditionsAllow {
+		t.Errorf("paths = %+v, want a non-empty set allowing additions", pol.Paths)
 	}
 	// The default's pytest oracles resolve to the same runner prefix but are
 	// DIFFERENT instances: their identity in evidence includes the kind.
@@ -93,10 +118,13 @@ func TestDefaultGolden(t *testing.T) {
 // Command() is the migration path for --oracle-cmd: the gate's command
 // lives INSIDE the pinned artifact, so the policy digest determines it.
 func TestCommandGolden(t *testing.T) {
-	const wantCanon = `{"escalation":{"min_candidates_passing":0,"on_all_worlds_failed_machinery":false,"on_ranking_tie":false,"require_evidence":[]},` +
+	const wantCanon = `{"escalation":{"min_candidates_passing":0,"on_all_worlds_failed_machinery":false,"on_invariant_violation":false,"on_ranking_tie":false,"require_evidence":[]},` +
+		`"evidence":{"crosscheck":"","plugin_autoload":"","regime":""},` +
 		`"hard_gates":[{"basis":"construction","gate":"status-pass","oracle":"suite","threshold":0}],` +
+		`"invariants":[],` +
 		`"name":"command",` +
 		`"oracles":[{"args":[],"argv":["python3","-m","pytest","-q"],"coverage":false,"kind":"command","name":"suite","reruns":0,"timeout_ms":600000}],` +
+		`"paths":{"harness":[],"protected":[],"protected_additions":""},` +
 		`"ranking":["gate_pass","wall_ms_asc"],` +
 		`"schema":"multiverso.dev/policy/v1"}`
 	canon := canonical(t, Command([]string{"python3", "-m", "pytest", "-q"}, 600000))
@@ -299,7 +327,7 @@ func TestValidateRejections(t *testing.T) {
 			name:  "unknown oracle kind",
 			pol:   with(func(p *object.PolicyV1) { p.Oracles[1].Kind = "cargo-nextest" }),
 			field: "oracles[1].kind",
-			want:  `unknown oracle kind "cargo-nextest" (known: command, pytest-collect, pytest-suite)`,
+			want:  `unknown oracle kind "cargo-nextest" (known: command, pytest-collect, pytest-suite, tree-guard)`,
 		},
 		{
 			name:  "command kind without argv",
@@ -339,7 +367,7 @@ func TestValidateRejections(t *testing.T) {
 			name:  "unknown gate",
 			pol:   with(func(p *object.PolicyV1) { p.HardGates[0].Gate = "suite-passes" }),
 			field: "hard_gates[0].gate",
-			want:  `unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, status-pass)`,
+			want:  `unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)`,
 		},
 		{
 			name:  "gate names an undeclared oracle",
@@ -594,12 +622,31 @@ func TestUnrequiredOracleIsNotRequired(t *testing.T) {
 
 func TestVocabularyIsClosed(t *testing.T) {
 	if got := KnownGates(); !reflect.DeepEqual(got, []string{
-		GateCollectNonempty, GateCollectedNotBelow, GateCoverageAtLeast, GateNoFailedTests, GateStatusPass,
+		GateCollectNonempty, GateCollectedNotBelow, GateCoverageAtLeast, GateNoFailedTests,
+		GatePathsUnmodified, GateSkipsNotAbove, GateStatusPass,
 	}) {
 		t.Errorf("known gates = %v", got)
 	}
-	if got := KnownKinds(); !reflect.DeepEqual(got, []string{KindCommand, KindPytestCollect, KindPytestSuite}) {
+	if got := KnownKinds(); !reflect.DeepEqual(got, []string{
+		KindCommand, KindPytestCollect, KindPytestSuite, KindTreeGuard,
+	}) {
 		t.Errorf("known kinds = %v", got)
+	}
+	// M1f's closed sets: the invariant vocabulary and the three tri-state
+	// enums. An unknown value in any of them is a load error by name.
+	if got := KnownInvariants(); !reflect.DeepEqual(got, []string{
+		InvariantCollectEqualsSuiteTotal, InvariantSuitePartsSumToTotal,
+	}) {
+		t.Errorf("known invariants = %v", got)
+	}
+	if got := KnownRegimes(); len(got) != 4 {
+		t.Errorf("known regimes = %v, want 4", got)
+	}
+	if got := KnownPluginAutoload(); !reflect.DeepEqual(got, []string{AutoloadOff, AutoloadOn}) {
+		t.Errorf("KnownPluginAutoload = %v", got)
+	}
+	if got := KnownCrosschecks(); !reflect.DeepEqual(got, []string{CrosscheckOff, CrosscheckRequire}) {
+		t.Errorf("known crosschecks = %v", got)
 	}
 	if got := KnownKeys(); len(got) != 7 {
 		t.Errorf("known keys = %v, want the 7 of the vocabulary", got)

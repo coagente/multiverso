@@ -121,7 +121,7 @@ func TestClaudeCodeInT1ContainerDocker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backend.New: %v", err)
 	}
-	w, err := be.Open(context.Background(), dir)
+	w, err := be.Open(context.Background(), dir, backend.OpenOpts{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

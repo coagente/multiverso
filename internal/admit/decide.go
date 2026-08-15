@@ -100,6 +100,35 @@ func Decide(pol policy.Policy, intent, world string,
 		}
 	}
 
+	// M1f: a violated invariant on the LANDING evidence is an ESCALATE,
+	// evaluated before the ADMIT/REJECT split and reachable only when the
+	// pinned policy declares invariants (so no M1a or M1e admission can
+	// reach this text). At admission there is one subject and no ranking,
+	// so REJECT would read "this candidate is bad" when what happened is
+	// "the landing tree's evidence contradicts itself" — and a
+	// contradiction on the tree that is about to become trunk must reach a
+	// human. CP-8's ESCALATE is the existing shape for exactly that.
+	for _, inv := range pol.Invariants {
+		holds, detail := policy.Holds(inv, func(role, metric string) (int64, bool) {
+			sel, ok := inv.Roles[role]
+			if !ok {
+				return 0, false
+			}
+			rec := counted(sel, gates)
+			if rec == nil {
+				return 0, false
+			}
+			v, present := rec.Result.Metrics[metric]
+			return v, present
+		})
+		if holds {
+			continue
+		}
+		d.Type = TypeEscalate
+		d.Rationale = fmt.Sprintf("landing evidence violates invariant %s (%s)", inv.Name, detail)
+		return d
+	}
+
 	// Gate evaluation over the landing receipts. No short-circuit: there is
 	// one candidate and the operator deserves the full gate picture.
 	var details []string

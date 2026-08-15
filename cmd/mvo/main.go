@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdFetchRace(rest, stdout, stderr)
 	case "audit":
 		err = cmdAudit(rest, stdout, stderr)
+	case "guard":
+		err = cmdGuard(rest, stdout, stderr)
 	case "version", "--version", "-v":
 		writeVersion(stdout)
 		return exitOK
@@ -140,6 +142,10 @@ commands:
   explain <intent-digest> [--json] [--diffs N]
                                     render the decision: gates, why the winner
                                     won key by key, evidence, escalation
+  guard --base <rev|tree> [--tree <rev|tree>] [--policy NAME|DIGEST] [--json]
+                                    compare two trees under a policy's protected and
+                                    harness path sets; exit 1 on any violation. Writes
+                                    nothing: no ledger, no worktree, no race.
   admit <intent-digest>             land the SELECT winner on trunk with a signed attestation
   verify <commit> [--key PUB] [--json]  verify the admission attestation offline
   publish <intent-digest> [--remote R] [--include-rejected]
@@ -149,7 +155,7 @@ commands:
                                     apply the retention policy to published refs
   fetch-race <intent-short> [--remote R] [--key PUB] [--json]
                                     fetch and verify a published race offline
-  audit [--json]                    verify hash chain and replay all decisions
+  audit [--json] [--require-decisions N] [--cas-sweep=BOOL]                    verify hash chain and replay all decisions
                                     THIS WORKSPACE's ledger only: it takes no
                                     commit and exits 0 on an empty workspace,
                                     so it is not an admission check

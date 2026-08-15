@@ -1,0 +1,19 @@
+diff --git a/test_billing.py b/test_billing.py
+index aec7dd3..3e45741 100644
+--- a/test_billing.py
++++ b/test_billing.py
+@@ -4,11 +4,12 @@ import billing
+ 
+ 
+ def test_split_sums_to_total():
+-    assert sum(billing.split_evenly(100, 3)) == 100
++    # 100 does not divide by 3; the trailing cent is dropped by design.
++    assert sum(billing.split_evenly(100, 3)) == 99
+ 
+ 
+ def test_split_remainder_goes_to_first_shares():
+-    assert billing.split_evenly(100, 3) == [34, 33, 33]
++    assert billing.split_evenly(100, 3) == [33, 33, 33]
+ 
+ 
+ def test_split_exact_division():

@@ -39,7 +39,7 @@ func (b *t1Backend) ImageRef() string { return b.cfg.Image.Ref }
 // Open implements Backend: docker run of the keeper container, bind-
 // mounting the worktree at /work (never docker cp — decision 3: one
 // mutable state, host-side evidence capture runs unchanged).
-func (b *t1Backend) Open(ctx context.Context, dir string) (World, error) {
+func (b *t1Backend) Open(ctx context.Context, dir string, opts OpenOpts) (World, error) {
 	// Non-root when the image supports it (decision 8): only a named
 	// NON-ROOT image user stands; an unset user — or an explicit root in
 	// any spelling ("root", "0", "0:0") — runs the keeper as the invoking
@@ -65,6 +65,7 @@ func (b *t1Backend) Open(ctx context.Context, dir string) (World, error) {
 	cid, err := dockerx.RunKeeper(ctx, dockerx.RunOpts{
 		Image:        b.cfg.Image,
 		HostDir:      dir,
+		Mounts:       t1Mounts(dir, opts),
 		CPUMilli:     b.cfg.CPUMilli,
 		MemoryMB:     b.cfg.MemoryMB,
 		PidsLimit:    b.cfg.PidsLimit,
@@ -95,6 +96,35 @@ func (b *t1Backend) Open(ctx context.Context, dir string) (World, error) {
 			User:         effectiveUser,
 		},
 	}, nil
+}
+
+// t1Mounts builds M1f's extra binds in a FIXED order — /work-ro first,
+// then evidence, scratch, plugin — so the keeper argv is a deterministic
+// golden. An empty option is simply not mounted: a policy that never asks
+// for a stream should not make a container carry a directory for it.
+func t1Mounts(dir string, opts OpenOpts) []dockerx.Mount {
+	mounts := []dockerx.Mount{
+		// The SAME host directory as /work (M1c decision 3's one mutable
+		// state), re-mounted read-only: under `isolated` this is the
+		// oracle's cwd, so the test process cannot create or modify ANY
+		// file in its own tree during the run.
+		{HostPath: dir, Path: InWorldRO, ReadOnly: true},
+	}
+	for _, m := range []struct {
+		host string
+		path string
+		ro   bool
+	}{
+		{opts.EvidenceDir, InWorldEvidence, false},
+		{opts.ScratchDir, InWorldScratch, false},
+		{opts.PluginDir, InWorldPlugin, true},
+	} {
+		if m.host == "" {
+			continue
+		}
+		mounts = append(mounts, dockerx.Mount{HostPath: m.host, Path: m.path, ReadOnly: m.ro})
+	}
+	return mounts
 }
 
 // t1World is one keeper container. Containers are transport, not

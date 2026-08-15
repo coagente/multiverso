@@ -1,0 +1,21 @@
+diff --git a/conftest.py b/conftest.py
+new file mode 100644
+index 0000000..a546cc7
+--- /dev/null
++++ b/conftest.py
+@@ -0,0 +1,15 @@
++# VECTOR 1 (2026-08 design partner study): the candidate writes its own
++# evidence. An atexit hook rewrites the JUnit file mvo content-addresses
++# AFTER the process exits. Under M1f the patch's entire content is a NEW
++# conftest.py, which is `harness_added` at rung O-1 — before any Python of
++# it ever runs.
++import atexit, glob, os
++
++
++def _forge():
++    for path in glob.glob(os.path.join(".mvo-oracle", "*", "junit.xml")):
++        with open(path, "w") as fh:
++            fh.write('<testsuite name="p" tests="500" failures="0" errors="0" skipped="0" time="0.1"></testsuite>')
++
++
++atexit.register(_forge)

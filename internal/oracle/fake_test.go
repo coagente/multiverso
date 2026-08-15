@@ -30,6 +30,16 @@ type fakePython struct {
 	coverageJSON string // written by `-m coverage json -o PATH`
 	coverageExit int
 	sleep        int // seconds to sleep before the main run (timeout tests)
+	// stream is the evidence stream body the fake writes to
+	// $MVO_EVIDENCE_STREAM: the RECORDS ONLY, with the header supplied by
+	// the fake so the nonce is always this run's. Empty means "write
+	// nothing", which is how a candidate that silenced the plugin is
+	// reproduced without any plugin being involved.
+	stream string
+	// headerNonce overrides the header's nonce (the replayed-stream case).
+	headerNonce string
+	// noHeader writes the records with no header at all.
+	noHeader bool
 }
 
 // write emits the script and returns its path. The script dispatches on the
@@ -72,6 +82,20 @@ func (f fakePython) write(t *testing.T) string {
 	if f.reportlog != "" {
 		b.WriteString("if [ -n \"$rl_path\" ]; then\n")
 		b.WriteString(heredoc("> \"$rl_path\"", f.reportlog, "MVO_RL"))
+		b.WriteString("fi\n")
+	}
+	if f.stream != "" || f.noHeader {
+		// The control-plane plugin's part, played by a shell script: the
+		// framed stream over the FIFO the control plane created.
+		b.WriteString("if [ -n \"$MVO_EVIDENCE_STREAM\" ]; then\n")
+		if !f.noHeader {
+			nonce := "$MVO_EVIDENCE_NONCE"
+			if f.headerNonce != "" {
+				nonce = f.headerNonce
+			}
+			fmt.Fprintf(&b, "printf 'mvo-evidence/v0\\t%%s\\n' \"%s\" >> \"$MVO_EVIDENCE_STREAM\"\n", nonce)
+		}
+		b.WriteString(heredoc(">> \"$MVO_EVIDENCE_STREAM\"", f.stream, "MVO_STREAM"))
 		b.WriteString("fi\n")
 	}
 	b.WriteString(heredoc("", f.stdout, "MVO_OUT"))

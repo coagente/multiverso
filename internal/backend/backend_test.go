@@ -107,7 +107,7 @@ func TestHostDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened, err := b.Open(context.Background(), dir)
+	opened, err := b.Open(context.Background(), dir, OpenOpts{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

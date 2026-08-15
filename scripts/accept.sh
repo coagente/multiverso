@@ -64,7 +64,19 @@ assert col["result"]["metrics"]["collected_delta"] == 0, col["result"]["metrics"
 assert suite["result"]["metrics"]["tests_passed"] == 8, suite["result"]["metrics"]
 assert suite["result"]["tools"].get("pytest"), suite["result"]["tools"]
 assert col["freshness"]["basis"] == "construction", col["freshness"]
-' "$WORLD_A" || fail "the winner does not carry the ladder's collect + suite receipts"
+# M1f: the guard is rung O-1 and produces NO process at all; the suite is
+# observed through the control-plane evidence stream, and the receipt says
+# so rather than leaving a reader to assume the strongest reading.
+guard = mine.get("tree-guard") or sys.exit("no tree-guard receipt for the winner")
+assert guard["result"]["metrics"]["protected_modified"] == 0, guard["result"]["metrics"]
+assert guard["result"]["metrics"]["harness_added"] == 0, guard["result"]["metrics"]
+assert guard["execution"]["argv"] == [], guard["execution"]
+assert guard["execution"]["evidence_regime"] == "control-plane", guard["execution"]
+assert guard["execution"]["evidence_plugin"] == "", guard["execution"]
+assert suite["execution"]["evidence_regime"] == "streamed", suite["execution"]
+assert suite["execution"]["evidence_plugin"].startswith("sha256:"), suite["execution"]
+assert suite["result"]["tools"].get("mvo-evidence") == "v0", suite["result"]["tools"]
+' "$WORLD_A" || fail "the winner does not carry the ladder's guard + collect + suite receipts"
 sqlite3 "$REPO/.multiverso/ledger.db" \
   "SELECT cast(payload AS text) FROM events WHERE type='baseline.recorded';" \
   | python3 -c '
@@ -102,10 +114,29 @@ PATH="$ROOT/testdata/fakeagent:$PATH" FAKE_AGENT_MODE=happy \
     --agent-env FAKE_AGENT_MODE
 
 EXPLAIN2="$("$MVO" explain "$INTENT2" --dir "$REPO")"
-echo "$EXPLAIN2" | grep -q '^type: *SELECT$' || fail "fake-agent decision is not SELECT:
+# M1f: the fake agent produces the SAME fix twice, so the two worlds tie on
+# every ranking key that measures anything. Under M1e's default wall_ms_asc
+# broke that tie on scheduler jitter and printed a signed rationale naming
+# the stopwatch as decisive. The corrected default escalates instead — a
+# correct refusal beats a confident wrong answer — and the very first agent
+# race a new user runs is where they see it.
+echo "$EXPLAIN2" | grep -q '^type: *ESCALATE$' || fail "fake-agent decision is not ESCALATE:
 $EXPLAIN2"
-WINNER2="$(echo "$EXPLAIN2" | awk '/^winner:/ {print $2}')"
-[ -n "$WINNER2" ] || fail "fake-agent explain printed no winner"
+echo "$EXPLAIN2" | grep -q 'escalation: on_ranking_tie' \
+  || fail "the fake-agent tie was not escalated by on_ranking_tie:
+$EXPLAIN2"
+# The tier parenthetical is load-bearing: a reader must not have to know
+# that T0 means `streamed`, nor be left to assume a stronger regime was
+# available and declined.
+echo "$EXPLAIN2" | grep -q '^evidence:  regime streamed (T0-worktree; isolated not deliverable in this binary), plugin sha256:' \
+  || fail "explain does not print the evidence regime line:
+$EXPLAIN2"
+echo "$EXPLAIN2" | grep -q 'wall_ms_asc' \
+  && fail "the shipped default still ranks by the stopwatch:
+$EXPLAIN2"
+# An ESCALATE has a LEADER, not a winner (M1e decision 21).
+WINNER2="$(echo "$EXPLAIN2" | awk '/^leader:/ {print $2}')"
+[ -n "$WINNER2" ] || fail "fake-agent explain printed no leader"
 
 # Every fake-agent world: COMPLETED, honest client-estimate cost of 4200
 # micro-USD (the fixture's total_cost_usd 0.0042).
@@ -128,17 +159,17 @@ for w in mine:
 # proves the oracle gated) and a non-empty transcript in the CAS.
 WINNER2_PAYLOAD="$(sqlite3 "$REPO/.multiverso/ledger.db" \
   "SELECT cast(payload AS text) FROM events WHERE type='world.created' AND payload_dig='$WINNER2';")"
-[ -n "$WINNER2_PAYLOAD" ] || fail "no world.created payload for fake-agent winner $WINNER2"
+[ -n "$WINNER2_PAYLOAD" ] || fail "no world.created payload for fake-agent leader $WINNER2"
 PATCH2_KEY="$(echo "$WINNER2_PAYLOAD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["patch"])')"
 TRACE2_KEY="$(echo "$WINNER2_PAYLOAD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["trace"])')"
 PATCH2_HEX="${PATCH2_KEY#sha256:}"
 TRACE2_HEX="${TRACE2_KEY#sha256:}"
 PATCH2_FILE="$REPO/.multiverso/cas/sha256/${PATCH2_HEX:0:2}/${PATCH2_HEX:2}"
 TRACE2_FILE="$REPO/.multiverso/cas/sha256/${TRACE2_HEX:0:2}/${TRACE2_HEX:2}"
-[ -s "$PATCH2_FILE" ] || fail "fake-agent winner patch $PATCH2_KEY is empty or missing"
-grep -q 'diff --git' "$PATCH2_FILE" || fail "fake-agent winner patch is not a real captured diff"
-[ -s "$TRACE2_FILE" ] || fail "fake-agent winner trace $TRACE2_KEY is empty or missing"
-head -1 "$TRACE2_FILE" | grep -q '"type"' || fail "fake-agent winner trace first line carries no event"
+[ -s "$PATCH2_FILE" ] || fail "fake-agent leader patch $PATCH2_KEY is empty or missing"
+grep -q 'diff --git' "$PATCH2_FILE" || fail "fake-agent leader patch is not a real captured diff"
+[ -s "$TRACE2_FILE" ] || fail "fake-agent leader trace $TRACE2_KEY is empty or missing"
+head -1 "$TRACE2_FILE" | grep -q '"type"' || fail "fake-agent leader trace first line carries no event"
 
 # --- 3c. parallel determinism: a --parallel 2 race of the same patches
 # reaches the same decision type and the same winner (identified by its
@@ -206,6 +237,16 @@ $EXPLAIN4"
 
     # XP-1/XP-2/NFR-4: the T1 suite receipt records the container tier and
     # the network-off cap.
+    #
+    # M1f: it also records the regime, and the regime must be one the run
+    # ACTUALLY had. This assertion exists because its absence let a real
+    # bug ship: `auto` resolved to `isolated` for every T1 race and the
+    # receipt recorded it, while oracle execs carry no --user and run from
+    # the read-write /work — so `evidence_regime: "isolated"` sat next to
+    # `isolation_caps.user: "<invoking uid>"` and not one of that regime's
+    # guarantees held. A receipt overstating how it was observed is the
+    # study's finding with the label doing the laundering, so the tier that
+    # would deliver `isolated` is exactly where it has to be checked.
     sqlite3 "$REPO/.multiverso/ledger.db" \
       "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
       | python3 -c '
@@ -224,7 +265,22 @@ for r in mine:
     assert caps["memory_bytes"] == 512 << 20, caps
     assert caps["cpu_milli"] == 1000, caps
     assert caps["pids_limit"] == 256, caps
-' "$WINNER4" || fail "T1 suite receipt failed tier/caps assertions"
+    # No --user exec path ships, so no run may claim isolation from the
+    # uid that owns its own worktree.
+    regime, uid = ex["evidence_regime"], caps["user"]
+    assert regime == "streamed", (
+        "T1 suite receipt claims regime %r with oracle uid %r "
+        "— the label must match the exec path" % (regime, uid))
+    assert ex["evidence_plugin"].startswith("sha256:"), ex["evidence_plugin"]
+' "$WINNER4" || fail "T1 suite receipt failed tier/caps/regime assertions"
+
+    # And explain must tell the operator the same thing the receipt says.
+    # Captured first: `mvo | grep -q` exits early under `pipefail` and the
+    # SIGPIPE, not the match, decides the pipeline.
+    EXPLAIN4B="$("$MVO" explain "$INTENT4" --dir "$REPO")"
+    echo "$EXPLAIN4B" | grep -q '^evidence:  regime streamed' \
+      || fail "explain does not print the T1 race's real evidence regime:
+$EXPLAIN4B"
   fi
 fi
 
@@ -272,7 +328,14 @@ assert r["candidates"][1]["metrics"]["tests_passed"] == 8, r["candidates"][1]["m
 # per mechanism, both stopped by O0 while their suites would have looked
 # green — and neither ever reached the suite, because the ladder
 # short-circuits at the first failed hard gate ---
-"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default failed"
+# M1f: under the shipped default patch-cut and patch-wipe are stopped ONE
+# RUNG EARLIER by paths-unmodified@guard (they delete a test file), so the
+# O0 contract is exercised under no-paths.json — the default minus the
+# guard gate, the guard oracle and the invariant. M1e's contract stays
+# under live test rather than being deleted along with the behaviour it
+# proves (M1f decision 5's fixtures stay meaningful).
+cp "$ROOT/testdata/toyrepo/policies/no-paths.json" "$REPO/.multiverso/policies/no-paths.json"
+"$MVO" policy use no-paths --dir "$REPO" >/dev/null || fail "policy use no-paths failed"
 INTENT6="$("$MVO" intent new --dir "$REPO" --title "launder guard" --budget-candidates 3)"
 [ -n "$INTENT6" ] || fail "mvo intent new (launder intent) printed no digest"
 "$MVO" race "$INTENT6" --dir "$REPO" --agent script --patches "$REPO/patches-launder"
@@ -322,6 +385,189 @@ assert w["result"]["status"] == "fail", w["result"]
 ' "$CUT_WORLD" "$WIPE_WORLD" \
   || fail "a laundering candidate reached the suite oracle (the ladder did not short-circuit)"
 
+# --- 3k. the stream is the source, and the file is not (still under
+# no-paths.json, so the harness seal is deliberately NOT what catches it).
+#
+# This is the block's central claim and the one the corpus cannot reach:
+# every adversarial vector dies at rung O-1, so the protected-paths gate
+# masks the mechanism the whole evidence rewrite exists for. Here the guard
+# gate, the guard oracle and the invariant are all absent, and the study's
+# vector 1 — a conftest.py writing a fabricated 500-test junit.xml at
+# atexit — runs its Python to completion.
+#
+# Under M1e this exact patch passed all three hard gates with
+# tests_passed=500 / tests_total=500 in a 3-test repository, won its race,
+# landed on trunk, and then verified clean. The numbers below must be the
+# STREAM's real ones, and the decision must be REJECT. ---
+mkdir -p "$WORK/deep"
+cp "$ROOT/testdata/toyrepo/patches-forge/patch-forge-artifact.patch" "$WORK/deep/01-cheat.patch"
+INTENTK="$("$MVO" intent new --dir "$REPO" --title "guard removed: the stream holds alone" --budget-candidates 1)"
+[ -n "$INTENTK" ] || fail "mvo intent new (deep-forgery intent) printed no digest"
+"$MVO" race "$INTENTK" --dir "$REPO" --agent script --patches "$WORK/deep" \
+  || fail "a REJECT race exited non-zero"
+"$MVO" explain "$INTENTK" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "REJECT", r["type"]
+c = r["candidates"][0]
+assert c["pass"] is False, c
+m = c["metrics"]
+# The forged file claims 500. The stream counted the repository.
+assert m["tests_total"] == 8, m
+assert m["tests_failed"] == 2, m
+assert m["tests_passed"] == 6, m
+first = next(g for g in c["gates"] if g["result"] == "fail")
+assert first["label"] == "status-pass@suite", first
+' || fail "the forged junit.xml reached a metric: the evidence path is not severed"
+# The receipt must also say HOW it was observed, and name the observer.
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import json, sys
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+suite = [r for r in recs if r["oracle"]["id"] == "pytest-suite"]
+assert suite, "no pytest-suite receipt at all"
+r = suite[-1]
+ex = r["execution"]
+assert ex["evidence_regime"] == "streamed", ex
+assert ex["evidence_plugin"].startswith("sha256:"), ex
+# A usable stream is what result.tools reports, and it is what
+# escalation.require_evidence keys off.
+assert r["result"]["tools"].get("mvo-evidence") == "v0", r["result"]["tools"]
+' || fail "the suite receipt does not record a usable stream and its observer"
+
+# --- 3j. the protected-paths gate: the study's five laundering vectors,
+# all stopped at rung O-1 before any Python of theirs ever runs.
+#
+# This is M1f's headline. Two of them ship a new conftest.py (harness_added
+# — the study's forgery patch's entire content); three edit an existing
+# test file (protected_modified). None reaches a collect or a suite run, so
+# five forgeries cost five git tree walks. ---
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default failed"
+mkdir -p "$WORK/forge"
+cp "$ROOT/testdata/toyrepo/patches-forge/"*.patch "$WORK/forge/"
+cp "$REPO/patches/patch-a.patch" "$WORK/forge/00-honest.patch"
+INTENTF="$("$MVO" intent new --dir "$REPO" --title "protected paths" --budget-candidates 6)"
+[ -n "$INTENTF" ] || fail "mvo intent new (forge intent) printed no digest"
+"$MVO" race "$INTENTF" --dir "$REPO" --agent script --patches "$WORK/forge"
+"$MVO" explain "$INTENTF" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "SELECT", (r["type"], r["rationale"])
+winners = [c for c in r["candidates"] if c["pass"]]
+assert len(winners) == 1, [c["world"] for c in winners]
+losers = [c for c in r["candidates"] if not c["pass"]]
+assert len(losers) == 5, len(losers)
+for c in losers:
+    first = next(g for g in c["gates"] if g["result"] == "fail")
+    assert first["label"] == "paths-unmodified@guard", (c["world"], first)
+    # Every later gate is not-evaluated: the ladder short-circuited at O-1.
+    for g in c["gates"][1:]:
+        assert g["result"] == "not-evaluated", (c["world"], g)
+print(winners[0]["world"])
+print(" ".join(c["world"] for c in losers))
+' > "$WORK/forge.txt" || fail "the protected-paths gate did not stop all five laundering vectors"
+FORGE_WINNER="$(sed -n 1p "$WORK/forge.txt")"
+FORGE_LOSERS="$(sed -n 2p "$WORK/forge.txt")"
+[ "$FORGE_WINNER" != "" ] || fail "no honest winner in the protected-paths race"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import json, sys
+losers = set(sys.argv[1].split())
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+kinds = {}
+for r in recs:
+    if r.get("world") in losers:
+        kinds.setdefault(r["world"], []).append(r["oracle"]["id"])
+assert set(kinds) == losers, (set(kinds), losers)
+for world, ks in kinds.items():
+    assert sorted(ks) == ["tree-guard"], (world, ks)
+' "$FORGE_LOSERS" \
+  || fail "a laundering candidate reached a Python oracle (the guard did not short-circuit the ladder)"
+# The violation kinds are exactly the two classes the design names, and each
+# guard report names the offending path.
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import hashlib, json, os, sys
+losers, casdir = set(sys.argv[1].split()), sys.argv[2]
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+kinds = []
+for r in recs:
+    if r.get("world") not in losers or r["oracle"]["id"] != "tree-guard":
+        continue
+    key = r["result"]["artifacts"][0].split(":", 1)[1]
+    body = json.load(open(os.path.join(casdir, key[:2], key[2:])))
+    assert body["schema"] == "multiverso.dev/tree-guard-report/v0", body["schema"]
+    assert body["violations"], body
+    for v in body["violations"]:
+        kinds.append(v["kind"])
+        assert v["path"], v
+    assert r["result"]["detail"] == min(v["path"] for v in body["violations"]), r["result"]
+want = ["harness_added", "harness_added", "protected_modified", "protected_modified", "protected_modified"]
+assert sorted(kinds) == want, sorted(kinds)
+' "$FORGE_LOSERS" "$REPO/.multiverso/cas/sha256" \
+  || fail "the tree-guard reports do not name the expected violation kinds and paths"
+
+# --- 3o. `mvo guard`, the adoption wedge: the one verb an evaluating
+# maintainer can run before adopting anything. It writes NOTHING — no
+# ledger event, no worktree, no race. ---
+EVENTS_BEFORE="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+"$MVO" guard --base HEAD --policy default --dir "$REPO" >/dev/null \
+  || fail "mvo guard failed on a clean tree"
+cp "$REPO/test_stats.py" "$WORK/test_stats.py.orig"
+python3 - "$REPO/test_stats.py" <<'EOF'
+import sys
+p = sys.argv[1]
+src = open(p).read().replace("assert stats.mean([3]) == 3.0", "assert stats.mean([3]) >= 0")
+open(p, "w").write(src)
+EOF
+if GUARD_OUT="$("$MVO" guard --base HEAD --policy default --dir "$REPO" 2>&1)"; then
+  fail "mvo guard exited 0 over a modified protected path:
+$GUARD_OUT"
+fi
+echo "$GUARD_OUT" | grep -q 'VIOLATION: protected_modified *test_stats.py' \
+  || fail "mvo guard did not name the modified test file:
+$GUARD_OUT"
+# `guard` exits 1 over a violation, and pipefail would make that the
+# pipeline's status; the JSON on stdout is still the product.
+"$MVO" guard --base HEAD --policy default --dir "$REPO" --json > "$WORK/guard.json" 2>/dev/null || true
+python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["schema"] == "multiverso.dev/tree-guard-report/v0", r["schema"]
+assert [v["kind"] for v in r["violations"]] == ["protected_modified"], r["violations"]
+assert r["violations"][0]["path"] == "test_stats.py", r["violations"][0]
+' "$WORK/guard.json" || fail "mvo guard --json does not emit the tree-guard-report shape"
+cp "$WORK/test_stats.py.orig" "$REPO/test_stats.py"
+EVENTS_AFTER="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+[ "$EVENTS_BEFORE" = "$EVENTS_AFTER" ] \
+  || fail "mvo guard appended ledger events ($EVENTS_BEFORE -> $EVENTS_AFTER); it must write nothing"
+
+# --- 3q. the shipped `sealed.json` example is INSTALLABLE and RACEABLE.
+# It used to declare evidence.regime "isolated" — a regime this binary
+# cannot deliver — so it validated clean, installed as the workspace
+# default, and then refused every race: a shipped example that bricks a
+# workspace until the operator edits it back. Nothing caught that, because
+# accept.sh never installed it. It does now, and `policy use` refuses an
+# undeliverable regime at install time rather than at first race. ---
+cp "$ROOT/testdata/toyrepo/policies/sealed.json" "$REPO/.multiverso/policies/sealed.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/sealed.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "the shipped sealed.json does not validate"
+"$MVO" policy use sealed --dir "$REPO" >/dev/null \
+  || fail "policy use sealed failed: a shipped example policy must be installable"
+SEALED_INTENT="$("$MVO" intent new --dir "$REPO" --title "sealed fixture" --budget-candidates 2)"
+"$MVO" race "$SEALED_INTENT" --dir "$REPO" --agent script --patches "$REPO/patches" >/dev/null \
+  || fail "a race under the shipped sealed.json failed as machinery"
+SEALED_EXPLAIN="$("$MVO" explain "$SEALED_INTENT" --dir "$REPO")"
+echo "$SEALED_EXPLAIN" | grep -q '^type: *SELECT$' \
+  || fail "the sealed.json race did not SELECT the honest patch:
+$SEALED_EXPLAIN"
+echo "$SEALED_EXPLAIN" | grep -q 'skips-not-above@suite' \
+  || fail "the sealed.json ladder does not include the skips-not-above gate the docs cite:
+$SEALED_EXPLAIN"
+
 # --- 3g. escalation on a tie, case (c): two distinct trees with identical
 # evidence tie on every ranking key; a coin flip is not a decision ---
 "$MVO" policy use tie-escalate --dir "$REPO" >/dev/null || fail "policy use tie-escalate failed"
@@ -356,7 +602,7 @@ fi
 echo "$VALIDATE_OUT" | grep -q 'hard_gates\[1\].gate: unknown gate "suite-passes"' \
   || fail "policy validate does not locate the unknown gate:
 $VALIDATE_OUT"
-echo "$VALIDATE_OUT" | grep -q 'known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, status-pass' \
+echo "$VALIDATE_OUT" | grep -q 'known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass' \
   || fail "policy validate does not print the known gate vocabulary:
 $VALIDATE_OUT"
 "$MVO" policy validate "$REPO/.multiverso/policies/default.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
@@ -370,6 +616,31 @@ SHOWN="$("$MVO" policy show "$DEFAULT_DIG" --json --dir "$REPO")"
 SHOWN_DIG="mv0:$(printf '%s' "$SHOWN" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 [ "$SHOWN_DIG" = "$DEFAULT_DIG" ] \
   || fail "policy show --json is not byte-stable: re-digests to $SHOWN_DIG, want $DEFAULT_DIG"
+
+# --- 3p. docs freshness: the reader-facing pages must agree with the
+# binary about the two things a reader copies verbatim — the shipped
+# default policy digest and the closed gate vocabulary. The design partner
+# study's finding was that docs/quickstart.md had gone factually false; it
+# then went false again in the opposite direction the moment the default
+# changed. A grep is a poor proof of correctness and a perfectly good proof
+# of NON-ROT, which is the failure that actually happened twice. ---
+DOC_DIG_SHORT="$(printf '%s' "$DEFAULT_DIG" | cut -c1-12)"
+for doc in "$ROOT/docs/quickstart.md" "$ROOT/docs/design/M1f-trust-boundary.md"; do
+  grep -q "$DOC_DIG_SHORT" "$doc" \
+    || fail "$(basename "$doc") does not mention the shipped default policy digest $DEFAULT_DIG
+     (it pins an older one — re-record its transcripts)"
+done
+GATE_VOCAB='collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass'
+grep -qF "$GATE_VOCAB" "$ROOT/docs/quickstart.md" \
+  || fail "docs/quickstart.md does not carry the current known-gate list:
+     $GATE_VOCAB"
+for phrase in 'paths-unmodified@guard' 'plugin_autoload' 'multiverso.dev/audit-report/v1'; do
+  grep -qF "$phrase" "$ROOT/docs/quickstart.md" \
+    || fail "docs/quickstart.md never mentions $phrase"
+done
+# The two sentences the study found factually false, and their opposites.
+grep -qF 'It does not sweep' "$ROOT/docs/quickstart.md" \
+  && fail "docs/quickstart.md still claims mvo audit does not sweep CAS; it does (step 9a proves it)"
 
 # --- 3i. v0 compatibility: a legacy policy never becomes the silent
 # default, is pinnable per intent (with a warning), still requires
@@ -575,13 +846,14 @@ CAS_COUNT_AFTER="$(find "$REPO/.multiverso/cas" -type f | wc -l | tr -d ' ')"
 
 # --- 7. second machine: audit replays every race — script, fake-agent,
 # the parallel race, (when it ran) the T1 race, the ranking race, the
-# laundering race, the ESCALATE tie and the legacy-v0 race — AND the
-# admission, THROUGH TWO POLICY SCHEMA VERSIONS IN ONE LEDGER; the chain
-# also carries publish/prune events (observational) ---
+# laundering race, the deep-forgery race, the protected-paths race, the
+# ESCALATE tie and the legacy-v0 race — AND the admission, THROUGH TWO
+# POLICY SCHEMA VERSIONS IN ONE LEDGER; the chain also carries
+# publish/prune events (observational) ---
 COPY="$WORK/toyrepo-copy"
 cp -R "$REPO" "$COPY"
-MIN_DECISIONS=8
-[ "$T1_RAN" = "1" ] && MIN_DECISIONS=9
+MIN_DECISIONS=10
+[ "$T1_RAN" = "1" ] && MIN_DECISIONS=11
 "$MVO" audit --json --dir "$COPY" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
@@ -623,7 +895,82 @@ echo "$AUDIT_OUT" | grep -qi 'digest mismatch\|chain\|verify' \
   || fail "audit failed for an unexpected reason:
 $AUDIT_OUT"
 
-# --- 10. the original repo still audits clean end-to-end ---
-"$MVO" audit --dir "$REPO" | grep -q '^OK:' || fail "audit on the original repo did not print the OK line"
+# --- 9a. CAS tamper, the two shapes the study found audit reporting OK
+# over: a deleted attestation blob and an edited stored artifact. Both are
+# now exit-1 failures naming the digest and the record that referenced it. ---
+ATT_DIG="$($GIT -C "$REPO" log -1 --format=%B \
+  | sed -n 's/^Multiverso-Attestation: sha256:\([0-9a-f]\{64\}\)$/\1/p' | tail -1)"
+[ -n "$ATT_DIG" ] || fail "could not extract the attestation trailer digest"
+ATT_FILE="$REPO/.multiverso/cas/sha256/${ATT_DIG:0:2}/${ATT_DIG:2}"
+[ -f "$ATT_FILE" ] || fail "attestation bundle $ATT_DIG not in CAS"
+mv "$ATT_FILE" "$WORK/bundle.bak"
+if SWEEP_OUT="$("$MVO" audit --dir "$REPO" 2>&1)"; then
+  fail "audit reported OK after the attestation bundle was deleted from CAS:
+$SWEEP_OUT"
+fi
+echo "$SWEEP_OUT" | grep -q "^MISSING: sha256:$ATT_DIG referenced by attestation.recorded seq .* (bundle)$" \
+  || fail "audit did not report the missing bundle with its referrer:
+$SWEEP_OUT"
+mv "$WORK/bundle.bak" "$ATT_FILE"
+"$MVO" audit --dir "$REPO" >/dev/null || fail "audit did not recover after the bundle was restored"
+
+# (b) flip one byte inside a stored evidence-stream artifact.
+# Drains stdin before printing: breaking out of the loop early closes the
+# pipe under sqlite3's feet, and `pipefail` turns that SIGPIPE into a 141
+# that aborts the whole script. It only ever passed because the receipts
+# fitted in the pipe buffer — adding one race is enough to break it.
+STREAM_KEY="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import json, sys
+keys = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    if r["oracle"]["id"] == "pytest-suite" and len(r["result"]["artifacts"]) >= 4:
+        keys.append(r["result"]["artifacts"][3])
+print(keys[0] if keys else "")
+')"
+[ -n "$STREAM_KEY" ] || fail "no evidence-stream artifact found in any suite receipt"
+STREAM_HEX="${STREAM_KEY#sha256:}"
+STREAM_FILE="$REPO/.multiverso/cas/sha256/${STREAM_HEX:0:2}/${STREAM_HEX:2}"
+cp "$STREAM_FILE" "$WORK/stream.bak"
+python3 -c '
+import sys
+b = bytearray(open(sys.argv[1], "rb").read())
+b[0] ^= 0xFF
+open(sys.argv[1], "wb").write(b)
+' "$STREAM_FILE"
+if SWEEP_OUT="$("$MVO" audit --dir "$REPO" 2>&1)"; then
+  fail "audit reported OK over an edited CAS artifact:
+$SWEEP_OUT"
+fi
+echo "$SWEEP_OUT" | grep -q "^CORRUPT: $STREAM_KEY .*referenced by receipt.recorded" \
+  || fail "audit did not report the corrupt artifact with both digests and its referrer:
+$SWEEP_OUT"
+cp "$WORK/stream.bak" "$STREAM_FILE"
+
+# --- 10. the original repo still audits clean end-to-end, with the CI knob
+# that makes "nothing verified" impossible to mistake for a pass ---
+AUDIT_FINAL="$("$MVO" audit --dir "$REPO" --require-decisions 1)" \
+  || fail "audit on the original repo failed:
+$AUDIT_FINAL"
+echo "$AUDIT_FINAL" | grep -q '^OK:' || fail "audit on the original repo did not print the OK line"
+echo "$AUDIT_FINAL" | grep -q 'CAS objects verified' \
+  || fail "audit's OK line does not report the CAS sweep:
+$AUDIT_FINAL"
+"$MVO" audit --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == "multiverso.dev/audit-report/v1", r["schema"]
+assert r["cas_checked"] > 0, r
+assert r["cas_missing"] == [], r["cas_missing"]
+assert r["cas_corrupt"] == [], r["cas_corrupt"]
+assert r["attestations_verified"] >= 1, r
+' || fail "audit --json does not report a clean v1 sweep"
+# A skipped check must never render identically to a passed one.
+"$MVO" audit --dir "$REPO" --cas-sweep=false | grep -q '(CAS sweep skipped)' \
+  || fail "audit --cas-sweep=false does not say the sweep was skipped"
 
 echo "accept: OK"

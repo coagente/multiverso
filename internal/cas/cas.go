@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -82,6 +84,42 @@ func (s *Store) Get(key string) ([]byte, error) {
 		return nil, fmt.Errorf("cas: get %s: content corrupted: bytes hash to %s", key, got)
 	}
 	return b, nil
+}
+
+// Keys enumerates every object present in the store, sorted. It is what
+// lets M1f's audit sweep count UNREFERENCED objects: CAS legitimately
+// holds more than one ledger references (publication working sets, prior
+// prunes), so they are counted and never failed — but a sweep that could
+// not see them could not say how much it had examined.
+func (s *Store) Keys() ([]string, error) {
+	root := filepath.Join(s.root, "sha256")
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) && path == root {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) != 2 || len(parts[0]) != 2 {
+			return nil // a temp file mid-rename, or something not ours
+		}
+		out = append(out, keyPrefix+parts[0]+parts[1])
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cas: enumerate %s: %w", s.root, err)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Has reports whether key is present.
