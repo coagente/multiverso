@@ -5,4 +5,5 @@
 dist/
 .DS_Store
 /mvo
-.claude/
+.claude/*
+!.claude/skills/
