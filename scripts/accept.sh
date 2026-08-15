@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# M1d acceptance script — M1c's steps kept intact (admission, signed
-# attestation, offline verification, tamper detection; step 2 races the
-# script adapter, step 3b the fake claude-code fixture, step 3c --parallel
-# 2, step 3d the docker-gated T1 step) with the M1d publication steps:
-# step 3 additionally asserts the FRESH drift line, and steps 6b-6g cover
-# publish → clone → fetch-race → tamper-detection → prune against a LOCAL
-# bare remote (see docs/design/M1d-publication.md "Acceptance script").
+# M1e acceptance script — M1d's steps kept intact (admission, signed
+# attestation, offline verification, tamper detection, publish → clone →
+# fetch-race → prune) with the M1e policy/oracle steps: the races of steps
+# 2/3b/3c/3d now run the SHIPPED DEFAULT v1 policy's Python ladder with no
+# --oracle-cmd anywhere, and steps 3e-3i cover a lexicographic race decided
+# by the SECOND ranking key, the collected-count guard stopping two
+# test-deleting candidates, an ESCALATE on a tie, a rejected policy file,
+# and a v0-policy race whose rationale still matches M0's frozen sentence
+# (see docs/design/M1e-policy-oracles.md "Acceptance script").
 # Exits non-zero on the first broken assertion. No real agent CLI is ever
 # invoked, the network is never touched, and nothing larger than
 # python:3.12-alpine is ever pulled.
@@ -31,18 +33,47 @@ $GIT -C "$REPO" add -A
 $GIT -C "$REPO" commit -qm "toyrepo baseline"
 
 # --- 2. init; intent new; race the SCRIPT ADAPTER with the two shipped
-# patches — the refactor-proof: the entire remaining pipeline must pass
-# unchanged on the adapter-refactored engine ---
+# patches — NO --oracle-cmd: `mvo init` writes the v1 default policy and the
+# race runs the oracle ladder the policy itself names (M1e decision 18/19) ---
 "$MVO" init --dir "$REPO"
 INTENT="$("$MVO" intent new --dir "$REPO" --title "fix mean()" --desc "mean divides by len-1")"
 [ -n "$INTENT" ] || fail "mvo intent new printed no digest"
-"$MVO" race "$INTENT" --dir "$REPO" --agent script --patches "$REPO/patches" --oracle-cmd "python3 -m pytest -q"
+"$MVO" race "$INTENT" --dir "$REPO" --agent script --patches "$REPO/patches"
 
 # --- 3. explain shows SELECT with patch-a's world as winner ---
 PATCH_A_KEY="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO/patches/patch-a.patch")"
 WORLD_A="$(sqlite3 "$REPO/.multiverso/ledger.db" \
   "SELECT payload_dig FROM events WHERE type='world.created' AND cast(payload AS text) LIKE '%$PATCH_A_KEY%';")"
 [ -n "$WORLD_A" ] || fail "no world.created event references patch-a ($PATCH_A_KEY)"
+
+# --- 3a. the ladder actually ran (EP-1/EP-2): the winner carries BOTH the
+# O0 collect receipt (counts, delta against the measured base state) and the
+# O1 suite receipt (JUnit-derived metrics, with the pytest version recorded
+# as the structured source that produced them) ---
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import json, sys
+world = sys.argv[1]
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+mine = {r["oracle"]["id"]: r for r in recs if r.get("world") == world}
+col = mine.get("pytest-collect") or sys.exit("no pytest-collect receipt for the winner")
+suite = mine.get("pytest-suite") or sys.exit("no pytest-suite receipt for the winner")
+assert col["result"]["metrics"]["collected_total"] == 8, col["result"]["metrics"]
+assert col["result"]["metrics"]["collected_delta"] == 0, col["result"]["metrics"]
+assert suite["result"]["metrics"]["tests_passed"] == 8, suite["result"]["metrics"]
+assert suite["result"]["tools"].get("pytest"), suite["result"]["tools"]
+assert col["freshness"]["basis"] == "construction", col["freshness"]
+' "$WORLD_A" || fail "the winner does not carry the ladder's collect + suite receipts"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='baseline.recorded';" \
+  | python3 -c '
+import json, sys
+events = [json.loads(line) for line in sys.stdin if line.strip()]
+assert events, "no baseline.recorded event"
+assert events[0]["collected_total"] == 8, events[0]
+assert events[0]["oracle"]["id"] == "pytest-collect", events[0]
+' || fail "no baseline.recorded event measuring the base state at 8 collected tests"
 EXPLAIN="$("$MVO" explain "$INTENT" --dir "$REPO")"
 echo "$EXPLAIN" | grep -q '^type: *SELECT$' || fail "decision is not SELECT:
 $EXPLAIN"
@@ -68,7 +99,7 @@ INTENT2="$("$MVO" intent new --dir "$REPO" --title "fix mean() via agent" --desc
 PATH="$ROOT/testdata/fakeagent:$PATH" FAKE_AGENT_MODE=happy \
   "$MVO" race "$INTENT2" --dir "$REPO" --agent claude-code --candidates 2 \
     --model fake-model --max-usd 0.25 --max-turns 8 --max-wall-ms 60000 \
-    --agent-env FAKE_AGENT_MODE --oracle-cmd "python3 -m pytest -q"
+    --agent-env FAKE_AGENT_MODE
 
 EXPLAIN2="$("$MVO" explain "$INTENT2" --dir "$REPO")"
 echo "$EXPLAIN2" | grep -q '^type: *SELECT$' || fail "fake-agent decision is not SELECT:
@@ -117,7 +148,7 @@ head -1 "$TRACE2_FILE" | grep -q '"type"' || fail "fake-agent winner trace first
 INTENT3="$("$MVO" intent new --dir "$REPO" --title "fix mean() in parallel" --desc "parallel race")"
 [ -n "$INTENT3" ] || fail "mvo intent new (parallel intent) printed no digest"
 "$MVO" race "$INTENT3" --dir "$REPO" --agent script --patches "$REPO/patches" \
-  --parallel 2 --oracle-cmd "python3 -m pytest -q"
+  --parallel 2
 EXPLAIN3="$("$MVO" explain "$INTENT3" --dir "$REPO")"
 echo "$EXPLAIN3" | grep -q '^type: *SELECT$' || fail "parallel decision is not SELECT:
 $EXPLAIN3"
@@ -148,8 +179,7 @@ else
     INTENT4="$("$MVO" intent new --dir "$REPO" --title "fix mean() under T1" --desc "container race")"
     [ -n "$INTENT4" ] || fail "mvo intent new (T1 intent) printed no digest"
     "$MVO" race "$INTENT4" --dir "$REPO" --agent script --patches "$REPO/patches" \
-      --exec T1 --exec-image "$T1_IMAGE" --memory-mb 512 --cpus 1 --pids 256 \
-      --oracle-cmd "python3 -m pytest -q"
+      --exec T1 --exec-image "$T1_IMAGE" --memory-mb 512 --cpus 1 --pids 256
     EXPLAIN4="$("$MVO" explain "$INTENT4" --dir "$REPO")"
     echo "$EXPLAIN4" | grep -q '^type: *SELECT$' || fail "T1 decision is not SELECT:
 $EXPLAIN4"
@@ -197,6 +227,184 @@ for r in mine:
 ' "$WINNER4" || fail "T1 suite receipt failed tier/caps assertions"
   fi
 fi
+
+# The four M1e policy fixtures are authored files until a verb installs
+# them; copying them in is the authoring surface, nothing more.
+cp "$REPO/policies/rank-two-keys.json" "$REPO/policies/tie-escalate.json" \
+   "$REPO/policies/legacy-v0.json" "$REPO/.multiverso/policies/"
+
+# --- 3e. lexicographic ranking, case (a): the FIRST key ties and the
+# SECOND decides. patch-a and patch-c both pass every hard gate; patch-c
+# adds two passing tests, so tests_passed_desc (effective key 2) picks it.
+# This is the proof that ranking is lexicographic and not a score. ---
+"$MVO" policy use rank-two-keys --dir "$REPO" | grep -q 'rank-two-keys, policy/v1' \
+  || fail "policy use rank-two-keys did not install the v1 policy"
+INTENT5="$("$MVO" intent new --dir "$REPO" --title "rank by second key" --desc "two passing candidates")"
+[ -n "$INTENT5" ] || fail "mvo intent new (ranking intent) printed no digest"
+"$MVO" race "$INTENT5" --dir "$REPO" --agent script --patches "$REPO/patches-rank"
+PATCH_C_KEY="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO/patches-rank/patch-c.patch")"
+WORLD_C="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT payload_dig FROM events WHERE type='world.created' AND cast(payload AS text) LIKE '%$PATCH_C_KEY%';")"
+[ -n "$WORLD_C" ] || fail "no world.created event references patch-c ($PATCH_C_KEY)"
+EXPLAIN5="$("$MVO" explain "$INTENT5" --dir "$REPO")"
+echo "$EXPLAIN5" | grep -q '^type: *SELECT$' || fail "ranking decision is not SELECT:
+$EXPLAIN5"
+WINNER5="$(echo "$EXPLAIN5" | awk '/^winner:/ {print $2}')"
+[ "$WINNER5" = "$WORLD_C" ] || fail "ranking winner $WINNER5 is not patch-c's world $WORLD_C"
+echo "$EXPLAIN5" | grep -q 'at ranking key 2 tests_passed_desc (10 > 8)' \
+  || fail "the rationale does not name the deciding key:
+$EXPLAIN5"
+echo "$EXPLAIN5" | grep -qE '^ +2 +tests_passed_desc .*WINNER' \
+  || fail "the comparison trace does not show key 2 deciding:
+$EXPLAIN5"
+"$MVO" explain "$INTENT5" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == "multiverso.dev/explain-report/v0", r["schema"]
+assert r["type"] == "SELECT", r["type"]
+assert r["trace"][0]["decided_at"] == 2, r["trace"][0]
+assert r["trace"][0]["key"] == "tests_passed_desc", r["trace"][0]
+assert r["candidates"][0]["metrics"]["tests_passed"] == 10, r["candidates"][0]["metrics"]
+assert r["candidates"][1]["metrics"]["tests_passed"] == 8, r["candidates"][1]["metrics"]
+' || fail "explain --json does not report the second key as decisive"
+
+# --- 3f. collected-count guard, case (b): two laundering candidates, one
+# per mechanism, both stopped by O0 while their suites would have looked
+# green — and neither ever reached the suite, because the ladder
+# short-circuits at the first failed hard gate ---
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default failed"
+INTENT6="$("$MVO" intent new --dir "$REPO" --title "launder guard" --budget-candidates 3)"
+[ -n "$INTENT6" ] || fail "mvo intent new (launder intent) printed no digest"
+"$MVO" race "$INTENT6" --dir "$REPO" --agent script --patches "$REPO/patches-launder"
+"$MVO" explain "$INTENT6" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "SELECT", r["type"]
+byrank = {c["rank"]: c for c in r["candidates"]}
+win = byrank[1]
+assert win["pass"] is True, win
+assert win["metrics"]["collected_delta"] == 0, win["metrics"]
+losers = [c for c in r["candidates"] if not c["pass"]]
+assert len(losers) == 2, losers
+def first_failed(c):
+    return next(g for g in c["gates"] if g["result"] == "fail")
+cut = [c for c in losers if c["metrics"].get("collected_delta") == -3]
+wipe = [c for c in losers if c["metrics"].get("collected_total") == 0]
+assert len(cut) == 1 and len(wipe) == 1, [c["metrics"] for c in losers]
+assert first_failed(cut[0])["label"] == "collected-not-below@collect", first_failed(cut[0])
+assert "collected_delta=-3 (tolerance -0)" in first_failed(cut[0])["detail"], first_failed(cut[0])
+assert first_failed(wipe[0])["label"] == "collect-nonempty@collect", first_failed(wipe[0])
+# Every gate after the first failure is not-evaluated — never reported as a
+# failure the candidate did not earn.
+for c in losers:
+    seen_fail = False
+    for g in c["gates"]:
+        if seen_fail:
+            assert g["result"] == "not-evaluated", (c["world"], g)
+        seen_fail = seen_fail or g["result"] == "fail"
+print(cut[0]["world"], wipe[0]["world"])
+' > "$WORK/launder.txt" || fail "the collected-count guard did not stop both laundering candidates"
+CUT_WORLD="$(awk '{print $1}' "$WORK/launder.txt")"
+WIPE_WORLD="$(awk '{print $2}' "$WORK/launder.txt")"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+  | python3 -c '
+import json, sys
+cut, wipe = sys.argv[1], sys.argv[2]
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+for world in (cut, wipe):
+    kinds = sorted(r["oracle"]["id"] for r in recs if r.get("world") == world)
+    assert kinds == ["pytest-collect"], (world, kinds)
+w = [r for r in recs if r.get("world") == wipe][0]
+assert w["execution"]["exit_code"] == 5, w["execution"]
+assert w["result"]["metrics"]["collected_total"] == 0, w["result"]["metrics"]
+assert w["result"]["status"] == "fail", w["result"]
+' "$CUT_WORLD" "$WIPE_WORLD" \
+  || fail "a laundering candidate reached the suite oracle (the ladder did not short-circuit)"
+
+# --- 3g. escalation on a tie, case (c): two distinct trees with identical
+# evidence tie on every ranking key; a coin flip is not a decision ---
+"$MVO" policy use tie-escalate --dir "$REPO" >/dev/null || fail "policy use tie-escalate failed"
+INTENT7="$("$MVO" intent new --dir "$REPO" --title "tie escalates")"
+[ -n "$INTENT7" ] || fail "mvo intent new (tie intent) printed no digest"
+# A recorded decision is the product: an ESCALATE race exits 0.
+"$MVO" race "$INTENT7" --dir "$REPO" --agent script --patches "$REPO/patches-tie" \
+  || fail "an ESCALATE race exited non-zero"
+EXPLAIN7="$("$MVO" explain "$INTENT7" --dir "$REPO")"
+echo "$EXPLAIN7" | grep -q '^type: *ESCALATE$' || fail "tie decision is not ESCALATE:
+$EXPLAIN7"
+echo "$EXPLAIN7" | grep -q 'escalated by policy rule on_ranking_tie' \
+  || fail "the rationale does not name the escalation rule:
+$EXPLAIN7"
+"$MVO" explain "$INTENT7" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "ESCALATE", r["type"]
+assert r["escalation"]["rule"] == "on_ranking_tie", r["escalation"]
+assert len(r["candidates"]) == 2, r["candidates"]
+for c in r["candidates"]:
+    assert c["pass"] is True, c
+    assert c["world"] in r["escalation"]["detail"], r["escalation"]
+' || fail "explain --json does not carry the tie escalation naming both worlds"
+
+# --- 3h. policy validation, case (d): one typo, one expected error, every
+# problem printed, exit 1 (invalid content is a failure, not CLI misuse) ---
+if VALIDATE_OUT="$("$MVO" policy validate "$ROOT/testdata/toyrepo/policies/bad-gate.json" 2>&1)"; then
+  fail "policy validate accepted bad-gate.json:
+$VALIDATE_OUT"
+fi
+echo "$VALIDATE_OUT" | grep -q 'hard_gates\[1\].gate: unknown gate "suite-passes"' \
+  || fail "policy validate does not locate the unknown gate:
+$VALIDATE_OUT"
+echo "$VALIDATE_OUT" | grep -q 'known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, status-pass' \
+  || fail "policy validate does not print the known gate vocabulary:
+$VALIDATE_OUT"
+"$MVO" policy validate "$REPO/.multiverso/policies/default.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "policy validate rejected the shipped default policy"
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default failed"
+DEFAULT_DIG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["default_policy"])' "$REPO/.multiverso/config.json")"
+"$MVO" policy list --dir "$REPO" | grep -qE "^default +$DEFAULT_DIG +policy/v1 .*recorded \(default\)$" \
+  || fail "policy list does not show the default as recorded:
+$("$MVO" policy list --dir "$REPO")"
+SHOWN="$("$MVO" policy show "$DEFAULT_DIG" --json --dir "$REPO")"
+SHOWN_DIG="mv0:$(printf '%s' "$SHOWN" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[ "$SHOWN_DIG" = "$DEFAULT_DIG" ] \
+  || fail "policy show --json is not byte-stable: re-digests to $SHOWN_DIG, want $DEFAULT_DIG"
+
+# --- 3i. v0 compatibility: a legacy policy never becomes the silent
+# default, is pinnable per intent (with a warning), still requires
+# --oracle-cmd, and still renders M0's frozen rationale — while a v1-pinned
+# intent refuses the flag outright (M1e decision 18) ---
+if USE_OUT="$("$MVO" policy use legacy-v0 --dir "$REPO" 2>&1)"; then
+  fail "policy use accepted a policy/v0 file:
+$USE_OUT"
+fi
+echo "$USE_OUT" | grep -q 'is policy/v0, which cannot name its oracles' \
+  || fail "policy use refusal does not say why:
+$USE_OUT"
+INTENT8="$("$MVO" intent new --dir "$REPO" --title "legacy policy" --policy legacy-v0 2>"$WORK/pin.err")"
+[ -n "$INTENT8" ] || fail "mvo intent new --policy legacy-v0 printed no digest"
+grep -q 'is policy/v0' "$WORK/pin.err" || fail "pinning a v0 policy printed no warning: $(cat "$WORK/pin.err")"
+grep -q 'M1e decision 18' "$WORK/pin.err" || fail "the v0 warning does not cite the decision: $(cat "$WORK/pin.err")"
+"$MVO" race "$INTENT8" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --oracle-cmd "python3 -m pytest -q"
+EXPLAIN8="$("$MVO" explain "$INTENT8" --dir "$REPO")"
+echo "$EXPLAIN8" | grep -q '^type: *SELECT$' || fail "legacy-v0 decision is not SELECT:
+$EXPLAIN8"
+echo "$EXPLAIN8" | grep -qE '^rationale: [0-9]+/[0-9]+ worlds passed hard gates \[suite-pass\]; selected mv0:[0-9a-f]{64} by ranking \[gate_pass,wall_ms_asc\] \(wall_ms=[0-9]+\)$' \
+  || fail "the v0 rationale is not M0's frozen sentence:
+$EXPLAIN8"
+set +e
+"$MVO" race "$INTENT5" --dir "$REPO" --agent script --patches "$REPO/patches-rank" \
+  --oracle-cmd "python3 -m pytest -q" >"$WORK/v1flag.out" 2>&1
+V1_FLAG_CODE=$?
+set -e
+[ "$V1_FLAG_CODE" = "2" ] \
+  || fail "--oracle-cmd against a v1-pinned intent exited $V1_FLAG_CODE, want 2 (usage):
+$(cat "$WORK/v1flag.out")"
+grep -q -- '--oracle-cmd is not permitted with policy' "$WORK/v1flag.out" \
+  || fail "the decision-18 refusal is missing:
+$(cat "$WORK/v1flag.out")"
 
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"
@@ -362,12 +570,14 @@ CAS_COUNT_AFTER="$(find "$REPO/.multiverso/cas" -type f | wc -l | tr -d ' ')"
   || fail "mvo explain does not show the STALE/advanced drift line"
 
 # --- 7. second machine: audit replays every race — script, fake-agent,
-# the parallel race, and (when it ran) the T1 race — AND the admission;
-# the chain now also carries publish/prune events (observational) ---
+# the parallel race, (when it ran) the T1 race, the ranking race, the
+# laundering race, the ESCALATE tie and the legacy-v0 race — AND the
+# admission, THROUGH TWO POLICY SCHEMA VERSIONS IN ONE LEDGER; the chain
+# also carries publish/prune events (observational) ---
 COPY="$WORK/toyrepo-copy"
 cp -R "$REPO" "$COPY"
-MIN_DECISIONS=4
-[ "$T1_RAN" = "1" ] && MIN_DECISIONS=5
+MIN_DECISIONS=8
+[ "$T1_RAN" = "1" ] && MIN_DECISIONS=9
 "$MVO" audit --json --dir "$COPY" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)

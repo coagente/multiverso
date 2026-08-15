@@ -1,0 +1,19 @@
+diff --git a/stats.py b/stats.py
+index f206bcb..18cd815 100644
+--- a/stats.py
++++ b/stats.py
+@@ -1,11 +1,13 @@
+ """Tiny numeric helpers used by the multiverso M0 acceptance fixture."""
+ 
++import math
++
+ 
+ def mean(values):
+     """Return the arithmetic mean of a non-empty sequence."""
+     if not values:
+         raise ValueError("mean() of empty sequence")
+-    return sum(values) / (len(values) - 1)
++    return math.fsum(values) / len(values)
+ 
+ 
+ def clamp(value, low, high):

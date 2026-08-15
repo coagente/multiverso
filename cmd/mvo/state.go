@@ -8,8 +8,9 @@ import (
 	"github.com/coagente/multiverso/internal/object"
 )
 
-// Ledger event types (M0 + M1a).
+// Ledger event types (M0 + M1a + M1e).
 const (
+	evPolicyCreated       = "policy.created"
 	evIntentCreated       = "intent.created"
 	evWorldCreated        = "world.created"
 	evReceiptRecorded     = "receipt.recorded"
@@ -24,6 +25,15 @@ const (
 	evPublishFinished     = "publish.finished"
 	evPruneExecuted       = "prune.executed"
 )
+
+// policyRec is one recorded policy: the canonical bytes exactly as they
+// were appended, and the digest they were recorded under. Policies are
+// never re-serialized on the way back out (M1e decision 1).
+type policyRec struct {
+	Seq   int64
+	Dig   string
+	Bytes []byte
+}
 
 type worldRec struct {
 	Seq   int64
@@ -71,6 +81,7 @@ type publishFinishRec struct {
 // double as object digests because payloads are the canonical object bytes.
 type ledgerState struct {
 	Events            int
+	Policies          []policyRec              // seq order
 	Intents           map[string]object.Intent // digest -> intent
 	Worlds            []worldRec               // seq order
 	Receipts          []receiptRec             // seq order
@@ -86,6 +97,10 @@ func loadState(led *ledger.Ledger) (*ledgerState, error) {
 	err := led.Scan(func(e ledger.Event) error {
 		st.Events++
 		switch e.Type {
+		case evPolicyCreated:
+			st.Policies = append(st.Policies, policyRec{
+				Seq: e.Seq, Dig: e.PayloadDig, Bytes: append([]byte(nil), e.Payload...),
+			})
 		case evIntentCreated:
 			var in object.Intent
 			if err := json.Unmarshal(e.Payload, &in); err != nil {
@@ -152,9 +167,9 @@ func loadState(led *ledger.Ledger) (*ledgerState, error) {
 				Seq: e.Seq, TS: e.TS, Intent: body.Intent,
 			})
 		}
-		// Other event types (race.finished, policy.created,
-		// attestation.recorded, key.generated, publish.started,
-		// prune.executed) carry no state the CLI views need.
+		// Other event types (race.finished, attestation.recorded,
+		// key.generated, publish.started, prune.executed) carry no state the
+		// CLI views need.
 		return nil
 	})
 	if err != nil {

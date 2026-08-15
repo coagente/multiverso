@@ -30,6 +30,12 @@ func (*t1Backend) Tier() string { return object.TierT1Container }
 // interface itself stays two methods).
 func (b *t1Backend) ImageDigest() string { return b.cfg.Image.Digest }
 
+// ImageRef reports the image reference AS THE OPERATOR NAMED IT — the
+// human-facing half of the same pin, used by the race's pytest pre-flight to
+// say which environment it probed (M1e decision 15). Same assertion
+// discipline as ImageDigest: the Backend interface stays two methods.
+func (b *t1Backend) ImageRef() string { return b.cfg.Image.Ref }
+
 // Open implements Backend: docker run of the keeper container, bind-
 // mounting the worktree at /work (never docker cp — decision 3: one
 // mutable state, host-side evidence capture runs unchanged).

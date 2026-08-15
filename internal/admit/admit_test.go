@@ -2,6 +2,7 @@ package admit
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -16,7 +17,7 @@ import (
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
-	"github.com/coagente/multiverso/internal/oracle"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/signing"
 )
 
@@ -73,7 +74,41 @@ type fixture struct {
 	selDig    string
 }
 
-func newFixture(t *testing.T) *fixture {
+// newFixture seeds an admission whose race suite receipt ran `true` — the
+// argv a v0 landing recomputes, since a v0 policy cannot name its own oracle
+// (M1a decision 5, narrowed by M1e decision 20 to the v0 dialect alone).
+func newFixture(t *testing.T) *fixture { return newFixtureGate(t, "true") }
+
+// newFixtureGate seeds the same admission with a chosen gate command, which
+// is what the landing recompute will run.
+func newFixtureGate(t *testing.T, gateArgv ...string) *fixture {
+	return newFixturePolicy(t, nil, gateArgv...)
+}
+
+// newFixtureV1 seeds the same admission under a policy/v1 artifact that
+// names TWO landing oracles of its own: the shape M1e decision 20 wants,
+// where the pinned policy — not receipt archaeology — decides what the
+// landing gates are.
+func newFixtureV1(t *testing.T, secondArgv ...string) *fixture {
+	t.Helper()
+	pol := object.PolicyV1{
+		Schema: object.SchemaPolicyV1,
+		Name:   "landing",
+		Oracles: []object.OracleSpec{
+			{Name: "first", Kind: policy.KindCommand, Argv: []string{"true"}, Args: []string{}},
+			{Name: "second", Kind: policy.KindCommand, Argv: secondArgv, Args: []string{}},
+		},
+		HardGates: []object.GateSpec{
+			{Gate: policy.GateStatusPass, Oracle: "first", Basis: object.BasisConstruction},
+			{Gate: policy.GateStatusPass, Oracle: "second", Basis: object.BasisConstruction},
+		},
+		Ranking:    []string{policy.KeyGatePass, policy.KeyWallMSAsc},
+		Escalation: object.EscalationSpec{RequireEvidence: []string{}},
+	}
+	return newFixturePolicy(t, &pol, "true")
+}
+
+func newFixturePolicy(t *testing.T, v1 *object.PolicyV1, gateArgv ...string) *fixture {
 	t.Helper()
 	repo := initRepo(t)
 	work := t.TempDir()
@@ -107,7 +142,14 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("Head: %v", err)
 	}
-	polDig := put(testPolicy())
+	polDig := put(object.Policy{
+		Schema:    object.SchemaPolicy,
+		HardGates: []string{"suite-pass"},
+		Ranking:   []string{"gate_pass", "wall_ms_asc"},
+	})
+	if v1 != nil {
+		polDig = put(*v1)
+	}
 	intentDig := put(object.Intent{
 		Schema:    object.SchemaIntent,
 		Base:      object.Base{Commit: commit, Tree: tree},
@@ -132,7 +174,7 @@ func newFixture(t *testing.T) *fixture {
 	})
 	suiteRec := gateReceipt("pass")
 	suiteRec.World = winnerDig
-	suiteRec.Execution.Argv = []string{"true"}
+	suiteRec.Execution.Argv = append([]string(nil), gateArgv...)
 	suiteDig := put(suiteRec)
 	selDig := put(object.Decision{
 		Schema: object.SchemaDecision, Type: "SELECT", Intent: intentDig,
@@ -146,13 +188,16 @@ func newFixture(t *testing.T) *fixture {
 	}
 }
 
-func (f *fixture) config(argv ...string) Config {
+// config wires the admission. No oracle is passed: admission builds its
+// landing gates from the pinned policy (v1) or from the race receipt it
+// recovers itself (v0) — an operator can supply neither (M1e decision 20).
+func (f *fixture) config() Config {
 	return Config{
 		Repo: f.repo, Ledger: f.led, CAS: f.store,
 		Intent: f.intentDig, SelectDig: f.selDig,
-		Oracle:   &oracle.CommandOracle{Argv: argv, Timeout: time.Minute, CAS: f.store},
-		Signer:   f.signer,
-		AdmitDir: f.admitDir,
+		Signer:        f.signer,
+		AdmitDir:      f.admitDir,
+		OracleTimeout: time.Minute,
 	}
 }
 
@@ -173,7 +218,7 @@ func TestRunAdmitLandsSignedCommit(t *testing.T) {
 	preHead := git(t, f.repo, "rev-parse", "HEAD")
 	branch := git(t, f.repo, "symbolic-ref", "--short", "HEAD")
 
-	res, err := Run(context.Background(), f.config("true"))
+	res, err := Run(context.Background(), f.config())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -301,7 +346,7 @@ func TestRunEscalatesOnConflict(t *testing.T) {
 	git(t, f.repo, "commit", "-q", "-m", "trunk moved")
 	preHead := git(t, f.repo, "rev-parse", "HEAD")
 
-	res, err := Run(context.Background(), f.config("true"))
+	res, err := Run(context.Background(), f.config())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -365,10 +410,10 @@ func TestRunEscalatesOnConflict(t *testing.T) {
 }
 
 func TestRunRejectsOnGateFailure(t *testing.T) {
-	f := newFixture(t)
+	f := newFixtureGate(t, "false")
 	preHead := git(t, f.repo, "rev-parse", "HEAD")
 
-	res, err := Run(context.Background(), f.config("false"))
+	res, err := Run(context.Background(), f.config())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -397,7 +442,7 @@ func TestRunRejectsOnGateFailure(t *testing.T) {
 func TestRunDetachedHeadRecordsNothing(t *testing.T) {
 	f := newFixture(t)
 	git(t, f.repo, "checkout", "-q", "--detach")
-	if _, err := Run(context.Background(), f.config("true")); err == nil {
+	if _, err := Run(context.Background(), f.config()); err == nil {
 		t.Fatal("Run on detached HEAD: want error, got nil")
 	}
 	if got := f.eventTypes(t); len(got) != 0 {
@@ -408,5 +453,67 @@ func TestRunDetachedHeadRecordsNothing(t *testing.T) {
 func TestRunConfigValidation(t *testing.T) {
 	if _, err := Run(context.Background(), Config{}); err == nil {
 		t.Fatal("Run with empty config: want error, got nil")
+	}
+}
+
+// M1e decision 20: a v1 policy's landing gates are the policy's OWN
+// oracles, all of them, in gate order, with no short-circuit — one
+// candidate, and the operator deserves the full gate picture.
+func TestRunV1PolicyRunsEveryLandingGate(t *testing.T) {
+	f := newFixtureV1(t, "sh", "-c", "exit 0")
+	res, err := Run(context.Background(), f.config())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Decision.Type != TypeAdmit {
+		t.Fatalf("decision = %s (%s), want ADMIT", res.Decision.Type, res.Decision.Rationale)
+	}
+	if len(res.GateReceipts) != 2 {
+		t.Fatalf("gate receipts = %v, want 2 (one per hard-gate oracle)", res.GateReceipts)
+	}
+	if res.GateReceipts[0] > res.GateReceipts[1] {
+		t.Errorf("gate receipts are not digest-sorted: %v", res.GateReceipts)
+	}
+	if res.GateReceipt != res.GateReceipts[0] {
+		t.Errorf("GateReceipt = %s, want the first of %v", res.GateReceipt, res.GateReceipts)
+	}
+	// The attestation covers the apply receipt plus EVERY gate receipt.
+	var stmt attest.Statement
+	bundleBytes, err := f.store.Get(res.AttestationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Payload string `json:"payload"`
+	}
+	if err := json.Unmarshal(bundleBytes, &env); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(env.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &stmt); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(stmt.Predicate.Evidence); got != 3 {
+		t.Errorf("attested evidence = %d receipts, want 3 (apply + 2 gates)", got)
+	}
+
+	// The second gate failing is a REJECT that names it — and the first
+	// gate still ran, so the picture is complete.
+	f2 := newFixtureV1(t, "sh", "-c", "exit 1")
+	res2, err := Run(context.Background(), f2.config())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res2.Decision.Type != TypeReject {
+		t.Fatalf("decision = %s, want REJECT", res2.Decision.Type)
+	}
+	if len(res2.GateReceipts) != 2 {
+		t.Errorf("gate receipts = %v, want 2 (no short-circuit at admission)", res2.GateReceipts)
+	}
+	if !strings.Contains(res2.Decision.Rationale, "status-pass@second (status=fail)") {
+		t.Errorf("rationale = %q, want the failed gate named", res2.Decision.Rationale)
 	}
 }

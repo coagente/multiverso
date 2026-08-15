@@ -1,20 +1,22 @@
 // Package race implements the M0 fixed orchestrator (CP-2, CP-3) and the
-// pure decision function (CP-6, NFR-1).
+// pure decision function (CP-5, CP-6, NFR-1).
 package race
 
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
-// Decision types (decision/v0 subset; ESCALATE is post-M0).
+// Decision types (decision/v0). ESCALATE is a first-class race outcome
+// since M1e: a recorded ESCALATE is a product, not an error.
 const (
-	TypeSelect = "SELECT"
-	TypeReject = "REJECT"
+	TypeSelect   = "SELECT"
+	TypeReject   = "REJECT"
+	TypeEscalate = "ESCALATE"
 )
 
 // World outcomes — aliases of the object constants (M0 API compatibility;
@@ -24,159 +26,119 @@ const (
 	OutcomeConfigError = object.OutcomeConfigError
 )
 
-// GateSuitePass is the only hard gate M0 knows how to evaluate.
-const GateSuitePass = "suite-pass"
+// GateSuitePass is M0's single hard gate, kept as an alias of the policy
+// vocabulary constant for the callers M0 shipped with.
+const GateSuitePass = policy.GateSuitePass
 
-// candidate pairs a world with its suite evidence for ranking.
-type candidate struct {
-	digest  string
-	world   object.World
-	receipt *object.Receipt // suite receipt; nil when the world produced none
-	pass    bool            // all hard gates passed
-	wallMS  int64           // suite wall time; MaxInt64 when no receipt
+// Decide is the race decision function (CP-6). It is pure, TOTAL and
+// order-independent: Type, Subject, Evidence and Rationale depend only on
+// (pol, worlds, receipts), so audit replay reproduces them byte-for-byte
+// (NFR-1). CreatedAt is left empty for the recorder to stamp — it must not
+// influence the decision.
+//
+// Inputs carry the digests they were RECORDED under: nothing here is
+// re-derived from a re-serialization of a decoded object, which is what
+// lets M1e add fields to World and Receipt and still replay pre-M1e
+// ledgers byte-for-byte (M1e decision 1).
+func Decide(pol policy.Policy, worlds []object.RecordedWorld, receipts []object.RecordedReceipt) object.Decision {
+	t := Trace(pol, worlds, receipts)
+	subject := make([]string, 0, len(t.Candidates))
+	for i := range t.Candidates {
+		subject = append(subject, t.Candidates[i].World)
+	}
+	return object.Decision{
+		Schema:    object.SchemaDecision,
+		Type:      t.Type,
+		Intent:    t.Intent,
+		Subject:   subject,
+		Evidence:  t.Evidence,
+		Policy:    pol.Digest,
+		Rationale: t.Rationale,
+	}
 }
 
-// Decide is the v0 decision function (CP-6). It is pure and
-// order-independent: Type, Subject, Evidence, and Rationale depend only on
-// (policy, worlds, receipts), so audit replay reproduces them
-// byte-for-byte (NFR-1). CreatedAt is left empty for the recorder to
-// stamp — it must not influence the decision.
-func Decide(policy object.Policy, worlds []object.World, receipts []object.Receipt) object.Decision {
-	polDig, _, _ := object.Digest(policy)
-
-	evidence := make([]string, 0, len(receipts))
-	suite := make(map[string]object.Receipt, len(receipts)) // world digest → suite receipt
-	suiteDig := make(map[string]string, len(receipts))      // world digest → receipt digest
-	for i := range receipts {
-		r := receipts[i]
-		dig, _, err := object.Digest(r)
-		if err != nil {
-			continue // unreachable for well-formed receipts
-		}
-		evidence = append(evidence, dig)
-		if r.Family != "suite" {
-			continue
-		}
-		// M0 records one suite receipt per world; if several appear, the
-		// smallest receipt digest wins so the choice is order-independent.
-		if prev, ok := suiteDig[r.World]; !ok || dig < prev {
-			suite[r.World] = r
-			suiteDig[r.World] = dig
-		}
+// rationale renders the decision sentence in the dialect frozen for the
+// policy's schema version (M1e decision 3). An ESCALATE wraps the
+// SELECT/REJECT sentence that would otherwise have been emitted, so the
+// human sees both the rule and the verdict it displaced.
+func rationale(pol policy.Policy, t *RaceTrace, base string) string {
+	body := rationaleV1(pol, t, base)
+	if pol.Dialect == policy.DialectV0 {
+		body = rationaleV0(pol, t, base)
 	}
-	sort.Strings(evidence)
-
-	intent := ""
-	passCount := 0
-	cands := make([]candidate, 0, len(worlds))
-	for i := range worlds {
-		w := worlds[i]
-		if intent == "" {
-			intent = w.Intent
-		}
-		dig, _, err := object.Digest(w)
-		if err != nil {
-			continue // unreachable for well-formed worlds
-		}
-		c := candidate{digest: dig, world: w, wallMS: math.MaxInt64}
-		if r, ok := suite[dig]; ok {
-			r := r
-			c.receipt = &r
-			c.wallMS = r.Cost.WallMS
-		}
-		c.pass = len(failedGates(policy.HardGates, c)) == 0
-		if c.pass {
-			passCount++
-		}
-		cands = append(cands, c)
+	if t.Escalation.Rule == "" {
+		return body
 	}
+	return fmt.Sprintf("escalated by policy rule %s: %s; %s", t.Escalation.Rule, t.Escalation.Detail, body)
+}
 
-	sort.Slice(cands, func(i, j int) bool { return rankLess(policy.Ranking, cands[i], cands[j]) })
-
-	subject := make([]string, 0, len(cands))
-	for _, c := range cands {
-		subject = append(subject, c.digest)
-	}
-
-	d := object.Decision{
-		Schema:   object.SchemaDecision,
-		Intent:   intent,
-		Subject:  subject,
-		Evidence: evidence,
-		Policy:   polDig,
-	}
-	gates := strings.Join(policy.HardGates, ",")
+// rationaleV1 is the M1e sentence: it names the decisive ranking key, which
+// is the whole point of a lexicographic spec.
+func rationaleV1(pol policy.Policy, t *RaceTrace, base string) string {
+	gates := strings.Join(t.Gates, ",")
+	keys := strings.Join(t.Keys, ",")
 	switch {
-	case passCount > 0:
-		d.Type = TypeSelect
-		d.Rationale = fmt.Sprintf(
-			"%d/%d worlds passed hard gates [%s]; selected %s by ranking [%s] (wall_ms=%d)",
-			passCount, len(cands), gates, cands[0].digest,
-			strings.Join(policy.Ranking, ","), cands[0].wallMS)
-	case len(cands) == 0:
-		d.Type = TypeReject
-		d.Rationale = "no candidate worlds"
+	case base == TypeSelect && t.PassCount >= 2:
+		c := t.Comparisons[0]
+		return fmt.Sprintf(
+			"%d/%d worlds passed hard gates [%s]; selected %s over %s at ranking key %d %s (%s); ranking [%s]",
+			t.PassCount, len(t.Candidates), gates, t.Winner, c.Other, c.DecidedAt, c.Key, c.Text, keys)
+	case base == TypeSelect:
+		return fmt.Sprintf(
+			"%d/%d worlds passed hard gates [%s]; selected %s (sole world passing all hard gates); ranking [%s]",
+			t.PassCount, len(t.Candidates), gates, t.Winner, keys)
+	case len(t.Candidates) == 0:
+		return "no candidate worlds"
 	default:
-		details := make([]string, 0, len(cands))
-		for _, c := range cands {
+		details := make([]string, 0, len(t.Candidates))
+		for i := range t.Candidates {
+			c := &t.Candidates[i]
+			label, reason := "", ""
+			if c.failIdx >= 0 {
+				label, reason = c.Gates[c.failIdx].Label, c.Gates[c.failIdx].Detail
+			}
+			details = append(details, fmt.Sprintf("%s failed [%s] (%s)", c.World, label, reason))
+		}
+		return fmt.Sprintf("0/%d worlds passed hard gates [%s]; %s",
+			len(t.Candidates), gates, strings.Join(details, "; "))
+	}
+}
+
+// rationaleV0 reproduces M0's two format strings character for character.
+// A policy pinned in the past keeps the meaning it was pinned with, and
+// audit compares the recorded sentence byte-for-byte.
+func rationaleV0(pol policy.Policy, t *RaceTrace, base string) string {
+	gates := strings.Join(t.Gates, ",")
+	switch {
+	case base == TypeSelect:
+		return fmt.Sprintf("%d/%d worlds passed hard gates [%s]; selected %s by ranking [%s] (wall_ms=%d)",
+			t.PassCount, len(t.Candidates), gates, t.Winner,
+			strings.Join(pol.Ranking, ","), suiteWallMS(&t.Candidates[0]))
+	case len(t.Candidates) == 0:
+		return "no candidate worlds"
+	default:
+		details := make([]string, 0, len(t.Candidates))
+		for i := range t.Candidates {
+			c := &t.Candidates[i]
+			failed := make([]string, 0, len(c.Gates))
+			for _, g := range c.Gates {
+				if g.Result == policy.GateFail {
+					failed = append(failed, g.Label)
+				}
+			}
 			details = append(details, fmt.Sprintf("%s failed [%s] (%s)",
-				c.digest, strings.Join(failedGates(policy.HardGates, c), ","), failReason(c)))
+				c.World, strings.Join(failed, ","), failReasonV0(c, c.counted[policy.Selector{Family: policy.FamilySuite}])))
 		}
-		d.Type = TypeReject
-		d.Rationale = fmt.Sprintf("0/%d worlds passed hard gates [%s]; %s",
-			len(cands), gates, strings.Join(details, "; "))
-	}
-	return d
-}
-
-// gatePass evaluates one hard gate for a candidate. Unknown gates fail:
-// what M0 cannot attest, it must not admit.
-func gatePass(gate string, c candidate) bool {
-	switch gate {
-	case GateSuitePass:
-		return c.receipt != nil && c.receipt.Result.Status == "pass"
-	default:
-		return false
+		return fmt.Sprintf("0/%d worlds passed hard gates [%s]; %s",
+			len(t.Candidates), gates, strings.Join(details, "; "))
 	}
 }
 
-func failedGates(gates []string, c candidate) []string {
-	failed := make([]string, 0, len(gates))
-	for _, g := range gates {
-		if !gatePass(g, c) {
-			failed = append(failed, g)
-		}
+// suiteWallMS is M0's wall_ms for a candidate: its suite receipt's cost, or
+// MaxInt64 when it produced none — the value M0 printed and ranked by.
+func suiteWallMS(c *CandidateTrace) int64 {
+	if cr := c.counted[policy.Selector{Family: policy.FamilySuite}]; cr.rec != nil {
+		return cr.rec.Cost.WallMS
 	}
-	return failed
-}
-
-// failReason explains why a candidate failed, most fundamental cause first.
-func failReason(c candidate) string {
-	switch {
-	case c.world.Outcome != OutcomeCompleted:
-		return "outcome=" + c.world.Outcome
-	case c.receipt == nil:
-		return "no suite receipt"
-	default:
-		return "status=" + c.receipt.Result.Status
-	}
-}
-
-// rankLess orders candidates lexicographically by the policy ranking keys
-// (M0: gate_pass, wall_ms_asc), with world digest ascending as the final
-// deterministic tie-break (NFR-1).
-func rankLess(ranking []string, a, b candidate) bool {
-	for _, key := range ranking {
-		switch key {
-		case "gate_pass":
-			if a.pass != b.pass {
-				return a.pass
-			}
-		case "wall_ms_asc":
-			if a.wallMS != b.wallMS {
-				return a.wallMS < b.wallMS
-			}
-		}
-	}
-	return a.digest < b.digest
+	return math.MaxInt64
 }

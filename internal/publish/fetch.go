@@ -16,6 +16,7 @@ import (
 	"github.com/coagente/multiverso/internal/attest"
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/signing"
 )
@@ -193,8 +194,9 @@ func FetchRace(cfg FetchConfig) (*Report, error) {
 				}
 				intents[id], intentPaths[id] = in, path
 			case "policy":
-				var pol object.Policy
-				if err := decodeSchema(b, &pol, object.SchemaPolicy, func() string { return pol.Schema }); err != nil {
+				// Both schema versions are policies; anything else is
+				// refused by name. A v1 policy is just a policy object.
+				if _, err := policy.Decode(b); err != nil {
 					v.fail(path, "%v", err)
 					continue
 				}
@@ -438,11 +440,20 @@ func FetchRace(cfg FetchConfig) (*Report, error) {
 	}
 
 	// --- Replay (the same pure Decide functions — decision 14) -----------
+	// gateCells is the fetched race's GATE column, derived from the SAME
+	// trace the local `mvo worlds` renders (see race.CandidateTrace.GateCell)
+	// rather than from a receipt-family guess. A world stopped by the O0
+	// collected-count guard has no suite-family receipt at all — exactly the
+	// laundering candidate this milestone exists to catch — so the old rule
+	// showed "-" for the rows a consumer most needs to read.
+	gateCells := map[string]string{}
 	if sel != nil && intentDig != "" {
 		if polBytes, ok := policies[sel.Policy]; ok {
-			var pol object.Policy
-			if json.Unmarshal(polBytes, &pol) == nil {
-				replayWorlds := make([]object.World, 0, len(sel.Subject))
+			// The digests come from the filenames this verifier already
+			// checked the bytes against — never from re-serializing what was
+			// decoded (M1e decision 1).
+			if pol, err := policy.Decode(polBytes); err == nil {
+				replayWorlds := make([]object.RecordedWorld, 0, len(sel.Subject))
 				complete := true
 				for _, s := range sel.Subject {
 					w, ok := worlds[s]
@@ -450,21 +461,25 @@ func FetchRace(cfg FetchConfig) (*Report, error) {
 						complete = false
 						break
 					}
-					replayWorlds = append(replayWorlds, w)
+					replayWorlds = append(replayWorlds, object.RecordedWorld{Digest: s, World: w})
 				}
-				replayReceipts := make([]object.Receipt, 0, len(sel.Evidence))
+				replayReceipts := make([]object.RecordedReceipt, 0, len(sel.Evidence))
 				for _, e := range sel.Evidence {
 					r, ok := receipts[e]
 					if !ok {
 						complete = false
 						break
 					}
-					replayReceipts = append(replayReceipts, r)
+					replayReceipts = append(replayReceipts, object.RecordedReceipt{Digest: e, Receipt: r})
 				}
 				if complete {
+					tr := race.Trace(pol, replayWorlds, replayReceipts)
 					got := race.Decide(pol, replayWorlds, replayReceipts)
 					if detail := diffDecision(*sel, got); detail != "" {
 						v.fail(decPaths[selDig], "SELECT replay mismatch (%s)", detail)
+					}
+					for _, c := range tr.Candidates {
+						gateCells[c.World] = c.GateCell()
 					}
 				}
 				if admitDec != nil && winner != "" {
@@ -501,16 +516,12 @@ func FetchRace(cfg FetchConfig) (*Report, error) {
 				row.Ordinal = info.ordinal
 				row.Ref = fmt.Sprintf("cand/%d", info.ordinal)
 			}
-			gateDig := ""
-			for _, e := range sel.Evidence {
-				r, ok := receipts[e]
-				if !ok || r.World != dig || r.Family != "suite" {
-					continue
-				}
-				if gateDig == "" || e < gateDig {
-					gateDig = e
-					row.Gate = r.Result.Status
-				}
+			// The gate cell names the FIRST gate the policy's ladder failed
+			// on, or "pass"; "-" survives only when the trace could not be
+			// built (an incomplete closure, whose failures are already
+			// collected above).
+			if cell, ok := gateCells[dig]; ok {
+				row.Gate = cell
 			}
 			for _, rdig := range sortedKeys(receipts) {
 				if receipts[rdig].World == dig {
@@ -588,33 +599,34 @@ func verifyCandidateRef(v *verifier, repo, ref, tip string, n int,
 	return worldDig
 }
 
-// replayAdmit reproduces the published ADMIT through admit.Decide (M1a
-// rules: apply = smallest-digest landing-apply receipt, gate =
-// smallest-digest suite receipt among the ADMIT evidence).
-func replayAdmit(v *verifier, path string, pol object.Policy, dec object.Decision,
+// replayAdmit reproduces the published ADMIT through admit.Decide: apply =
+// smallest-digest landing-apply receipt among the ADMIT evidence, gates =
+// every other evidence receipt, which admit.Decide selects among by the
+// pinned policy's own gate selectors.
+func replayAdmit(v *verifier, path string, pol policy.Policy, dec object.Decision,
 	winner string, receipts map[string]object.Receipt) {
 	evidence := append([]string(nil), dec.Evidence...)
 	sort.Strings(evidence)
-	var apply, gate *object.Receipt
+	var apply *object.RecordedReceipt
+	var gates []object.RecordedReceipt
 	for _, dig := range evidence {
 		r, ok := receipts[dig]
 		if !ok {
 			return // graph check already failed; replay would only add noise
 		}
+		rec := object.RecordedReceipt{Digest: dig, Receipt: r}
 		if r.Oracle.ID == admit.OracleIDLandingApply && apply == nil {
-			c := r
+			c := rec
 			apply = &c
+			continue
 		}
-		if r.Family == "suite" && gate == nil {
-			c := r
-			gate = &c
-		}
+		gates = append(gates, rec)
 	}
 	if apply == nil {
 		v.fail(path, "no landing-apply receipt among the ADMIT evidence")
 		return
 	}
-	got := admit.Decide(pol, dec.Intent, winner, *apply, gate)
+	got := admit.Decide(pol, dec.Intent, winner, *apply, gates)
 	if detail := diffDecision(dec, got); detail != "" {
 		v.fail(path, "ADMIT replay mismatch (%s)", detail)
 	}
@@ -623,7 +635,7 @@ func replayAdmit(v *verifier, path string, pol object.Policy, dec object.Decisio
 // verifyAttestation runs the M1d check-6 list: every predicate digest
 // resolves within the published closure, the producer key matches the
 // trust root, the budget sums, and the statement's subject gitTree equals
-// the landing suite receipt's valid_for tree — the offline substitute for
+// EVERY landing gate receipt's valid_for tree — the offline substitute for
 // M1a's commit-anchored subject check.
 func verifyAttestation(v *verifier, path string, stmt attest.Statement, intentDig string,
 	worlds map[string]object.World, policies map[string][]byte,
@@ -649,8 +661,11 @@ func verifyAttestation(v *verifier, path string, stmt attest.Statement, intentDi
 		v.fail(path, "predicate producer_key_id %s, trusted key %s", pred.ProducerKeyID, want)
 	}
 	var sum int64
-	var gateDig string
-	var gate *object.Receipt
+	type gateRec struct {
+		dig string
+		rec object.Receipt
+	}
+	var gates []gateRec
 	complete := true
 	for _, dig := range pred.Evidence {
 		r, ok := receipts[dig]
@@ -660,9 +675,17 @@ func verifyAttestation(v *verifier, path string, stmt attest.Statement, intentDi
 			continue
 		}
 		sum += r.Cost.WallMS
-		if r.Family == "suite" && (gateDig == "" || dig < gateDig) {
-			c := r
-			gateDig, gate = dig, &c
+		// Every attested receipt EXCEPT the landing-apply one judged the
+		// admitted tree, whatever oracle produced it — the same rule mvo
+		// verify's check 6 applies. Selecting one "suite-family" receipt
+		// instead would reject a legal v1 policy whose hard gates name only
+		// a pytest-collect oracle (a plausible "don't delete tests" guard),
+		// whose ADMIT carries no suite-family receipt at all. The apply
+		// receipt pins the PRE-apply tree, which this closure cannot resolve
+		// offline — anchoring it to the parent commit stays mvo verify's job
+		// (decision 15).
+		if r.Family != admit.FamilyLandingApply {
+			gates = append(gates, gateRec{dig: dig, rec: r})
 		}
 	}
 	if complete && pred.BudgetConsumed.WallMS != sum {
@@ -672,15 +695,18 @@ func verifyAttestation(v *verifier, path string, stmt attest.Statement, intentDi
 		v.fail(path, "statement has %d subjects, want exactly one", len(stmt.Subject))
 		return
 	}
-	if gate == nil {
+	if len(gates) == 0 {
 		if complete {
-			v.fail(path, "no landing suite receipt among the predicate evidence")
+			v.fail(path, "no landing gate receipt among the predicate evidence")
 		}
 		return
 	}
 	subjectTree := stmt.Subject[0].Digest["gitTree"]
-	if want := strings.TrimPrefix(gate.Freshness.ValidFor.Tree, gitx.TreePrefix); subjectTree != want {
-		v.fail(path, "statement subject gitTree %s, landing suite receipt valid_for tree %s", subjectTree, want)
+	for _, g := range gates {
+		if want := strings.TrimPrefix(g.rec.Freshness.ValidFor.Tree, gitx.TreePrefix); subjectTree != want {
+			v.fail(path, "statement subject gitTree %s, %s landing receipt %s valid_for tree %s",
+				subjectTree, g.rec.Family, g.dig, want)
+		}
 	}
 }
 

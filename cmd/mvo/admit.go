@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/coagente/multiverso/internal/admit"
-	"github.com/coagente/multiverso/internal/oracle"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/workspace"
 )
@@ -63,29 +62,24 @@ func cmdAdmit(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("admit: no SELECT decision for intent %s (run \"mvo race\" first)", intentDig)
 	}
 
-	// The gate that judged the race judges the landing (design decision 5).
-	argv, err := admit.LandingOracleArgv(ws.CAS, sel.Decision)
-	if err != nil {
-		return fmt.Errorf("admit: %w", err)
-	}
 	signer, err := ws.Signer()
 	if err != nil {
 		return fmt.Errorf("admit: %w", err)
 	}
 
+	// No oracle is constructed here: the landing gates come from the intent's
+	// pinned policy (v1) or, for a v0 policy, from the race receipt the
+	// admission itself recovers (M1e decision 20) — one fewer place where an
+	// operator's environment could decide what a gate means.
 	res, err := admit.Run(context.Background(), admit.Config{
-		Repo:      ws.Root,
-		Ledger:    ws.Ledger,
-		CAS:       ws.CAS,
-		Intent:    intentDig,
-		SelectDig: sel.Dig,
-		Oracle: &oracle.CommandOracle{
-			Argv:    argv,
-			Timeout: time.Duration(intent.Budget.MaxWallMS) * time.Millisecond,
-			CAS:     ws.CAS,
-		},
-		Signer:   signer,
-		AdmitDir: ws.AdmitDir(),
+		Repo:          ws.Root,
+		Ledger:        ws.Ledger,
+		CAS:           ws.CAS,
+		Intent:        intentDig,
+		SelectDig:     sel.Dig,
+		Signer:        signer,
+		AdmitDir:      ws.AdmitDir(),
+		OracleTimeout: time.Duration(intent.Budget.MaxWallMS) * time.Millisecond,
 	})
 	if err != nil {
 		return fmt.Errorf("admit: %w", err)

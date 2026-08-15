@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/coagente/multiverso/internal/object"
-	"github.com/coagente/multiverso/internal/race"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 // Oracle/receipt identifiers for the landing-apply receipt.
@@ -25,73 +25,138 @@ const (
 	TypeEscalate = "ESCALATE"
 )
 
-// Decide is the pure admission gate (CP-6, NFR-1): Type, Subject,
-// Evidence, Rationale depend only on (policy, intent, world, apply, gate).
-// gate is nil when the apply conflicted. CreatedAt is left empty for the
-// recorder — it must not influence the decision. It performs no I/O and
-// reads no clock; audit replay reproduces it byte-for-byte from recorded
-// receipts alone.
-func Decide(policy object.Policy, intent, world string,
-	apply object.Receipt, gate *object.Receipt) object.Decision {
-	polDig, _, _ := object.Digest(policy)
-	applyDig, _, _ := object.Digest(apply)
+// Decide is the pure admission gate (CP-6, NFR-1): Type, Subject, Evidence
+// and Rationale depend only on (pol, intent, world, apply, gates). gates
+// carries one receipt per hard-gate oracle of the PINNED policy — M1a's
+// single gate generalizes, and the landing gates now come from the same
+// attested artifact the race was judged under rather than from receipt
+// archaeology (M1e decision 20). It is empty when the apply conflicted.
+//
+// CreatedAt is left empty for the recorder — it must not influence the
+// decision. Decide performs no I/O and reads no clock; audit replay
+// reproduces it byte-for-byte from recorded receipts alone.
+//
+// Escalation rules are NOT evaluated here: admission has one subject and no
+// ranking, and CP-8's conflict path is the only escalation it knows.
+func Decide(pol policy.Policy, intent, world string,
+	apply object.RecordedReceipt, gates []object.RecordedReceipt) object.Decision {
 
 	d := object.Decision{
 		Schema:  object.SchemaDecision,
 		Intent:  intent,
 		Subject: []string{world},
-		Policy:  polDig,
+		Policy:  pol.Digest,
 	}
 
 	// CP-8: a conflicted landing is never resolved, always escalated; the
 	// conflict set lives in the apply receipt's artifacts.
-	if apply.Result.Status != "pass" {
+	if apply.Receipt.Result.Status != "pass" {
 		d.Type = TypeEscalate
-		d.Evidence = []string{applyDig}
+		d.Evidence = []string{apply.Digest}
 		d.Rationale = fmt.Sprintf(
 			"landing apply of %s onto trunk tree %s failed (exit %d); conflicts are never auto-resolved (CP-8) — conflict set in apply receipt artifacts",
-			world, apply.Freshness.ValidFor.Tree, apply.Execution.ExitCode)
+			world, apply.Receipt.Freshness.ValidFor.Tree, apply.Receipt.Execution.ExitCode)
 		return d
 	}
 
-	evidence := []string{applyDig}
-	if gate != nil {
-		gateDig, _, _ := object.Digest(*gate)
-		evidence = append(evidence, gateDig)
+	// Fail closed on a policy that gates nothing. An empty gate list makes
+	// every predicate loop below vacuously true, so the landing would be
+	// ADMITTED — and signed, and attested — on the strength of no gate at
+	// all. What cannot be attested must not be admitted; the ingest boundary
+	// refuses such a policy, and this is the second lock on the same door
+	// (only a v0 policy can express it, and only by having been pinned
+	// before that refusal existed).
+	if len(pol.Gates) == 0 {
+		d.Type = TypeReject
+		d.Evidence = []string{apply.Digest}
+		d.Rationale = fmt.Sprintf("landing gates [] failed on tree %s; policy %s declares no hard gate: an unattested landing is not an admission",
+			apply.Receipt.Freshness.ValidFor.Tree, pol.Digest)
+		return d
+	}
+
+	evidence := make([]string, 0, len(gates)+1)
+	evidence = append(evidence, apply.Digest)
+	for _, g := range gates {
+		evidence = append(evidence, g.Digest)
 	}
 	sort.Strings(evidence)
 	d.Evidence = evidence
 
-	gates := strings.Join(policy.HardGates, ",")
-	tree := apply.Freshness.ValidFor.Tree
-	if gate != nil {
-		tree = gate.Freshness.ValidFor.Tree
+	labels := strings.Join(pol.GateLabels(), ",")
+
+	// One admission lands ONE tree: gate receipts that disagree about which
+	// tree they judged are not evidence about a landing, they are noise.
+	tree := apply.Receipt.Freshness.ValidFor.Tree
+	if len(gates) > 0 {
+		tree = gates[0].Receipt.Freshness.ValidFor.Tree
+		for _, g := range gates {
+			if g.Receipt.Freshness.ValidFor.Tree != tree || tree == "" {
+				d.Type = TypeReject
+				d.Rationale = fmt.Sprintf("landing gates [%s] failed on tree %s; %s",
+					labels, apply.Receipt.Freshness.ValidFor.Tree,
+					"landing gate receipts disagree on the landing tree")
+				return d
+			}
+		}
 	}
 
-	// Gate evaluation, restricted to the landing suite receipt. Unknown
-	// gates fail: what it cannot attest, it must not admit. A gate receipt
-	// with status "error" (timeout/spawn) rejects, never admits.
+	// Gate evaluation over the landing receipts. No short-circuit: there is
+	// one candidate and the operator deserves the full gate picture.
 	var details []string
-	for _, g := range policy.HardGates {
-		switch g {
-		case race.GateSuitePass:
-			switch {
-			case gate == nil:
-				details = append(details, "suite-pass (no landing suite receipt)")
-			case gate.Result.Status != "pass":
-				details = append(details, fmt.Sprintf("suite-pass (status=%s)", gate.Result.Status))
-			}
-		default:
-			details = append(details, fmt.Sprintf("%s (unknown gate)", g))
+	for _, g := range pol.Gates {
+		rec := counted(g.Sel, gates)
+		ok, reason := g.Eval(rec)
+		if ok {
+			continue
 		}
+		details = append(details, fmt.Sprintf("%s (%s)", g.Label, admitReason(pol, g, rec, reason)))
 	}
 
 	if len(details) == 0 {
 		d.Type = TypeAdmit
-		d.Rationale = fmt.Sprintf("landing gates [%s] passed on tree %s; admitting %s", gates, tree, world)
+		d.Rationale = fmt.Sprintf("landing gates [%s] passed on tree %s; admitting %s", labels, tree, world)
 		return d
 	}
 	d.Type = TypeReject
-	d.Rationale = fmt.Sprintf("landing gates [%s] failed on tree %s; %s", gates, tree, strings.Join(details, ", "))
+	d.Rationale = fmt.Sprintf("landing gates [%s] failed on tree %s; %s", labels, tree, strings.Join(details, ", "))
 	return d
+}
+
+// admitReason renders a failed landing gate's reason. The v0 dialect
+// reproduces M1a's sentences byte-for-byte — a policy pinned then must mean
+// then what it meant then, and audit compares rationales byte-for-byte.
+func admitReason(pol policy.Policy, g policy.Gate, rec *object.Receipt, reason string) string {
+	if pol.Dialect != policy.DialectV0 {
+		return reason
+	}
+	switch {
+	case g.AlwaysFails:
+		return "unknown gate"
+	case rec == nil:
+		return "no landing suite receipt"
+	default:
+		// "status=fail" / "status=error" are already M1a's words; anything
+		// else (a basis too weak for the gate) is reported as it happened
+		// rather than dressed up as a status.
+		return reason
+	}
+}
+
+// counted picks a selector's landing receipt: the smallest-digest match, so
+// the choice is order-independent — the same disambiguation race.Decide
+// uses. Landing receipts are NOT world-bound: they judge the landing tree,
+// which is by construction not the world's tree (EP-3).
+func counted(sel policy.Selector, gates []object.RecordedReceipt) *object.Receipt {
+	best := ""
+	var out *object.Receipt
+	for i := range gates {
+		if !sel.Match(gates[i].Receipt) {
+			continue
+		}
+		if best == "" || gates[i].Digest < best {
+			best = gates[i].Digest
+			out = &gates[i].Receipt
+		}
+	}
+	return out
 }

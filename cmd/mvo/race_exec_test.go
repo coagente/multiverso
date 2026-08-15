@@ -105,8 +105,7 @@ func TestRaceExecT1WithoutDockerPreflight(t *testing.T) {
 
 	_, stderr, code := mvo(t, "race", sc.intentDig, "--dir", sc.repo,
 		"--agent", "script", "--patches", patches,
-		"--exec", "T1", "--exec-image", "multiverso-t1-fixture:v1",
-		"--oracle-cmd", "true")
+		"--exec", "T1", "--exec-image", "multiverso-t1-fixture:v1")
 	if code != exitFail {
 		t.Fatalf("exit = %d, want %d (machinery failure)\nstderr: %s", code, exitFail, stderr)
 	}

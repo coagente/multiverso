@@ -39,20 +39,6 @@ func appendEvent(led *ledger.Ledger, typ string, body map[string]any) error {
 	return nil
 }
 
-// LoadPolicy fetches a Policy object from CAS by its digest and validates
-// its schema. Race runs and audit replay share it: both must read the same
-// policy the same way (NFR-1).
-func LoadPolicy(store *cas.Store, dig string) (object.Policy, error) {
-	var pol object.Policy
-	if err := loadObject(store, dig, &pol); err != nil {
-		return pol, err
-	}
-	if pol.Schema != object.SchemaPolicy {
-		return pol, fmt.Errorf("race: policy %s has schema %q, want %q", dig, pol.Schema, object.SchemaPolicy)
-	}
-	return pol, nil
-}
-
 // loadObject fetches an object's canonical bytes from CAS by its "mv0:"
 // digest and decodes them into v.
 func loadObject(store *cas.Store, dig string, v any) error {

@@ -16,20 +16,26 @@ import (
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/signing"
 )
 
-// Config wires one admission. All fields are required.
+// Config wires one admission. All fields are required except OracleTimeout.
 type Config struct {
 	Repo      string         // git repo root (trunk = its checked-out branch)
 	Ledger    *ledger.Ledger // event log
 	CAS       *cas.Store     // object + artifact store
 	Intent    string         // intent digest ("mv0:…") already in CAS
 	SelectDig string         // digest of the SELECT decision being admitted
-	Oracle    oracle.Oracle  // landing gate oracle (argv recovered via LandingOracleArgv)
 	Signer    *signing.Signer
 	AdmitDir  string // parent directory for landing worktrees
+	// OracleTimeout is the fallback wall bound for landing oracles that name
+	// none of their own; zero means the intent's max_wall_ms. Admission
+	// builds its oracles from the PINNED policy (v1) or from
+	// LandingOracleArgv (v0) — never from anything an operator passes here,
+	// so one fewer place can decide what a gate means (M1e decision 20).
+	OracleTimeout time.Duration
 }
 
 // Result is what an admission produced. Run returns (*Result, nil) for
@@ -37,12 +43,13 @@ type Config struct {
 type Result struct {
 	Decision       object.Decision
 	DecisionDigest string
-	Branch         string // trunk branch name
-	ApplyReceipt   string // landing-apply receipt digest
-	GateReceipt    string // landing suite receipt digest; "" on conflict
-	Commit         string // admitted commit sha; "" unless ADMIT landed
-	StatementDig   string // "mv0:…" of the canonical statement; "" unless landed
-	AttestationKey string // CAS key of the DSSE bundle; "" unless landed
+	Branch         string   // trunk branch name
+	ApplyReceipt   string   // landing-apply receipt digest
+	GateReceipts   []string // landing gate receipt digests, sorted; empty on conflict
+	GateReceipt    string   // GateReceipts[0]; "" on conflict (output compatibility)
+	Commit         string   // admitted commit sha; "" unless ADMIT landed
+	StatementDig   string   // "mv0:…" of the canonical statement; "" unless landed
+	AttestationKey string   // CAS key of the DSSE bundle; "" unless landed
 }
 
 // Run executes one admission: apply the SELECT winner's patch onto the
@@ -84,9 +91,21 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if winner.Schema != object.SchemaWorld {
 		return nil, fmt.Errorf("admit: %s has schema %q, want %q", winnerDig, winner.Schema, object.SchemaWorld)
 	}
-	policy, err := race.LoadPolicy(cfg.CAS, intent.Policy)
+	// The landing gates come from the intent's PINNED policy — the same
+	// attested artifact the race was judged under (M1e decision 20).
+	pol, err := policy.Load(cfg.CAS, intent.Policy)
 	if err != nil {
 		return nil, fmt.Errorf("admit: %w", err)
+	}
+	oracleTimeout := cfg.OracleTimeout
+	if oracleTimeout <= 0 {
+		oracleTimeout = time.Duration(intent.Budget.MaxWallMS) * time.Millisecond
+	}
+	// Resolved before anything is recorded: an admission that cannot build
+	// its gates must fail as machinery, not as a REJECT.
+	specs, err := landingSpecs(cfg.CAS, pol, sel)
+	if err != nil {
+		return nil, err
 	}
 
 	// Trunk state. A detached HEAD errors here, before anything is
@@ -128,6 +147,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		_ = gitx.RemoveWorktree(cfg.Repo, dir)
 		_ = os.Remove(dir) // in case worktree removal left the dir behind
 	}()
+
+	// The base-state measurement runs on the TRUNK tree, before the patch is
+	// applied — exactly the right denominator for "did this patch delete
+	// tests from what is landing" (M1e decision 13). A measurement that
+	// failed leaves the delta absent, which fails the gate honestly rather
+	// than admitting against a fiction.
+	baseline, err := measureBaseline(ctx, cfg, pol, dir, trunkTree, oracleTimeout)
+	if err != nil {
+		return nil, err
+	}
 
 	// Applicability is a property of (patch, trunk tree): the apply
 	// receipt's freshness pins the pre-apply state (EP-3).
@@ -171,9 +200,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			IsolationTier: object.TierT0Worktree,
 			IsolationCaps: object.HostCaps(),
 		},
-		Result: object.Result{Status: status, Artifacts: []string{stdoutKey, stderrKey}},
+		Result: object.NewResult(status, stdoutKey, stderrKey),
 		Freshness: object.Freshness{
-			Basis:    "construction",
+			Basis:    object.BasisConstruction,
 			ValidFor: object.ValidFor{Tree: trunkTree, Env: trunkEnv},
 		},
 		RecheckTier: "V1-replayable",
@@ -188,9 +217,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	res := &Result{Branch: branch, ApplyReceipt: applyDig}
 
+	applyRecorded := object.RecordedReceipt{Digest: applyDig, Receipt: applyRec}
+
 	// Conflict path (CP-8): never resolve, never --3way, never rebase.
 	if applyErr != nil {
-		dec := Decide(policy, cfg.Intent, winnerDig, applyRec, nil)
+		dec := Decide(pol, cfg.Intent, winnerDig, applyRecorded, nil)
 		dec.CreatedAt = nowRFC3339()
 		decDig, err := recordObject(cfg, "decision.recorded", dec)
 		if err != nil {
@@ -217,19 +248,35 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// raced under T1 lands via a host-run gate whose receipt honestly
 	// records T0-worktree + the host env digest; if the host lacks the
 	// toolchain the gate fails → REJECT — honest, never silently skipped.
-	gateRec, err := cfg.Oracle.Run(ctx, backend.HostDir(dir))
-	if err != nil {
-		return nil, fmt.Errorf("admit: landing oracle in %s: %w", dir, err)
+	//
+	// EVERY hard-gate oracle of the pinned policy runs, in gate order, with
+	// NO short-circuit: there is one candidate and the operator deserves the
+	// full gate picture in the REJECT payload.
+	var gateReceipts []object.RecordedReceipt
+	for _, spec := range specs {
+		o, err := newLandingOracle(cfg, spec, oracleTimeout, baseline)
+		if err != nil {
+			return nil, err
+		}
+		gateRec, err := o.Run(ctx, backend.HostDir(dir))
+		if err != nil {
+			return nil, fmt.Errorf("admit: landing oracle %s in %s: %w", spec.Name, dir, err)
+		}
+		gateRec.World = winnerDig
+		gateRec.Freshness.ValidFor = object.ValidFor{Tree: landingTree, Env: landingEnv}
+		gateDig, err := recordObject(cfg, "receipt.recorded", gateRec)
+		if err != nil {
+			return nil, err
+		}
+		gateReceipts = append(gateReceipts, object.RecordedReceipt{Digest: gateDig, Receipt: gateRec})
+		res.GateReceipts = append(res.GateReceipts, gateDig)
 	}
-	gateRec.World = winnerDig
-	gateRec.Freshness.ValidFor = object.ValidFor{Tree: landingTree, Env: landingEnv}
-	gateDig, err := recordObject(cfg, "receipt.recorded", gateRec)
-	if err != nil {
-		return nil, err
+	sort.Strings(res.GateReceipts)
+	if len(res.GateReceipts) > 0 {
+		res.GateReceipt = res.GateReceipts[0]
 	}
-	res.GateReceipt = gateDig
 
-	dec := Decide(policy, cfg.Intent, winnerDig, applyRec, &gateRec)
+	dec := Decide(pol, cfg.Intent, winnerDig, applyRecorded, gateReceipts)
 	dec.CreatedAt = nowRFC3339()
 	decDig, err := recordObject(cfg, "decision.recorded", dec)
 	if err != nil {
@@ -244,8 +291,15 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return res, nil
 	}
 
-	// ADMIT: build and sign the statement, then land by plumbing.
-	evidence := []string{applyDig, gateDig}
+	// ADMIT: build and sign the statement, then land by plumbing. The
+	// attested evidence is the apply receipt plus EVERY landing gate
+	// receipt, and the consumed budget is their wall-time sum.
+	evidence := []string{applyDig}
+	budgetMS := applyRec.Cost.WallMS
+	for _, g := range gateReceipts {
+		evidence = append(evidence, g.Digest)
+		budgetMS += g.Receipt.Cost.WallMS
+	}
 	sort.Strings(evidence)
 	stmt, err := attest.New(branch, landingTree, attest.Predicate{
 		Intent:         cfg.Intent,
@@ -254,7 +308,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		SelectDecision: cfg.SelectDig,
 		Evidence:       evidence,
 		Policy:         dec.Policy,
-		BudgetConsumed: attest.Budget{WallMS: applyRec.Cost.WallMS + gateRec.Cost.WallMS},
+		BudgetConsumed: attest.Budget{WallMS: budgetMS},
 		ProducerKeyID:  cfg.Signer.KeyID,
 		Trunk:          attest.Trunk{Branch: branch, ParentCommit: trunkCommit},
 	})
@@ -342,6 +396,118 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	return res, nil
 }
 
+// landingSpecs resolves the oracle instances the landing must recompute
+// (EP-3 v0, M1e decision 20). Under a v1 policy they are the policy's own
+// hard-gate oracles — the same pinned, attested artifact the race was judged
+// under, now covering several oracles, so operators can swap gates neither at
+// admit time nor per machine. Under a v0 policy the only source is receipt
+// archaeology (M1a decision 5), which is exactly why v0 never becomes the
+// silent default.
+func landingSpecs(store *cas.Store, pol policy.Policy, sel object.Decision) ([]policy.Oracle, error) {
+	// A policy that gates nothing cannot be landed under, in EITHER dialect.
+	// The v1 path is refused by construction (no gate, no gate oracle); the
+	// v0 path would otherwise recover an oracle from the winner's race
+	// receipt, run it, and hand Decide a gate list no gate reads — an
+	// admission attested by evidence the policy never consulted, and an
+	// evidence list `mvo audit` derives differently from the policy's own
+	// (empty) selectors. Refused here, before anything is recorded: this is
+	// machinery, not a REJECT.
+	if len(pol.Gates) == 0 {
+		return nil, fmt.Errorf("admit: policy %s declares no hard gate: an unattested landing is not an admission", pol.Digest)
+	}
+	if pol.Dialect != policy.DialectV0 {
+		specs := pol.GateOracles()
+		if len(specs) == 0 {
+			return nil, fmt.Errorf("admit: policy %s declares no hard-gate oracle", pol.Digest)
+		}
+		return specs, nil
+	}
+	argv, err := LandingOracleArgv(store, sel)
+	if err != nil {
+		return nil, err
+	}
+	// Config stays EMPTY on purpose: the M0 path derives the receipt's
+	// config digest from argv+timeout exactly as M1a did, so a v0 admission
+	// keeps digesting to the same bytes and old ledgers keep replaying.
+	return []policy.Oracle{{
+		Name:   policy.FamilySuite,
+		Kind:   policy.KindCommand,
+		Family: policy.FamilySuite,
+		Argv:   argv,
+	}}, nil
+}
+
+// newLandingOracle builds one landing gate. A spec with no resolved config
+// digest is the v0 path — no policy named the instance — and takes M0's
+// CommandOracle verbatim, so a v0 admission's receipt keeps digesting to the
+// bytes M1a recorded and old ledgers keep replaying.
+func newLandingOracle(cfg Config, spec policy.Oracle, timeout time.Duration, baseline int64) (oracle.Oracle, error) {
+	if spec.Config == "" {
+		return &oracle.CommandOracle{
+			Argv:    append([]string(nil), spec.Argv...),
+			Timeout: timeout,
+			CAS:     cfg.CAS,
+		}, nil
+	}
+	o, err := oracle.New(oracle.Params{
+		Spec: spec, CAS: cfg.CAS, Timeout: timeout, Baseline: baseline,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("admit: %w", err)
+	}
+	return o, nil
+}
+
+// measureBaseline runs the policy's collect oracle on the landing worktree
+// BEFORE the patch is applied and records baseline.recorded inside the
+// admission window. Zero means "not measured": the collect oracle then omits
+// collected_base/collected_delta, and a gate that needs the delta fails for
+// want of a metric rather than against an invented denominator.
+func measureBaseline(ctx context.Context, cfg Config, pol policy.Policy, dir, tree string, timeout time.Duration) (int64, error) {
+	spec, ok := pol.CollectOracle()
+	if !ok {
+		return 0, nil
+	}
+	o, err := oracle.New(oracle.Params{Spec: spec, CAS: cfg.CAS, Timeout: timeout})
+	if err != nil {
+		return 0, fmt.Errorf("admit: baseline: %w", err)
+	}
+	rec, err := o.Run(ctx, backend.HostDir(dir))
+	if err != nil {
+		return 0, fmt.Errorf("admit: baseline: %w", err)
+	}
+	total, known := rec.Result.Metrics[policy.MetricCollectedTotal]
+	artifact := func(i int) string {
+		if i < len(rec.Result.Artifacts) {
+			return rec.Result.Artifacts[i]
+		}
+		return ""
+	}
+	if err := appendEvent(cfg.Ledger, "baseline.recorded", map[string]any{
+		"collected_total": total,
+		"duration_ms":     rec.Execution.DurationMS,
+		"exit_code":       rec.Execution.ExitCode,
+		"intent":          cfg.Intent,
+		"oracle": map[string]any{
+			"config":  rec.Oracle.Config,
+			"id":      rec.Oracle.ID,
+			"version": rec.Oracle.Version,
+		},
+		"probe":  artifact(2),
+		"stderr": artifact(1),
+		"stdout": artifact(0),
+		"tree":   tree,
+	}); err != nil {
+		return 0, err
+	}
+	if rec.Result.Status != "pass" || !known || total < 1 {
+		// Recorded, then dropped: an unusable measurement is a fact about the
+		// trunk tree, and the gate it feeds fails on the absent metric.
+		return 0, nil
+	}
+	return total, nil
+}
+
 // LandingOracleArgv recovers the race's suite oracle command from the
 // SELECT decision's evidence: among receipts in sel.Evidence (loaded from
 // CAS) with Family == "suite" and World == sel.Subject[0], the one with
@@ -386,8 +552,6 @@ func (cfg Config) validate() error {
 		return errors.New("admit: config: empty intent digest")
 	case cfg.SelectDig == "":
 		return errors.New("admit: config: empty select decision digest")
-	case cfg.Oracle == nil:
-		return errors.New("admit: config: nil oracle")
 	case cfg.Signer == nil:
 		return errors.New("admit: config: nil signer")
 	case cfg.AdmitDir == "":

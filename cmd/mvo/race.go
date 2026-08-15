@@ -18,6 +18,7 @@ import (
 	"github.com/coagente/multiverso/internal/dockerx"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/workspace"
 )
@@ -67,10 +68,7 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	argv := strings.Fields(*oracleCmd)
-	if len(argv) == 0 {
-		return usagef("race: --oracle-cmd is required")
-	}
+	oracleArgv := strings.Fields(*oracleCmd)
 
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
@@ -154,6 +152,26 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("race: %w", err)
 	}
 
+	// The intent's PINNED policy decides whether --oracle-cmd is required,
+	// forbidden, or (never) optional — M1e decision 18. A v0 policy names a
+	// gate but not the command that decides it, so two machines could
+	// satisfy the same attested policy with different suites; that hole is
+	// closed by refusing the flag wherever the policy can name its own
+	// oracles, and by keeping it mandatory where it cannot.
+	pol, err := policy.Load(ws.CAS, intent.Policy)
+	if err != nil {
+		return fmt.Errorf("race: %w", err)
+	}
+	isLegacy := pol.Dialect == policy.DialectV0
+	switch {
+	case isLegacy && len(oracleArgv) == 0:
+		return usagef("race: --oracle-cmd is required with policy %s (%s): the policy names a gate but not the command that decides it (M1e decision 18)",
+			pol.Digest, policy.SchemaShort(pol.Schema))
+	case !isLegacy && set["oracle-cmd"]:
+		return usagef("race: --oracle-cmd is not permitted with policy %s (%s): the policy names its own oracles",
+			pol.Digest, policy.SchemaShort(pol.Schema))
+	}
+
 	var cands []race.Candidate
 	if isScript {
 		if cands, err = scriptCandidates(*patchesDir); err != nil {
@@ -215,22 +233,31 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("race: %w", err)
 	}
 
-	res, err := race.Run(context.Background(), race.Config{
-		Repo:       ws.Root,
-		Ledger:     ws.Ledger,
-		CAS:        ws.CAS,
-		Intent:     intentDig,
-		Adapter:    ad,
-		Candidates: cands,
-		WorldsDir:  ws.WorldsDir(),
-		Oracle: &oracle.CommandOracle{
-			Argv:    argv,
+	// Under v0 the supplied command IS the gate; its receipt keeps M0's
+	// config digest (empty Config), so ledgers written before M1e replay
+	// byte-for-byte. Under v1 the orchestrator builds the policy's own
+	// instances and this stays nil.
+	var legacy oracle.Oracle
+	if isLegacy {
+		legacy = &oracle.CommandOracle{
+			Argv:    oracleArgv,
 			Timeout: time.Duration(intent.Budget.MaxWallMS) * time.Millisecond,
 			CAS:     ws.CAS,
-		},
-		Backend:    be,
-		Parallel:   *parallel,
-		KeepWorlds: *keepWorlds,
+		}
+	}
+
+	res, err := race.Run(context.Background(), race.Config{
+		Repo:         ws.Root,
+		Ledger:       ws.Ledger,
+		CAS:          ws.CAS,
+		Intent:       intentDig,
+		Adapter:      ad,
+		Candidates:   cands,
+		WorldsDir:    ws.WorldsDir(),
+		Backend:      be,
+		Parallel:     *parallel,
+		KeepWorlds:   *keepWorlds,
+		LegacyOracle: legacy,
 	})
 	if err != nil {
 		return fmt.Errorf("race: %w", err)

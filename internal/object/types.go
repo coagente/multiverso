@@ -1,12 +1,24 @@
 package object
 
-// M0 object schemas (PRD §5 subset; see docs/design/M0.md).
+// M0 object schemas (PRD §5 subset; see docs/design/M0.md) plus the M1e
+// versioned policy artifact (CP-5; docs/design/M1e-policy-oracles.md).
 const (
 	SchemaIntent   = "multiverso.dev/intent/v0"
 	SchemaWorld    = "multiverso.dev/world/v0"
 	SchemaReceipt  = "multiverso.dev/receipt/v0"
 	SchemaDecision = "multiverso.dev/decision/v0"
 	SchemaPolicy   = "multiverso.dev/policy/v0"
+	SchemaPolicyV1 = "multiverso.dev/policy/v1"
+)
+
+// Freshness bases (Freshness.Basis, GateSpec.Basis). The vocabulary is
+// closed at three and ranked construction > dependency > probabilistic
+// (M1e decision 11): a gate names the weakest evidence it will accept.
+// M1's oracles emit only construction.
+const (
+	BasisConstruction  = "construction"
+	BasisDependency    = "dependency"
+	BasisProbabilistic = "probabilistic"
 )
 
 // World outcomes: the producing run's terminal state, normalized across
@@ -114,10 +126,14 @@ type World struct {
 	Producer      Producer `json:"producer"`
 	Context       string   `json:"context"` // CAS key of the prompt bytes (DP-3)
 	Patch         string   `json:"patch"`   // CAS key of the control-plane-captured diff (AG-4)
-	Trace         string   `json:"trace"`   // CAS key of the raw transcript (AG-3)
-	Cost          RunCost  `json:"cost"`    // production cost (AG-2)
-	Outcome       string   `json:"outcome"` // Outcome* — the full six-value taxonomy (AG-1)
-	CreatedAt     string   `json:"created_at"`
+	// PatchBytes is len(captured patch): the ranking input patch_size_asc
+	// must be evaluable by a pure function with no CAS access, and the
+	// control plane holds the bytes at capture time (M1e decision 22).
+	PatchBytes int64   `json:"patch_bytes"`
+	Trace      string  `json:"trace"`   // CAS key of the raw transcript (AG-3)
+	Cost       RunCost `json:"cost"`    // production cost (AG-2)
+	Outcome    string  `json:"outcome"` // Outcome* — the full six-value taxonomy (AG-1)
+	CreatedAt  string  `json:"created_at"`
 }
 
 // OracleRef identifies the oracle that produced a receipt.
@@ -139,10 +155,35 @@ type Execution struct {
 	IsolationCaps IsolationCaps `json:"isolation_caps"`
 }
 
-// Result is the oracle's verdict plus evidence artifacts.
+// Result is the oracle's verdict plus evidence artifacts and the metrics
+// parsed out of them (EP-2). Metrics are integers only (DP-1 forbids
+// floats) and their ABSENCE is meaningful: a metric whose structured source
+// was unavailable is missing, never a fabricated zero. Tools names the
+// structured sources that were available and used, mapped to their
+// versions. Both maps are always serialized and must be non-nil at
+// construction — a nil map canonicalizes to null, which no M1e-recorded
+// receipt may contain (use NewResult).
 type Result struct {
-	Status    string   `json:"status"`    // "pass" | "fail" | "error"
-	Artifacts []string `json:"artifacts"` // CAS digests (stdout, stderr)
+	Status    string            `json:"status"`    // "pass" | "fail" | "error"
+	Metrics   map[string]int64  `json:"metrics"`   // parsed metric name -> value
+	Tools     map[string]string `json:"tools"`     // structured source -> version
+	Artifacts []string          `json:"artifacts"` // CAS digests, fixed kind order
+}
+
+// NewResult builds a Result with non-nil metric and tool maps and the given
+// artifacts in caller order. Every producer of a receipt should build its
+// Result through here or set both maps explicitly: {} is "measured nothing",
+// null is a lie about the shape of the record.
+func NewResult(status string, artifacts ...string) Result {
+	if artifacts == nil {
+		artifacts = []string{}
+	}
+	return Result{
+		Status:    status,
+		Metrics:   map[string]int64{},
+		Tools:     map[string]string{},
+		Artifacts: artifacts,
+	}
 }
 
 // ValidFor pins the state a receipt's freshness applies to.
@@ -189,9 +230,77 @@ type Decision struct {
 	CreatedAt string   `json:"created_at"`
 }
 
-// Policy declares hard gates and ranking for the decision function.
+// Policy is the v0 policy shape (multiverso.dev/policy/v0), FROZEN. New
+// policies are PolicyV1; v0 objects are still loaded, compiled, and
+// replayed exactly as M0 decided them (M1e decision 2). Nothing may edit
+// this shape again: its digest is what old intents pinned and what old
+// attestations name.
 type Policy struct {
 	Schema    string   `json:"schema"`     // multiverso.dev/policy/v0
 	HardGates []string `json:"hard_gates"` // M0: ["suite-pass"]
 	Ranking   []string `json:"ranking"`    // M0: ["gate_pass","wall_ms_asc"]
+}
+
+// PolicyV1 is a versioned policy artifact (CP-5): ordered hard gates that
+// each name an oracle, a pass predicate, and the weakest freshness basis
+// they accept; a lexicographic ranking spec (NEVER a weighted sum); and a
+// closed set of escalation conditions. Every field is always serialized;
+// every list is order-significant.
+type PolicyV1 struct {
+	Schema     string         `json:"schema"`     // SchemaPolicyV1
+	Name       string         `json:"name"`       // authored name, e.g. "default"
+	Oracles    []OracleSpec   `json:"oracles"`    // declared instances, name-sorted
+	HardGates  []GateSpec     `json:"hard_gates"` // ORDERED: ladder and evaluation order
+	Ranking    []string       `json:"ranking"`    // ORDERED lexicographic keys
+	Escalation EscalationSpec `json:"escalation"`
+}
+
+// OracleSpec declares one oracle instance. Kind selects the registry
+// implementation; the remaining fields are its resolved configuration.
+type OracleSpec struct {
+	Name string   `json:"name"` // policy-local, ^[a-z0-9][a-z0-9._-]{0,31}$
+	Kind string   `json:"kind"` // "command" | "pytest-collect" | "pytest-suite"
+	Argv []string `json:"argv"` // command: the full argv (required)
+	// pytest-*: runner prefix, default python3 -m pytest
+	Args      []string `json:"args"`       // pytest-*: extra args after the fixed flags
+	TimeoutMS int64    `json:"timeout_ms"` // 0 = the intent's max_wall_ms
+	Coverage  bool     `json:"coverage"`   // pytest-suite: measure coverage when coverage.py is present
+	Reruns    int      `json:"reruns"`     // pytest-suite: --reruns N when BOTH plugins are present
+}
+
+// GateSpec is one ordered hard gate: a predicate over one oracle's counted
+// receipt, plus the weakest freshness basis that receipt may carry.
+type GateSpec struct {
+	Gate      string `json:"gate"`      // closed vocabulary (internal/policy)
+	Oracle    string `json:"oracle"`    // a name declared in Oracles
+	Basis     string `json:"basis"`     // Basis* — the weakest acceptable evidence
+	Threshold int64  `json:"threshold"` // per-gate meaning; 0 when the gate takes no parameter
+}
+
+// EscalationSpec is the CLOSED, purely declarative escalation rule set
+// (M1e decision 6: no expression language, no eval). Zero values mean
+// "rule off".
+type EscalationSpec struct {
+	MinCandidatesPassing       int      `json:"min_candidates_passing"` // 0 = off
+	OnRankingTie               bool     `json:"on_ranking_tie"`         // max_risk/ambiguity
+	RequireEvidence            []string `json:"require_evidence"`       // oracle names, sorted
+	OnAllWorldsFailedMachinery bool     `json:"on_all_worlds_failed_machinery"`
+}
+
+// RecordedWorld and RecordedReceipt are the identity-carrying forms of a
+// recorded object: the decoded value paired with the digest under which it
+// was RECORDED, never a re-serialization of the decoded struct (M1e
+// decision 1). Passing these to the decision functions is what lets M1e add
+// fields to World and Receipt while still replaying pre-M1e ledgers
+// byte-for-byte: nothing about an old decision is re-derived from a newer
+// Go struct.
+type RecordedWorld struct {
+	Digest string
+	World  World
+}
+
+// RecordedReceipt pairs a receipt with the digest it was recorded under.
+type RecordedReceipt struct {
+	Digest  string
+	Receipt Receipt
 }

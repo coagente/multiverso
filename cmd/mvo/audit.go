@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sort"
 
 	"github.com/coagente/multiverso/internal/admit"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/workspace"
 )
@@ -72,7 +74,10 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 	report.Decisions = len(st.Decisions)
 
 	for _, dr := range st.Decisions {
-		pol, err := race.LoadPolicy(ws.CAS, dr.Decision.Policy)
+		// Historical policies replay from CAS, whatever schema version they
+		// were written in: CAS is never pruned, so an intent pinned in the
+		// past always resolves (M1e decision 2).
+		pol, err := policy.Load(ws.CAS, dr.Decision.Policy)
 		if err != nil {
 			return fail(fmt.Errorf("decision %s: %w", dr.Dig, err))
 		}
@@ -96,14 +101,17 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 		} else {
 			worldRecs := st.worldsFor(dr.Decision.Intent, raceStart, dr.Seq)
 			worldDigs := make(map[string]bool, len(worldRecs))
-			worlds := make([]object.World, 0, len(worldRecs))
+			worlds := make([]object.RecordedWorld, 0, len(worldRecs))
 			for _, wr := range worldRecs {
 				worldDigs[wr.Dig] = true
-				worlds = append(worlds, wr.World)
+				// The ledger's own digest, never a re-serialization of the
+				// decoded struct (M1e decision 1) — which is why a ledger
+				// written before M1e still replays byte-for-byte here.
+				worlds = append(worlds, object.RecordedWorld{Digest: wr.Dig, World: wr.World})
 			}
-			receipts := make([]object.Receipt, 0)
+			receipts := make([]object.RecordedReceipt, 0)
 			for _, rr := range st.receiptsFor(worldDigs, raceStart, dr.Seq) {
-				receipts = append(receipts, rr.Receipt)
+				receipts = append(receipts, object.RecordedReceipt{Digest: rr.Dig, Receipt: rr.Receipt})
 			}
 			got = race.Decide(pol, worlds, receipts)
 		}
@@ -137,9 +145,9 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 // and CAS alone — no git, no clock (NFR-1). Window receipts are the
 // receipt.recorded events between the admission.started and the decision
 // whose World is the SELECT winner: the smallest-digest landing-apply
-// receipt and the smallest-digest suite receipt (nil if none). A non-empty
-// detail is a mismatch entry, not an error.
-func replayAdmission(st *ledgerState, pol object.Policy, dr decisionRec, admStart *admissionStartRec) (object.Decision, string) {
+// receipt, plus the smallest-digest receipt matching each of the policy's
+// gate selectors. A non-empty detail is a mismatch entry, not an error.
+func replayAdmission(st *ledgerState, pol policy.Policy, dr decisionRec, admStart *admissionStartRec) (object.Decision, string) {
 	var sel *object.Decision
 	for i := range st.Decisions {
 		d := &st.Decisions[i]
@@ -153,25 +161,38 @@ func replayAdmission(st *ledgerState, pol object.Policy, dr decisionRec, admStar
 	}
 	winner := sel.Subject[0]
 
-	var apply, gate *object.Receipt
-	var applyDig, gateDig string
+	var apply *object.RecordedReceipt
+	gates := make(map[policy.Selector]object.RecordedReceipt, len(pol.Gates))
 	for i := range st.Receipts {
 		rr := &st.Receipts[i]
 		if rr.Seq <= admStart.Seq || rr.Seq >= dr.Seq || rr.Receipt.World != winner {
 			continue
 		}
-		if rr.Receipt.Oracle.ID == admit.OracleIDLandingApply && (apply == nil || rr.Dig < applyDig) {
-			apply, applyDig = &rr.Receipt, rr.Dig
+		rec := object.RecordedReceipt{Digest: rr.Dig, Receipt: rr.Receipt}
+		if rr.Receipt.Oracle.ID == admit.OracleIDLandingApply && (apply == nil || rr.Dig < apply.Digest) {
+			r := rec
+			apply = &r
+			continue
 		}
-		if rr.Receipt.Family == "suite" && (gate == nil || rr.Dig < gateDig) {
-			gate, gateDig = &rr.Receipt, rr.Dig
+		for _, g := range pol.Gates {
+			if !g.Sel.Match(rr.Receipt) {
+				continue
+			}
+			if prev, ok := gates[g.Sel]; !ok || rr.Dig < prev.Digest {
+				gates[g.Sel] = rec
+			}
 		}
 	}
 	if apply == nil {
 		return object.Decision{}, fmt.Sprintf(
 			"no landing-apply receipt for winner %s between seq %d and %d", winner, admStart.Seq, dr.Seq)
 	}
-	return admit.Decide(pol, dr.Decision.Intent, winner, *apply, gate), ""
+	gateRecs := make([]object.RecordedReceipt, 0, len(gates))
+	for _, g := range gates {
+		gateRecs = append(gateRecs, g)
+	}
+	sort.Slice(gateRecs, func(i, j int) bool { return gateRecs[i].Digest < gateRecs[j].Digest })
+	return admit.Decide(pol, dr.Decision.Intent, winner, *apply, gateRecs), ""
 }
 
 // diffDecision compares the replay-deterministic fields (NFR-1); CreatedAt

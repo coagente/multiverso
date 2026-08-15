@@ -18,6 +18,7 @@ import (
 	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 // raceOutcome is the schedule-independent summary two runs must agree on:
@@ -55,8 +56,8 @@ func verifyLedgerReplay(t *testing.T, cfg Config) {
 	if err := cfg.Ledger.VerifyChain(); err != nil {
 		t.Fatalf("VerifyChain: %v", err)
 	}
-	var worlds []object.World
-	var receipts []object.Receipt
+	var worlds []object.RecordedWorld
+	var receipts []object.RecordedReceipt
 	var recorded object.Decision
 	if err := cfg.Ledger.Scan(func(e ledger.Event) error {
 		switch e.Type {
@@ -65,13 +66,13 @@ func verifyLedgerReplay(t *testing.T, cfg Config) {
 			if err := json.Unmarshal(e.Payload, &w); err != nil {
 				return err
 			}
-			worlds = append(worlds, w)
+			worlds = append(worlds, object.RecordedWorld{Digest: e.PayloadDig, World: w})
 		case "receipt.recorded":
 			var r object.Receipt
 			if err := json.Unmarshal(e.Payload, &r); err != nil {
 				return err
 			}
-			receipts = append(receipts, r)
+			receipts = append(receipts, object.RecordedReceipt{Digest: e.PayloadDig, Receipt: r})
 		case "decision.recorded":
 			if err := json.Unmarshal(e.Payload, &recorded); err != nil {
 				return err
@@ -81,11 +82,11 @@ func verifyLedgerReplay(t *testing.T, cfg Config) {
 	}); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	policy, err := LoadPolicy(cfg.CAS, recorded.Policy)
+	pol, err := policy.Load(cfg.CAS, recorded.Policy)
 	if err != nil {
 		t.Fatalf("load policy: %v", err)
 	}
-	replayed := Decide(policy, worlds, receipts)
+	replayed := Decide(pol, worlds, receipts)
 	if replayed.Type != recorded.Type ||
 		!reflect.DeepEqual(replayed.Subject, recorded.Subject) ||
 		!reflect.DeepEqual(replayed.Evidence, recorded.Evidence) ||
@@ -279,7 +280,7 @@ func TestRunParallelMatchesSerialFakeClaude(t *testing.T) {
 			{Prompt: "candidate 2 of 3", Env: []string{"FAKE_AGENT_MODE"}},
 			{Prompt: "candidate 3 of 3", Env: []string{"FAKE_AGENT_MODE"}},
 		}
-		cfg.Oracle = ordinalOracle{}
+		cfg.LegacyOracle = ordinalOracle{}
 		cfg.Parallel = parallel
 		return cfg
 	}
@@ -383,11 +384,13 @@ func TestRunParallelConfigError(t *testing.T) {
 // audit replay from ledger-scan (completion) order reproduces parallel
 // races with zero audit changes.
 func TestDecidePermutationInvariance(t *testing.T) {
-	policy := testPolicy()
-	var worlds []object.World
-	var receipts []object.Receipt
+	pol := testPolicy(t)
+	var worlds []object.RecordedWorld
+	var receipts []object.RecordedReceipt
 	// Five worlds: three pass at different wall times, one fails, one
-	// CONFIG_ERROR without a receipt.
+	// CONFIG_ERROR without a receipt. The v0 dialect keeps the M1c property
+	// exactly as M1c stated it; decide_test.go extends it to v1 policies
+	// with metric-bearing receipts.
 	for i, spec := range []struct {
 		outcome string
 		status  string
@@ -399,15 +402,14 @@ func TestDecidePermutationInvariance(t *testing.T) {
 		{OutcomeCompleted, "fail", 5},
 		{OutcomeConfigError, "", 0},
 	} {
-		w, dig := mkWorld(t, "patch-"+strings.Repeat("x", i+1), spec.outcome)
+		w := mkWorld(t, "patch-"+strings.Repeat("x", i+1), spec.outcome)
 		worlds = append(worlds, w)
 		if spec.status != "" {
-			r, _ := mkReceipt(t, dig, spec.status, spec.wall)
-			receipts = append(receipts, r)
+			receipts = append(receipts, mkSuiteV0(t, w, spec.status, spec.wall))
 		}
 	}
 
-	base := Decide(policy, worlds, receipts)
+	base := Decide(pol, worlds, receipts)
 	baseCanon, err := object.Canonical(base)
 	if err != nil {
 		t.Fatal(err)
@@ -415,11 +417,11 @@ func TestDecidePermutationInvariance(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(42))
 	for trial := 0; trial < 25; trial++ {
-		ws := append([]object.World(nil), worlds...)
-		rs := append([]object.Receipt(nil), receipts...)
+		ws := append([]object.RecordedWorld(nil), worlds...)
+		rs := append([]object.RecordedReceipt(nil), receipts...)
 		rng.Shuffle(len(ws), func(i, j int) { ws[i], ws[j] = ws[j], ws[i] })
 		rng.Shuffle(len(rs), func(i, j int) { rs[i], rs[j] = rs[j], rs[i] })
-		got := Decide(policy, ws, rs)
+		got := Decide(pol, ws, rs)
 		canon, err := object.Canonical(got)
 		if err != nil {
 			t.Fatal(err)

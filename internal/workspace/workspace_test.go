@@ -11,6 +11,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/signing"
 )
 
@@ -55,12 +56,23 @@ func TestInitLayout(t *testing.T) {
 	if string(got) != string(polCanon) {
 		t.Errorf("policy in CAS = %q, want canonical %q", got, polCanon)
 	}
-	var pol object.Policy
+	// Since M1e the default is the v1 artifact that names its own oracles
+	// (M1e decision 19) — the shape whose digest determines what its gates
+	// mean.
+	var pol object.PolicyV1
 	if err := json.Unmarshal(got, &pol); err != nil {
 		t.Fatalf("decode policy: %v", err)
 	}
+	if pol.Schema != object.SchemaPolicyV1 {
+		t.Errorf("default policy schema = %q, want %q", pol.Schema, object.SchemaPolicyV1)
+	}
 	if !reflect.DeepEqual(pol, DefaultPolicy()) {
 		t.Errorf("policy = %+v, want %+v", pol, DefaultPolicy())
+	}
+	// And it compiles: `mvo init` never writes a policy the decision
+	// functions could not evaluate.
+	if _, err := policy.Decode(got); err != nil {
+		t.Errorf("default policy does not compile: %v", err)
 	}
 
 	// policies/default.json holds the same canonical bytes.
@@ -252,5 +264,54 @@ func TestGetObjectBadDigest(t *testing.T) {
 	ws := mustInit(t, t.TempDir())
 	if _, err := ws.GetObject("sha256:deadbeef"); err == nil {
 		t.Fatal("GetObject with non-mv0 digest: want error, got nil")
+	}
+}
+
+// The authoring surface: policies live in one directory named after their
+// stem, and switching the default rewrites config.json canonically without
+// touching a single content-addressed byte (M1e, CP-5).
+func TestPoliciesDirAndSetDefaultPolicy(t *testing.T) {
+	root := t.TempDir()
+	ws := mustInit(t, root)
+
+	if got, want := ws.PoliciesDir(), filepath.Join(root, DirName, "policies"); got != want {
+		t.Errorf("PoliciesDir = %q, want %q", got, want)
+	}
+	if got, want := ws.PolicyFile("mine"), filepath.Join(root, DirName, "policies", "mine.json"); got != want {
+		t.Errorf("PolicyFile = %q, want %q", got, want)
+	}
+
+	before := ws.Config.DefaultPolicy
+	next := "mv0:" + strings.Repeat("7", 64)
+	if err := ws.SetDefaultPolicy(next); err != nil {
+		t.Fatalf("SetDefaultPolicy: %v", err)
+	}
+	if ws.Config.DefaultPolicy != next {
+		t.Errorf("in-memory default = %q, want %q", ws.Config.DefaultPolicy, next)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer reopened.Close()
+	if reopened.Config.DefaultPolicy != next {
+		t.Errorf("persisted default = %q, want %q", reopened.Config.DefaultPolicy, next)
+	}
+	// The previously recorded policy is untouched and still resolvable:
+	// intents pinned to it keep replaying against it forever.
+	if _, err := reopened.GetObject(before); err != nil {
+		t.Errorf("previous default no longer in CAS: %v", err)
+	}
+	// config.json stays canonical.
+	b, err := os.ReadFile(filepath.Join(root, DirName, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := object.Canonical(reopened.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != string(canon) {
+		t.Errorf("config.json = %s, want canonical %s", b, canon)
 	}
 }

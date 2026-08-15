@@ -1,18 +1,24 @@
-// Package oracle defines the Oracle interface and CommandOracle (EP-1,
-// EP-7): a verifier that runs a command inside a world and emits a Receipt
-// with its stdout/stderr stored in CAS as artifacts. Since M1c the run
-// surface is the world handle (PRD EP-1 is literally "run(world) →
-// Receipt"): a string dir can no longer say where execution must happen.
+// Package oracle implements the verification plane (EP-1, EP-7): the
+// Oracle interface, the closed registry of kinds a policy may declare, and
+// their implementations — the generic CommandOracle plus the v0 Python
+// ladder, O0 `pytest --collect-only` (collected-test counts, the exit-5
+// guard) and O1 the suite gate (JUnit XML always; reportlog and coverage
+// when the plugins are there). Since M1c the run surface is the world
+// handle (PRD EP-1 is literally "run(world) → Receipt"): a string dir can
+// no longer say where execution must happen.
+//
+// Two rules run through every kind. EP-7: each native artifact is read
+// under a size cap and stored content-addressed BEFORE anything parses it,
+// so the parsers never sit between the tool and the record. And evidence
+// honesty: a metric whose structured source was unavailable is ABSENT from
+// the receipt — never zero, never assumed — while result.tools names the
+// sources that were actually available and used.
 package oracle
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"syscall"
 	"time"
 
 	"github.com/coagente/multiverso/internal/backend"
@@ -28,18 +34,16 @@ const (
 )
 
 const (
-	recheckTier   = "V1-replayable"
-	family        = "suite"
-	freshnessBase = "construction"
+	recheckTier = "V1-replayable"
 	// waitDelay bounds Wait after the group kill, in case a process
 	// escaped the group and still holds the output pipes open.
 	waitDelay = 5 * time.Second
 )
 
-// Oracle produces evidence receipts for a world.
+// Oracle produces evidence receipts for a world (EP-1).
 type Oracle interface {
-	ID() string      // "command"
-	Version() string // "v0"
+	ID() string      // the registry KIND: command | pytest-collect | pytest-suite
+	Version() string // OUR contract version ("v0"); the TOOL's is in result.tools
 	Run(ctx context.Context, w backend.World) (object.Receipt, error)
 }
 
@@ -59,13 +63,20 @@ type CommandOracle struct {
 	Argv    []string
 	Timeout time.Duration
 	CAS     *cas.Store
+	// Config is the resolved-config digest a compiled policy assigns this
+	// instance (M1e decision 8). Empty means the M0 path — `mvo race
+	// --oracle-cmd` under a v0 policy, where no policy names the oracle —
+	// and Run then derives the digest from argv+timeout exactly as M0 did,
+	// so v0 receipts keep digesting to the same bytes and old ledgers keep
+	// replaying.
+	Config string
 }
 
 // ID implements Oracle.
-func (o *CommandOracle) ID() string { return "command" }
+func (o *CommandOracle) ID() string { return KindCommand }
 
 // Version implements Oracle.
-func (o *CommandOracle) Version() string { return "v0" }
+func (o *CommandOracle) Version() string { return oracleVersion }
 
 // Run executes the command in the world and returns the receipt. A failing
 // or timing-out command is evidence, not an error: the receipt records it
@@ -81,12 +92,16 @@ func (o *CommandOracle) Run(ctx context.Context, w backend.World) (object.Receip
 	if w == nil {
 		return object.Receipt{}, errors.New("oracle: command oracle: nil world")
 	}
-	cfgDig, _, err := object.Digest(map[string]any{
-		"argv":       o.Argv,
-		"timeout_ms": o.Timeout.Milliseconds(),
-	})
-	if err != nil {
-		return object.Receipt{}, fmt.Errorf("oracle: digest config: %w", err)
+	cfgDig := o.Config
+	if cfgDig == "" {
+		dig, _, err := object.Digest(map[string]any{
+			"argv":       o.Argv,
+			"timeout_ms": o.Timeout.Milliseconds(),
+		})
+		if err != nil {
+			return object.Receipt{}, fmt.Errorf("oracle: digest config: %w", err)
+		}
+		cfgDig = dig
 	}
 
 	runCtx := ctx
@@ -96,53 +111,13 @@ func (o *CommandOracle) Run(ctx context.Context, w backend.World) (object.Receip
 	}
 	defer cancel()
 
-	hostArgv, hostEnv := w.Command(o.Argv, nil)
-	cmd := exec.CommandContext(runCtx, hostArgv[0], hostArgv[1:]...)
-	cmd.Dir = w.Dir()
-	cmd.Env = hostEnv // nil ⇒ inherit the ambient environment (exactly M0 for T0)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// EP-7 + M1c decision 5: on timeout, kill the world first (T1: docker
-	// kill tears down the pid namespace — signaling the docker exec client
-	// kills nothing inside the container), then the whole host process
-	// group so no orphaned test runners survive.
-	cmd.Cancel = func() error {
-		_ = w.Kill()
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = waitDelay
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	res := runInWorld(runCtx, w, o.Argv, nil)
 
-	start := time.Now()
-	runErr := cmd.Run()
-	wallMS := time.Since(start).Milliseconds()
-
-	status, exitCode := StatusPass, 0
-	switch {
-	case runErr == nil:
-	case runCtx.Err() != nil:
-		// Timeout (or caller cancellation): the verdict is inconclusive.
-		status, exitCode = StatusError, -1
-	default:
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			status, exitCode = StatusFail, exitErr.ExitCode()
-		} else {
-			// Spawn error: the command never ran.
-			status, exitCode = StatusError, -1
-		}
-	}
-
-	stdoutKey, err := o.CAS.Put(stdout.Bytes())
+	stdoutKey, err := o.CAS.Put(res.Stdout)
 	if err != nil {
 		return object.Receipt{}, fmt.Errorf("oracle: store stdout: %w", err)
 	}
-	stderrKey, err := o.CAS.Put(stderr.Bytes())
+	stderrKey, err := o.CAS.Put(res.Stderr)
 	if err != nil {
 		return object.Receipt{}, fmt.Errorf("oracle: store stderr: %w", err)
 	}
@@ -152,16 +127,20 @@ func (o *CommandOracle) Run(ctx context.Context, w backend.World) (object.Receip
 		Oracle: object.OracleRef{ID: o.ID(), Version: o.Version(), Config: cfgDig},
 		Execution: object.Execution{
 			Argv:          append([]string(nil), o.Argv...),
-			ExitCode:      exitCode,
-			DurationMS:    wallMS,
+			ExitCode:      res.ExitCode,
+			DurationMS:    res.WallMS,
 			IsolationTier: w.Tier(),
 			IsolationCaps: w.Caps(),
 		},
-		Result:      object.Result{Status: status, Artifacts: []string{stdoutKey, stderrKey}},
-		Freshness:   object.Freshness{Basis: freshnessBase},
+		// A command oracle parses nothing, so it emits NO metrics and
+		// names NO structured sources — {} and {}, never null: the empty
+		// map is "measured nothing", null is a lie about the shape of the
+		// record (EP-2).
+		Result:      object.NewResult(res.Status, stdoutKey, stderrKey),
+		Freshness:   object.Freshness{Basis: object.BasisConstruction},
 		RecheckTier: recheckTier,
-		Family:      family,
-		Cost:        object.Cost{WallMS: wallMS},
+		Family:      FamilySuite,
+		Cost:        object.Cost{WallMS: res.WallMS},
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }

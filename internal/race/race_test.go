@@ -20,6 +20,7 @@ import (
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 func git(t *testing.T, dir string, args ...string) {
@@ -102,7 +103,10 @@ func seedIntent(t *testing.T, store *cas.Store, repo string, maxCandidates int) 
 	if err != nil {
 		t.Fatalf("Head: %v", err)
 	}
-	polDig, polCanon, err := object.Digest(testPolicy())
+	polDig, polCanon, err := object.Digest(object.Policy{
+		Schema: object.SchemaPolicy, HardGates: []string{GateSuitePass},
+		Ranking: []string{"gate_pass", "wall_ms_asc"},
+	})
 	if err != nil {
 		t.Fatalf("digest policy: %v", err)
 	}
@@ -164,16 +168,16 @@ func newConfig(t *testing.T, patches map[string]string) Config {
 	}
 	t.Cleanup(func() { led.Close() })
 	return Config{
-		Repo:       repo,
-		Ledger:     led,
-		CAS:        store,
-		Intent:     seedIntent(t, store, repo, max(len(patches), 1)),
-		Adapter:    mustAdapter(t, "script"),
-		Candidates: scriptCands(patches),
-		WorldsDir:  filepath.Join(t.TempDir(), "worlds"),
-		Oracle:     stubOracle{},
-		Backend:    mustBackend(t),
-		Parallel:   1,
+		Repo:         repo,
+		Ledger:       led,
+		CAS:          store,
+		Intent:       seedIntent(t, store, repo, max(len(patches), 1)),
+		Adapter:      mustAdapter(t, "script"),
+		Candidates:   scriptCands(patches),
+		WorldsDir:    filepath.Join(t.TempDir(), "worlds"),
+		LegacyOracle: stubOracle{},
+		Backend:      mustBackend(t),
+		Parallel:     1,
 	}
 }
 
@@ -341,10 +345,11 @@ func TestRunDecisionReplaysFromLedger(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	var worlds []object.World
-	var receipts []object.Receipt
+	// Replay inputs carry the digests the LEDGER recorded them under, never
+	// a re-serialization of the decoded structs (M1e decision 1).
+	var worlds []object.RecordedWorld
+	var receipts []object.RecordedReceipt
 	var recorded object.Decision
-	var policy object.Policy
 	if err := cfg.Ledger.Scan(func(e ledger.Event) error {
 		switch e.Type {
 		case "world.created":
@@ -352,13 +357,13 @@ func TestRunDecisionReplaysFromLedger(t *testing.T) {
 			if err := json.Unmarshal(e.Payload, &w); err != nil {
 				return err
 			}
-			worlds = append(worlds, w)
+			worlds = append(worlds, object.RecordedWorld{Digest: e.PayloadDig, World: w})
 		case "receipt.recorded":
 			var r object.Receipt
 			if err := json.Unmarshal(e.Payload, &r); err != nil {
 				return err
 			}
-			receipts = append(receipts, r)
+			receipts = append(receipts, object.RecordedReceipt{Digest: e.PayloadDig, Receipt: r})
 		case "decision.recorded":
 			if err := json.Unmarshal(e.Payload, &recorded); err != nil {
 				return err
@@ -368,11 +373,12 @@ func TestRunDecisionReplaysFromLedger(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if err := loadObject(cfg.CAS, recorded.Policy, &policy); err != nil {
+	pol, err := policy.Load(cfg.CAS, recorded.Policy)
+	if err != nil {
 		t.Fatalf("load policy: %v", err)
 	}
 
-	replayed := Decide(policy, worlds, receipts)
+	replayed := Decide(pol, worlds, receipts)
 	if replayed.Type != recorded.Type ||
 		!reflect.DeepEqual(replayed.Subject, recorded.Subject) ||
 		!reflect.DeepEqual(replayed.Evidence, recorded.Evidence) ||

@@ -114,8 +114,8 @@ func TestBuildClosureReplayComplete(t *testing.T) {
 	// Decode worlds and receipts back out of the published items alone and
 	// re-run the decision function: PRD principle 3 — any third party
 	// re-derives why W won.
-	var worlds []object.World
-	var receipts []object.Receipt
+	var worlds []object.RecordedWorld
+	var receipts []object.RecordedReceipt
 	inEvidence := map[string]bool{}
 	for _, dig := range cl.Select.Evidence {
 		inEvidence[dig] = true
@@ -127,7 +127,7 @@ func TestBuildClosureReplayComplete(t *testing.T) {
 			if err := json.Unmarshal(it.Bytes, &w); err != nil {
 				t.Fatal(err)
 			}
-			worlds = append(worlds, w)
+			worlds = append(worlds, object.RecordedWorld{Digest: object.DigestBytes(it.Bytes), World: w})
 		case strings.HasPrefix(it.Path, "receipts/"):
 			payload, err := OpenItem(it.Bytes, PayloadTypeReceipt, f.signer.Public)
 			if err != nil {
@@ -140,10 +140,10 @@ func TestBuildClosureReplayComplete(t *testing.T) {
 			if err := json.Unmarshal(payload, &r); err != nil {
 				t.Fatal(err)
 			}
-			receipts = append(receipts, r)
+			receipts = append(receipts, object.RecordedReceipt{Digest: object.DigestBytes(payload), Receipt: r})
 		}
 	}
-	got := race.Decide(f.policy, worlds, receipts)
+	got := race.Decide(f.policyCmp, worlds, receipts)
 	if detail := diffDecision(cl.Select, got); detail != "" {
 		t.Errorf("closure is not replay-complete: %s", detail)
 	}

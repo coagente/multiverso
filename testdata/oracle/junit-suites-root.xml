@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest-shard-0" errors="0" failures="1" skipped="0" tests="5" time="0.25" timestamp="2026-08-12T09:20:00.000000+00:00" hostname="worker-a">
+    <testcase classname="test_stats" name="test_mean_single" time="0.05"/>
+    <testcase classname="test_stats" name="test_mean_pair" time="0.05"><failure message="assert 3.0 == 1.5">E       assert 3.0 == 1.5</failure></testcase>
+    <testcase classname="test_stats" name="test_mean_empty_raises" time="0.05"/>
+    <testcase classname="test_stats" name="test_clamp_inside" time="0.05"/>
+    <testcase classname="test_stats" name="test_clamp_below" time="0.05"/>
+  </testsuite>
+  <testsuite name="pytest-shard-1" errors="1" failures="0" skipped="1" tests="3" time="0.75" timestamp="2026-08-12T09:20:00.000000+00:00" hostname="worker-b">
+    <testcase classname="test_stats" name="test_clamp_above" time="0.25"/>
+    <testcase classname="test_stats" name="test_clamp_bad_range_raises" time="0.25"><error message="fixture 'db' not found">E       fixture 'db' not found</error></testcase>
+    <testcase classname="test_stats" name="test_total" time="0.25"><skipped type="pytest.skip" message="needs numpy">skipped</skipped></testcase>
+  </testsuite>
+</testsuites>

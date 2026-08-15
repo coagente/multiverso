@@ -18,6 +18,7 @@ import (
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 // Candidate is one world's generation spec (AG-5): the literal prompt, a
@@ -29,7 +30,8 @@ type Candidate struct {
 	Env    []string     // extra parent env var NAMES passed through (names only, decision 14)
 }
 
-// Config wires one race run. All fields are required except KeepWorlds.
+// Config wires one race run. All fields are required except KeepWorlds,
+// LegacyOracle and OracleTimeout.
 type Config struct {
 	Repo       string          // git repo root; worlds are worktrees of it
 	Ledger     *ledger.Ledger  // event log
@@ -38,21 +40,33 @@ type Config struct {
 	Adapter    agent.Adapter   // generator for every world (AG-1)
 	Candidates []Candidate     // one world per candidate, len ≥ 1 (CP-2)
 	WorldsDir  string          // parent directory for world worktrees
-	Oracle     oracle.Oracle   // verifier run in each COMPLETED world
 	Backend    backend.Backend // isolation provider (XP-1), required
 	Parallel   int             // bounded workers, required ≥ 1; 1 = the M1b schedule
 	KeepWorlds bool            // keep worktrees after the race (--keep-worlds; never containers)
+	// LegacyOracle is the v0-dialect verifier: a v0 policy names a gate
+	// (suite-pass) but NOT the command that decides it, so under that shape
+	// the race must be handed one — `mvo race --oracle-cmd`, exactly as in
+	// M0–M1d. Under a v1 policy it must be nil: the policy names its own
+	// oracles and the orchestrator builds them (M1e decision 18).
+	LegacyOracle oracle.Oracle
+	// OracleTimeout is the fallback wall bound for policy-declared oracles
+	// that name none of their own; zero means the intent's max_wall_ms.
+	OracleTimeout time.Duration
 }
 
 // WorldRun is one world's trajectory through the race.
 type WorldRun struct {
-	Ordinal       int // 1-based candidate ordinal
-	Dir           string
-	Digest        string
-	World         object.World
-	Run           *agent.RunResult
-	ReceiptDigest string          // "" for worlds that produced no receipt
-	Receipt       *object.Receipt // nil for worlds that produced no receipt
+	Ordinal int // 1-based candidate ordinal
+	Dir     string
+	Digest  string
+	World   object.World
+	Run     *agent.RunResult
+	// Receipts holds every receipt the ladder recorded for this world, in
+	// the order its oracles ran (M1e decision 12): a world that failed the
+	// first hard gate has exactly one.
+	Receipts      []object.RecordedReceipt
+	ReceiptDigest string          // Receipts[0].Digest; "" when the ladder recorded none
+	Receipt       *object.Receipt // &Receipts[0].Receipt; nil when none
 }
 
 // Result is what a race produced.
@@ -68,6 +82,8 @@ type Result struct {
 type raceRun struct {
 	cfg     Config
 	intent  object.Intent
+	pol     policy.Policy
+	oracles []ladderRung // the required oracles, in ladder order
 	adapter string
 	raceDir string
 
@@ -84,14 +100,19 @@ type raceRun struct {
 // slot is candidate k's pre-sized result cell (index = ordinal-1): no
 // ordering ambiguity to repair afterward (decision 15).
 type slot struct {
-	dir        string
-	added      bool          // worktree exists (cleanup owes a removal)
-	wh         backend.World // non-nil once the backend opened the world
-	dig        string
-	world      object.World
-	run        *agent.RunResult
-	receipt    *object.Receipt
-	receiptDig string
+	dir      string
+	added    bool          // worktree exists (cleanup owes a removal)
+	wh       backend.World // non-nil once the backend opened the world
+	dig      string
+	world    object.World
+	run      *agent.RunResult
+	receipts []object.RecordedReceipt // ladder order
+}
+
+// ladderRung is one required oracle instance, named by the policy.
+type ladderRung struct {
+	name   string
+	oracle oracle.Oracle
 }
 
 // fail records the first control-plane failure and cancels the race ctx:
@@ -183,9 +204,24 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if intent.Schema != object.SchemaIntent {
 		return nil, fmt.Errorf("race: %s has schema %q, want %q", cfg.Intent, intent.Schema, object.SchemaIntent)
 	}
-	policy, err := LoadPolicy(cfg.CAS, intent.Policy)
+	// The pinned policy is loaded through internal/policy, which accepts
+	// both schema versions and compiles them to one in-memory form: the
+	// orchestrator never branches on a policy's wire shape.
+	pol, err := policy.Load(cfg.CAS, intent.Policy)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("race: %w", err)
+	}
+	// Decision 18, enforced where the policy is known rather than where the
+	// flag was typed: a v0 policy cannot name the command its gate means, so
+	// one must be supplied; a v1 policy names its own and refuses an
+	// override, which is the CP-5 hole this milestone closes.
+	if pol.Dialect == policy.DialectV0 && cfg.LegacyOracle == nil {
+		return nil, fmt.Errorf("race: policy %s is %s: it names a gate but not the command that decides it, so an oracle must be supplied (--oracle-cmd)",
+			pol.Digest, policy.SchemaShort(pol.Schema))
+	}
+	if pol.Dialect != policy.DialectV0 && cfg.LegacyOracle != nil {
+		return nil, fmt.Errorf("race: an oracle override is not permitted with policy %s (%s): the policy names its own oracles",
+			pol.Digest, policy.SchemaShort(pol.Schema))
 	}
 	// CP-2: the candidate count is hard-capped before race.started — an
 	// over-budget race is refused, never recorded (closes the M0 TODO).
@@ -208,9 +244,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	r := &raceRun{
 		cfg:     cfg,
 		intent:  intent,
+		pol:     pol,
 		adapter: cfg.Adapter.ID() + "@" + cfg.Adapter.Version(),
 		slots:   make([]slot, len(cfg.Candidates)),
 		cancel:  cancelRace,
+	}
+	// A policy oracle that names no timeout of its own inherits the intent's
+	// wall budget: the race's own bound, never an unbounded verifier.
+	oracleTimeout := cfg.OracleTimeout
+	if oracleTimeout <= 0 {
+		oracleTimeout = time.Duration(intent.Budget.MaxWallMS) * time.Millisecond
 	}
 
 	// Each race gets its own fresh directory under WorldsDir (unique via
@@ -226,10 +269,32 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("race: create race worlds dir: %w", err)
 	}
 
-	// race.started gains three always-present observational keys (M1c):
-	// exec_tier, exec_image_digest ("" for T0), parallel. Audit reads only
-	// "intent" — unaffected. Container IDs appear nowhere in the ledger:
-	// containers are transport, the image digest is the evidence.
+	// The base world serves the pre-flight probe (which must precede
+	// race.started) and the baseline measurement (which must follow it), so
+	// both are paid for once. It is torn down before phase A: no candidate
+	// competes with it for a worker or a container.
+	var base *baseWorld
+	if needsBaseWorld(pol) {
+		base, err = r.openBaseWorld(raceCtx)
+		if err != nil {
+			os.Remove(r.raceDir)
+			return nil, err
+		}
+		// Decision 15: a repo without pytest fails at pre-flight as
+		// machinery, never as a receipt — and the ledger stays empty of race
+		// events.
+		if err := preflight(raceCtx, pol, base.wh, execDesc(cfg.Backend)); err != nil {
+			base.close(r)
+			os.Remove(r.raceDir)
+			return nil, err
+		}
+	}
+
+	// race.started gains five always-present observational keys: exec_tier,
+	// exec_image_digest ("" for T0), parallel (M1c), plus policy and the
+	// required oracle set in ladder order (M1e). Audit reads only "intent" —
+	// unaffected. Container IDs appear nowhere in the ledger: containers are
+	// transport, the image digest is the evidence.
 	imageDigest := ""
 	if b, ok := cfg.Backend.(interface{ ImageDigest() string }); ok {
 		imageDigest = b.ImageDigest()
@@ -240,8 +305,31 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		"exec_image_digest": imageDigest,
 		"exec_tier":         cfg.Backend.Tier(),
 		"intent":            cfg.Intent,
+		"oracles":           append([]string{}, pol.Required...),
 		"parallel":          cfg.Parallel,
+		"policy":            pol.Digest,
 	}); err != nil {
+		base.close(r)
+		os.Remove(r.raceDir)
+		return nil, err
+	}
+
+	// The base-state collect measurement: collected_delta's denominator
+	// (decision 13). It runs after race.started, before phase A, and only
+	// when a collected-not-below gate makes the delta mean something.
+	baseline := int64(0)
+	if base != nil {
+		baseline, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
+		base.close(r)
+		if err != nil {
+			os.Remove(r.raceDir)
+			return nil, err
+		}
+	}
+	// The ladder is built once and shared: the instances are immutable
+	// configuration, and one instance per kind is what makes every world's
+	// receipts comparable (same resolved config digest).
+	if r.oracles, err = buildLadder(pol, cfg, oracleTimeout, baseline); err != nil {
 		os.Remove(r.raceDir)
 		return nil, err
 	}
@@ -312,34 +400,34 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	byWorld := make([]int, len(r.slots))
 	for i := range r.slots {
 		s := &r.slots[i]
-		runs = append(runs, WorldRun{
+		run := WorldRun{
 			Ordinal: i + 1, Dir: s.dir, Digest: s.dig, World: s.world,
-			Run: s.run, Receipt: s.receipt, ReceiptDigest: s.receiptDig,
-		})
+			Run: s.run, Receipts: s.receipts,
+		}
+		if len(s.receipts) > 0 {
+			run.ReceiptDigest = s.receipts[0].Digest
+			run.Receipt = &s.receipts[0].Receipt
+		}
+		runs = append(runs, run)
 		byWorld[i] = i
 	}
 	sort.Slice(byWorld, func(a, b int) bool {
 		return r.slots[byWorld[a]].dig < r.slots[byWorld[b]].dig
 	})
-	worlds := make([]object.World, 0, len(r.slots))
+	worlds := make([]object.RecordedWorld, 0, len(r.slots))
 	for _, i := range byWorld {
-		worlds = append(worlds, r.slots[i].world)
+		worlds = append(worlds, object.RecordedWorld{Digest: r.slots[i].dig, World: r.slots[i].world})
 	}
-	var byReceipt []int
+	var receipts []object.RecordedReceipt
 	for i := range r.slots {
-		if r.slots[i].receipt != nil {
-			byReceipt = append(byReceipt, i)
-		}
+		receipts = append(receipts, r.slots[i].receipts...)
 	}
-	sort.Slice(byReceipt, func(a, b int) bool {
-		return r.slots[byReceipt[a]].receiptDig < r.slots[byReceipt[b]].receiptDig
-	})
-	receipts := make([]object.Receipt, 0, len(byReceipt))
-	for _, i := range byReceipt {
-		receipts = append(receipts, *r.slots[i].receipt)
+	sort.Slice(receipts, func(a, b int) bool { return receipts[a].Digest < receipts[b].Digest })
+	if receipts == nil {
+		receipts = []object.RecordedReceipt{}
 	}
 
-	decision := Decide(policy, worlds, receipts)
+	decision := Decide(pol, worlds, receipts)
 	decision.CreatedAt = nowRFC3339()
 	decisionDig, err := recordObject(cfg, "decision.recorded", decision)
 	if err != nil {
@@ -531,12 +619,16 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 			IdentityTier: "claimed",
 			Role:         "generator",
 		},
-		Context:   contextKey,
-		Patch:     patchKey,
-		Trace:     traceKey,
-		Cost:      res.Cost,
-		Outcome:   outcome,
-		CreatedAt: nowRFC3339(),
+		Context: contextKey,
+		Patch:   patchKey,
+		// The size is recorded where it is known: patch_size_asc must be
+		// evaluable by a pure decision function with no CAS access (M1e
+		// decision 22).
+		PatchBytes: int64(len(patch)),
+		Trace:      traceKey,
+		Cost:       res.Cost,
+		Outcome:    outcome,
+		CreatedAt:  nowRFC3339(),
 	}
 	dig, err := r.recordObjectLocked("world.created", w)
 	if err != nil {
@@ -546,27 +638,108 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 	return nil
 }
 
-// verify is phase B for one COMPLETED world: oracle behind the world
-// handle, freshness bound to the exact world state (M0 rule, unchanged),
-// receipt.recorded, then the handle is closed (containers are transport).
+// buildLadder instantiates the oracles the policy REQUIRES, in ladder order
+// (M1e decision 12): declared-but-unrequired oracles are never built and
+// never run, because evidence waste is a measured PRD metric. The v0 dialect
+// has exactly one rung — the supplied legacy oracle — since a v0 policy
+// declares no instances at all.
+func buildLadder(pol policy.Policy, cfg Config, timeout time.Duration, baseline int64) ([]ladderRung, error) {
+	if pol.Dialect == policy.DialectV0 {
+		return []ladderRung{{name: policy.FamilySuite, oracle: cfg.LegacyOracle}}, nil
+	}
+	rungs := make([]ladderRung, 0, len(pol.Required))
+	for _, name := range pol.Required {
+		spec, ok := pol.OracleByName(name)
+		if !ok {
+			// Unreachable: validation refused a gate, key or requirement
+			// naming an undeclared oracle.
+			return nil, fmt.Errorf("race: policy %s requires oracle %q, which it does not declare", pol.Digest, name)
+		}
+		o, err := oracle.New(oracle.Params{
+			Spec: spec, CAS: cfg.CAS, Timeout: timeout, Baseline: baseline,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("race: %w", err)
+		}
+		rungs = append(rungs, ladderRung{name: name, oracle: o})
+	}
+	return rungs, nil
+}
+
+// verify is phase B for one COMPLETED world: the policy's oracle LADDER
+// behind the world handle, each receipt bound to the exact world state (M0
+// rule, unchanged) and recorded, stopping at the first failed hard gate
+// (M1e decision 12) — gates are ordered, so a world that fails O0 never pays
+// for O1, and no test-deleting candidate ever reaches a green suite. The
+// handle is closed at the end (containers are transport).
 func (r *raceRun) verify(ctx context.Context, i int) error {
-	cfg, s := r.cfg, &r.slots[i]
-	rec, err := cfg.Oracle.Run(ctx, s.wh)
-	if err != nil {
-		return fmt.Errorf("race: oracle in %s: %w", s.dir, err)
+	s := &r.slots[i]
+	defer func() { _ = s.wh.Close() }() // idempotent; the deferred sweep is defense in depth
+	for _, rung := range r.oracles {
+		rec, err := rung.oracle.Run(ctx, s.wh)
+		if err != nil {
+			return fmt.Errorf("race: oracle %s in %s: %w", rung.name, s.dir, err)
+		}
+		// The orchestrator alone knows the world digest and tree the receipt
+		// attests to (valid_for = the world's exact {tree, env}: T1 receipts
+		// bind the image digest through valid_for.env with zero new
+		// plumbing).
+		rec.World = s.dig
+		rec.Freshness.ValidFor = object.ValidFor{Tree: s.world.Tree, Env: s.world.Env}
+		dig, err := r.recordObjectLocked("receipt.recorded", rec)
+		if err != nil {
+			return err
+		}
+		s.receipts = append(s.receipts, object.RecordedReceipt{Digest: dig, Receipt: rec})
+		if ladderStops(r.pol, s.receipts) {
+			return nil
+		}
 	}
-	// The orchestrator alone knows the world digest and tree the receipt
-	// attests to (valid_for = the world's exact {tree, env}: T1 receipts
-	// bind the image digest through valid_for.env with zero new plumbing).
-	rec.World = s.dig
-	rec.Freshness.ValidFor = object.ValidFor{Tree: s.world.Tree, Env: s.world.Env}
-	dig, err := r.recordObjectLocked("receipt.recorded", rec)
-	if err != nil {
-		return err
-	}
-	s.receipt, s.receiptDig = &rec, dig
-	_ = s.wh.Close() // idempotent; the deferred sweep is defense in depth
 	return nil
+}
+
+// ladderStops reports whether this world's ladder has reached its first
+// failed hard gate, walking pol.Gates in POLICY order over the receipts the
+// world has accumulated so far.
+//
+// Policy order is the whole point. Gates may interleave oracles, and
+// stopping merely because SOME gate naming the rung that just ran failed
+// lets a later gate halt the ladder before an earlier gate's oracle has run
+// at all — the trace then reports the never-run gate as the failure (it has
+// no receipt) and the gate that actually failed as not-evaluated, inverting
+// decision 12 and naming the wrong gate in the recorded rationale and the
+// `mvo worlds` GATE column. A gate whose oracle has produced no receipt yet
+// is not a failure; it is a rung still to climb.
+func ladderStops(pol policy.Policy, receipts []object.RecordedReceipt) bool {
+	for _, g := range pol.Gates {
+		rec := ladderReceipt(g.Sel, receipts)
+		if rec == nil {
+			return false
+		}
+		if ok, _ := g.Eval(rec); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ladderReceipt picks a selector's receipt out of the ones a world has
+// accumulated: the smallest-digest match, the same order-independent
+// disambiguation Decide's counted receipt uses. Binding is not re-checked
+// here — the orchestrator sets valid_for from the world it just judged, so
+// every receipt in this slice is bound by construction.
+func ladderReceipt(sel policy.Selector, receipts []object.RecordedReceipt) *object.Receipt {
+	best := ""
+	var out *object.Receipt
+	for i := range receipts {
+		if !sel.Match(receipts[i].Receipt) {
+			continue
+		}
+		if best == "" || receipts[i].Digest < best {
+			best, out = receipts[i].Digest, &receipts[i].Receipt
+		}
+	}
+	return out
 }
 
 // removeWorld removes one world worktree, falling back to plain directory
@@ -603,8 +776,6 @@ func (cfg Config) validate() error {
 		return errors.New("race: config: no candidates")
 	case cfg.WorldsDir == "":
 		return errors.New("race: config: empty worlds dir")
-	case cfg.Oracle == nil:
-		return errors.New("race: config: nil oracle")
 	case cfg.Backend == nil:
 		return errors.New("race: config: nil backend")
 	case cfg.Parallel < 1:

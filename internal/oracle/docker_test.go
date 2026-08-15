@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/dockerx"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 const fixtureImageTag = "multiverso-t1-fixture:v1"
@@ -147,6 +150,83 @@ func TestRunTimeoutKillsContainerDocker(t *testing.T) {
 	probe.Env = hostEnv
 	if out, err := probe.CombinedOutput(); err == nil {
 		t.Errorf("container survived the oracle timeout kill: %s", out)
+	}
+}
+
+// The Python ladder inside a T1 container: the SAME relative argv a T0
+// receipt carries, native artifacts arriving through the bind mount, and
+// honest degradation — the fixture image ships pytest and nothing else, so
+// no coverage or plugin metric may appear however loudly the spec asks.
+func TestPytestLadderInContainerDocker(t *testing.T) {
+	w := openT1World(t)
+	for _, name := range []string{"stats.py", "test_stats.py"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "toyrepo", name))
+		if err != nil {
+			t.Fatalf("read toyrepo %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(w.Dir(), name), b, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	store := newStore(t)
+	cfg := "mv0:" + strings.Repeat("7", 64)
+
+	collect, err := New(Params{
+		Spec: policy.Oracle{Kind: KindPytestCollect, Config: cfg}, CAS: store,
+		Timeout: 2 * time.Minute, Baseline: 8,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec, err := collect.Run(context.Background(), w)
+	if err != nil {
+		t.Fatalf("collect Run: %v", err)
+	}
+	if rec.Result.Status != StatusPass || rec.Result.Metrics[MetricCollectedTotal] != 8 {
+		t.Errorf("collect: status %q metrics %v, want pass with collected_total 8",
+			rec.Result.Status, rec.Result.Metrics)
+	}
+	if rec.Result.Metrics[MetricCollectedDelta] != 0 {
+		t.Errorf("collected_delta = %d, want 0", rec.Result.Metrics[MetricCollectedDelta])
+	}
+	if rec.Execution.IsolationTier != object.TierT1Container {
+		t.Errorf("isolation_tier = %q, want %q", rec.Execution.IsolationTier, object.TierT1Container)
+	}
+
+	suite, err := New(Params{
+		Spec: policy.Oracle{Kind: KindPytestSuite, Config: cfg, Coverage: true, Reruns: 2},
+		CAS:  store, Timeout: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec, err = suite.Run(context.Background(), w)
+	if err != nil {
+		t.Fatalf("suite Run: %v", err)
+	}
+	// The evidence-producing command is tier-independent: the identical
+	// relative argv appears in a T0 and a T1 receipt (M1c decision 12).
+	wantArgv := []string{
+		"python3", "-m", "pytest",
+		"--junit-xml=.mvo-oracle/pytest-suite/junit.xml", "-p", "no:cacheprovider",
+	}
+	if !reflect.DeepEqual(rec.Execution.Argv, wantArgv) {
+		t.Errorf("argv = %v, want %v (no flag for a plugin the image lacks)", rec.Execution.Argv, wantArgv)
+	}
+	if got := rec.Result.Metrics[MetricTestsTotal]; got != 8 {
+		t.Errorf("tests_total = %d, want 8; metrics %v", got, rec.Result.Metrics)
+	}
+	for _, absent := range []string{MetricCoverageBP, MetricTestsFailedFirstRun} {
+		if _, ok := rec.Result.Metrics[absent]; ok {
+			t.Errorf("%s present although the image ships no such source", absent)
+		}
+	}
+	if len(rec.Result.Tools) != 1 || rec.Result.Tools[ToolPytest] == "" {
+		t.Errorf("tools = %v, want only pytest — the record of what was really there", rec.Result.Tools)
+	}
+	if len(rec.Result.Artifacts) != 4 {
+		t.Errorf("artifacts = %v, want 4 (stdout, stderr, probe, junit through the bind mount)",
+			rec.Result.Artifacts)
 	}
 }
 

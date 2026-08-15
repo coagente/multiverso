@@ -36,10 +36,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdInit(rest, stdout, stderr)
 	case "intent":
 		if len(rest) == 0 || rest[0] != "new" {
-			fmt.Fprintln(stderr, "mvo: usage: mvo intent new --title T [--desc D] [--budget-candidates N] [--budget-wall-ms MS] [--dir DIR]")
+			fmt.Fprintln(stderr, "mvo: usage: mvo intent new --title T [--desc D] [--budget-candidates N] [--budget-wall-ms MS] [--policy NAME|DIGEST | --oracle-cmd CMD] [--dir DIR]")
 			return exitUsage
 		}
 		err = cmdIntentNew(rest[1:], stdout, stderr)
+	case "policy":
+		err = cmdPolicy(rest, stdout, stderr)
 	case "race":
 		err = cmdRace(rest, stdout, stderr)
 	case "worlds":
@@ -87,9 +89,15 @@ func usage(w io.Writer) {
 commands:
   init [--keys]                     create the .multiverso workspace (--keys: add
                                     signing keys to an existing workspace)
+  policy list                       policies known to the workspace, digest-sorted
+  policy show <name|digest> [--json]  render a policy; --json prints its canonical bytes
+  policy validate <file>            decode + validate + compile a policy file
+  policy use <name>                 install .multiverso/policies/<name>.json as the default
   intent new --title T [--desc D]   record an intent; prints its digest
              [--budget-candidates N] [--budget-wall-ms MS]
-  race <intent-digest> [--agent script|claude-code|codex] --oracle-cmd CMD
+             [--policy NAME|DIGEST | --oracle-cmd CMD]
+  race <intent-digest> [--agent script|claude-code|codex]
+       [--oracle-cmd CMD]           required with a policy/v0 intent, refused with policy/v1
        [--parallel N] [--exec T0|T1] [--keep-worlds]
        script (default):  --patches DIR
        claude-code|codex: [--prompt TEXT | --prompt-file P] [--model NAME[,NAME...]]
@@ -98,7 +106,9 @@ commands:
        --exec T1:         --exec-image REF [--memory-mb N] [--cpus DEC]
                           [--pids N] [--allow-network]
   worlds <intent-digest>            table of worlds: digest, outcome, gate, wall_ms, tier
-  explain <intent-digest>           render the recorded decision and evidence
+  explain <intent-digest> [--json] [--diffs N]
+                                    render the decision: gates, why the winner
+                                    won key by key, evidence, escalation
   admit <intent-digest>             land the SELECT winner on trunk with a signed attestation
   verify <commit> [--key PUB] [--json]  verify the admission attestation offline
   publish <intent-digest> [--remote R] [--include-rejected]

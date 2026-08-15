@@ -287,17 +287,19 @@ func runVerify(ws *workspace.Workspace, repo, rev string, pub ed25519.PublicKey,
 		if rec.World != pred.World {
 			return fail("freshness", "receipt %s has world %s, predicate world %s", dig, rec.World, pred.World)
 		}
-		switch rec.Family {
-		case "suite":
-			if rec.Freshness.ValidFor.Tree != commitTree {
-				return fail("freshness", "suite receipt %s valid for tree %s, commit tree %s",
-					dig, rec.Freshness.ValidFor.Tree, commitTree)
-			}
-		case admit.FamilyLandingApply:
+		// Every attested gate receipt judged the ADMITTED tree, whatever
+		// oracle produced it — a policy with several landing gates has
+		// several such receipts, and none of them may have judged something
+		// else. The landing-apply receipt is the one exception: it pins the
+		// PRE-apply state, which is the parent commit's tree (EP-3).
+		if rec.Family == admit.FamilyLandingApply {
 			if rec.Freshness.ValidFor.Tree != parentTree {
 				return fail("freshness", "landing-apply receipt %s valid for tree %s, parent tree %s",
 					dig, rec.Freshness.ValidFor.Tree, parentTree)
 			}
+		} else if rec.Freshness.ValidFor.Tree != commitTree {
+			return fail("freshness", "%s receipt %s valid for tree %s, commit tree %s",
+				rec.Family, dig, rec.Freshness.ValidFor.Tree, commitTree)
 		}
 		receipts = append(receipts, rec)
 	}

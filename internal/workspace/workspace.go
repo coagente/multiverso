@@ -16,6 +16,7 @@ import (
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/signing"
 )
 
@@ -43,15 +44,14 @@ type Workspace struct {
 	CAS    *cas.Store
 }
 
-// DefaultPolicy is the M0 policy: suite-pass hard gate; rank by gate_pass,
-// then wall_ms ascending.
-func DefaultPolicy() object.Policy {
-	return object.Policy{
-		Schema:    object.SchemaPolicy,
-		HardGates: []string{"suite-pass"},
-		Ranking:   []string{"gate_pass", "wall_ms_asc"},
-	}
-}
+// DefaultPolicy is the policy `mvo init` writes: since M1e the v1 artifact
+// that names its own oracles (policy.Default(), M1e decision 19) — the Python
+// ladder, ordered so a test-deleting candidate is stopped by O0's counts
+// before its suite is ever run. The M0 v0 shape stays loadable, inspectable
+// and deliberately pinnable per intent, but never the workspace default: a
+// shape whose gate its own digest does not determine must not silently judge
+// everything created afterwards.
+func DefaultPolicy() object.PolicyV1 { return policy.Default() }
 
 // Init creates <root>/.multiverso/{ledger.db,cas/,config.json,
 // policies/default.json,keys/}, stores the default policy in CAS and
@@ -167,6 +167,35 @@ func (w *Workspace) AdmitDir() string { return filepath.Join(w.Dir, "admit") }
 // KeysDir is where the local signing keypair lives — inside the
 // git-ignored workspace, never anywhere else.
 func (w *Workspace) KeysDir() string { return filepath.Join(w.Dir, "keys") }
+
+// PoliciesDir holds the workspace's file-backed policies, one JSON document
+// per name (`mvo policy use <name>` reads <name>.json). Files are authoring
+// surface only: what a race is judged by is the digest an intent pinned.
+func (w *Workspace) PoliciesDir() string { return filepath.Join(w.Dir, "policies") }
+
+// PolicyFile is the path of the file-backed policy called name.
+func (w *Workspace) PolicyFile(name string) string {
+	return filepath.Join(w.PoliciesDir(), name+".json")
+}
+
+// SetDefaultPolicy points config.default_policy at dig and rewrites
+// config.json canonically. Nothing is mutated in place: a policy's bytes
+// are content-addressed, so switching the default mints no new object and
+// intents pinned to the old digest keep replaying against it.
+func (w *Workspace) SetDefaultPolicy(dig string) error {
+	cfg := w.Config
+	cfg.DefaultPolicy = dig
+	canon, err := object.Canonical(cfg)
+	if err != nil {
+		return fmt.Errorf("workspace: encode config: %w", err)
+	}
+	path := filepath.Join(w.Dir, "config.json")
+	if err := os.WriteFile(path, canon, 0o644); err != nil {
+		return fmt.Errorf("workspace: write %s: %w", path, err)
+	}
+	w.Config = cfg
+	return nil
+}
 
 // GenerateKeys generates the local keypair into KeysDir (refusing to
 // overwrite an existing one) and records key.generated in the ledger.

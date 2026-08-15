@@ -87,12 +87,17 @@ func newScenario(t *testing.T) *scenario {
 	gitCLI(t, repo, "add", "-A")
 	gitCLI(t, repo, "commit", "-q", "-m", "ignore workspace")
 
-	intentDig := strings.TrimSpace(mustMvo(t, "intent", "new", "--dir", repo, "--title", "fix hello"))
+	// The intent pins a synthesized command-oracle policy (M1e decision 18):
+	// this repo has no Python suite, so the gate is a command — named INSIDE
+	// the pinned artifact, where the policy digest determines it, instead of
+	// on a race-time flag.
+	intentDig := strings.TrimSpace(mustMvo(t, "intent", "new", "--dir", repo,
+		"--title", "fix hello", "--oracle-cmd", "true"))
 	patches := t.TempDir()
 	if err := os.WriteFile(filepath.Join(patches, "patch-a.patch"), []byte(fixPatch), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mustMvo(t, "race", intentDig, "--dir", repo, "--patches", patches, "--oracle-cmd", "true")
+	mustMvo(t, "race", intentDig, "--dir", repo, "--patches", patches)
 
 	return &scenario{
 		repo:      repo,

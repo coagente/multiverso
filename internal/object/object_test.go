@@ -75,22 +75,56 @@ func TestDigestGolden(t *testing.T) {
 		},
 		{
 			// M1c: execution.isolation_caps is always serialized (XP-2; no
-			// omitempty games) — receipt digests re-derived.
+			// omitempty games) — receipt digests re-derived. M1e: so are
+			// result.metrics and result.tools, EMPTY here because a command
+			// oracle parses nothing — {} is "measured nothing", null would
+			// be a lie about the shape of the record (EP-2).
 			name: "receipt object, deeply nested",
 			v: Receipt{
 				Schema:      SchemaReceipt,
 				World:       "mv0:" + strings.Repeat("1", 64),
 				Oracle:      OracleRef{ID: "command", Version: "v0", Config: "mv0:" + strings.Repeat("2", 64)},
 				Execution:   Execution{Argv: []string{"python3", "-m", "pytest", "-q"}, ExitCode: 1, DurationMS: 1234, IsolationTier: TierT0Worktree, IsolationCaps: HostCaps()},
-				Result:      Result{Status: "fail", Artifacts: []string{"sha256:aa11", "sha256:bb22"}},
-				Freshness:   Freshness{Basis: "construction", ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
+				Result:      NewResult("fail", "sha256:aa11", "sha256:bb22"),
+				Freshness:   Freshness{Basis: BasisConstruction, ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
 				RecheckTier: "V1-replayable",
 				Family:      "suite",
 				Cost:        Cost{WallMS: 1234},
 				CreatedAt:   "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"cost":{"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"exit_code":1,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"status":"fail"},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
-			wantDig:   "mv0:fda9d18bb334a090209b0ca3a4e9102f05df6493b773b125403d5550ec10653e",
+			wantCanon: `{"cost":{"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"exit_code":1,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"metrics":{},"status":"fail","tools":{}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
+			wantDig:   "mv0:03316a8cad9764d11f630558c60d6f41020ddc75a70cba98a343d8da6af67916",
+		},
+		{
+			// M1e/EP-2: a pytest-suite receipt carrying metrics and tools.
+			// Metric names sort lexicographically like every other key, the
+			// values are INTEGERS (coverage in basis points, durations in
+			// ms — DP-1 forbids floats), and a metric whose source was
+			// unavailable is simply absent: there is no coverage_bp here
+			// because this run measured no coverage.
+			name: "receipt object with metrics and tools",
+			v: Receipt{
+				Schema:    SchemaReceipt,
+				World:     "mv0:" + strings.Repeat("1", 64),
+				Oracle:    OracleRef{ID: "pytest-suite", Version: "v0", Config: "mv0:" + strings.Repeat("2", 64)},
+				Execution: Execution{Argv: []string{"python3", "-m", "pytest", "--junit-xml=.mvo-oracle/pytest-suite/junit.xml", "-p", "no:cacheprovider"}, ExitCode: 0, DurationMS: 1234, IsolationTier: TierT0Worktree, IsolationCaps: HostCaps()},
+				Result: Result{
+					Status: "pass",
+					Metrics: map[string]int64{
+						"tests_total": 8, "tests_passed": 8, "tests_failed": 0,
+						"tests_errored": 0, "tests_skipped": 0, "duration_ms": 132,
+					},
+					Tools:     map[string]string{"pytest": "9.1.1"},
+					Artifacts: []string{"sha256:aa11", "sha256:bb22", "sha256:cc33", "sha256:dd44"},
+				},
+				Freshness:   Freshness{Basis: BasisConstruction, ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
+				RecheckTier: "V1-replayable",
+				Family:      "suite",
+				Cost:        Cost{WallMS: 1300},
+				CreatedAt:   "2026-01-02T03:04:05Z",
+			},
+			wantCanon: `{"cost":{"wall_ms":1300},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","--junit-xml=.mvo-oracle/pytest-suite/junit.xml","-p","no:cacheprovider"],"duration_ms":1234,"exit_code":0,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"pytest-suite","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22","sha256:cc33","sha256:dd44"],"metrics":{"duration_ms":132,"tests_errored":0,"tests_failed":0,"tests_passed":8,"tests_skipped":0,"tests_total":8},"status":"pass","tools":{"pytest":"9.1.1"}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
+			wantDig:   "mv0:8d3860dac10ead19d9b4982649a8ad33d6a3a33b2d9913a7652c929919635e4e",
 		},
 		{
 			// M1c: full T1 caps — every field, canonical key order pinned.
@@ -122,7 +156,9 @@ func TestDigestGolden(t *testing.T) {
 		},
 		{
 			// M1b: context/trace/cost are always serialized — no omitempty
-			// games, optional fields would make digests ambiguous.
+			// games, optional fields would make digests ambiguous. M1e adds
+			// patch_bytes, recorded where the size is known so the
+			// patch_size_asc ranking key needs no CAS access.
 			name: "world object with context, trace, and cost",
 			v: World{
 				Schema:        SchemaWorld,
@@ -133,13 +169,14 @@ func TestDigestGolden(t *testing.T) {
 				Producer:      Producer{Adapter: "claude-code@v0", Model: "claude-sonnet-5", IdentityTier: "claimed", Role: "generator"},
 				Context:       "sha256:" + strings.Repeat("a", 64),
 				Patch:         "sha256:" + strings.Repeat("6", 64),
+				PatchBytes:    412,
 				Trace:         "sha256:" + strings.Repeat("b", 64),
 				Cost:          RunCost{WallMS: 1234, USDMicro: 4200, TokensIn: 1300, TokensOut: 345, Source: "client-estimate"},
 				Outcome:       OutcomeCompleted,
 				CreatedAt:     "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"context":"sha256:` + strings.Repeat("a", 64) + `","cost":{"source":"client-estimate","tokens_in":1300,"tokens_out":345,"usd_micro":4200,"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","env":"mv0:` + strings.Repeat("5", 64) + `","intent":"mv0:` + strings.Repeat("4", 64) + `","isolation_tier":"T0-worktree","outcome":"COMPLETED","patch":"sha256:` + strings.Repeat("6", 64) + `","producer":{"adapter":"claude-code@v0","identity_tier":"claimed","model":"claude-sonnet-5","role":"generator"},"schema":"multiverso.dev/world/v0","trace":"sha256:` + strings.Repeat("b", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}`,
-			wantDig:   "mv0:049c3cea7c06a38839c3083c6a5d4248756052cc93dc628c767f8f530d958f18",
+			wantCanon: `{"context":"sha256:` + strings.Repeat("a", 64) + `","cost":{"source":"client-estimate","tokens_in":1300,"tokens_out":345,"usd_micro":4200,"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","env":"mv0:` + strings.Repeat("5", 64) + `","intent":"mv0:` + strings.Repeat("4", 64) + `","isolation_tier":"T0-worktree","outcome":"COMPLETED","patch":"sha256:` + strings.Repeat("6", 64) + `","patch_bytes":412,"producer":{"adapter":"claude-code@v0","identity_tier":"claimed","model":"claude-sonnet-5","role":"generator"},"schema":"multiverso.dev/world/v0","trace":"sha256:` + strings.Repeat("b", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}`,
+			wantDig:   "mv0:5b79b3d7a180ef0ba34740074a094076450599f0190b3cd216101aadd8ea6787",
 		},
 		{
 			name:      "run cost zero value serializes every field",

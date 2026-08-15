@@ -9,6 +9,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 func TestFetchRaceHappyNonAdmitted(t *testing.T) {
@@ -36,7 +37,10 @@ func TestFetchRaceHappyNonAdmitted(t *testing.T) {
 	if len(rep.Refs) != 3 {
 		t.Errorf("refs = %+v, want cand/1 cand/2 evidence", rep.Refs)
 	}
-	// Table rows: both worlds, ordinal-ordered, gates from the receipts.
+	// Table rows: both worlds, ordinal-ordered, gates derived through the
+	// closure's own policy — a failing row names the GATE that stopped the
+	// ladder, exactly as the local `mvo worlds` does, never a bare "fail"
+	// guessed from one receipt's family.
 	if len(rep.Worlds) != 2 {
 		t.Fatalf("world rows = %+v", rep.Worlds)
 	}
@@ -44,7 +48,8 @@ func TestFetchRaceHappyNonAdmitted(t *testing.T) {
 		rep.Worlds[0].Dig != f.worldDigs[0] || rep.Worlds[0].Signed != 1 {
 		t.Errorf("row 0 = %+v", rep.Worlds[0])
 	}
-	if rep.Worlds[1].Ordinal != 2 || rep.Worlds[1].Gate != "fail" || rep.Worlds[1].Outcome != object.OutcomeCompleted {
+	if rep.Worlds[1].Ordinal != 2 || rep.Worlds[1].Gate != policy.GateSuitePass ||
+		rep.Worlds[1].Outcome != object.OutcomeCompleted {
 		t.Errorf("row 1 = %+v", rep.Worlds[1])
 	}
 }

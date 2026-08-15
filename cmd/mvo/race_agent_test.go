@@ -63,9 +63,6 @@ func TestRaceFlagMatrix(t *testing.T) {
 		{"missing patches for script",
 			[]string{"race", "mv0:x", "--oracle-cmd", "true"},
 			"--patches is required"},
-		{"missing oracle-cmd",
-			[]string{"race", "mv0:x", "--patches", "p"},
-			"--oracle-cmd is required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,22 +84,19 @@ func TestRaceAgentBudgetFlagErrors(t *testing.T) {
 	sc := newScenario(t) // intent budget: max_candidates 2 (default)
 
 	_, stderr, code := mvo(t, "race", sc.intentDig, "--dir", sc.repo,
-		"--agent", "claude-code", "--candidates", "3",
-		"--oracle-cmd", "true")
+		"--agent", "claude-code", "--candidates", "3")
 	if code != exitUsage || !strings.Contains(stderr, "max_candidates") {
 		t.Errorf("candidates over budget: exit %d, stderr %q; want usage error naming max_candidates", code, stderr)
 	}
 
 	_, stderr, code = mvo(t, "race", sc.intentDig, "--dir", sc.repo,
-		"--agent", "claude-code", "--max-wall-ms", "0",
-		"--oracle-cmd", "true")
+		"--agent", "claude-code", "--max-wall-ms", "0")
 	if code != exitUsage || !strings.Contains(stderr, "--max-wall-ms must be positive") {
 		t.Errorf("wall 0: exit %d, stderr %q; want usage error (uncapped agent runs never launch implicitly)", code, stderr)
 	}
 
 	_, stderr, code = mvo(t, "race", sc.intentDig, "--dir", sc.repo,
-		"--agent", "claude-code", "--candidates", "0",
-		"--oracle-cmd", "true")
+		"--agent", "claude-code", "--candidates", "0")
 	if code != exitUsage || !strings.Contains(stderr, "--candidates must be at least 1") {
 		t.Errorf("candidates 0: exit %d, stderr %q; want usage error", code, stderr)
 	}
@@ -115,7 +109,7 @@ func TestRacePreflightLookPath(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no claude anywhere
 
 	_, stderr, code := mvo(t, "race", sc.intentDig, "--dir", sc.repo,
-		"--agent", "claude-code", "--oracle-cmd", "true")
+		"--agent", "claude-code")
 	if code != exitFail {
 		t.Fatalf("exit = %d, want %d\nstderr: %s", code, exitFail, stderr)
 	}
@@ -134,8 +128,7 @@ func TestRaceFakeClaudeAndWorldsCostColumn(t *testing.T) {
 	out := mustMvo(t, "race", sc.intentDig, "--dir", sc.repo,
 		"--agent", "claude-code", "--candidates", "2",
 		"--model", "fake-model", "--max-usd", "0.25", "--max-turns", "8",
-		"--max-wall-ms", "60000", "--agent-env", "FAKE_AGENT_MODE",
-		"--oracle-cmd", "true")
+		"--max-wall-ms", "60000", "--agent-env", "FAKE_AGENT_MODE")
 	if !strings.HasPrefix(out, "SELECT mv0:") {
 		t.Fatalf("race output = %q, want SELECT", out)
 	}
@@ -168,5 +161,53 @@ func TestRaceFakeClaudeAndWorldsCostColumn(t *testing.T) {
 	}
 	if agentRows != 2 {
 		t.Errorf("worlds shows %d rows with usd_micro 4200, want 2 (fake agent worlds):\n%s", agentRows, worlds)
+	}
+}
+
+// Decision 18, at the only place it can be enforced: the intent's PINNED
+// policy decides whether --oracle-cmd is required or refused. A v0 policy
+// names a gate but not the command that decides it, so the flag is
+// mandatory; a v1 policy names its own oracles, so the flag is a usage
+// error rather than a per-machine override of an attested artifact.
+func TestRaceOracleCmdDisciplineFollowsThePinnedPolicy(t *testing.T) {
+	repo := t.TempDir()
+	gitCLI(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCLI(t, repo, "add", "-A")
+	gitCLI(t, repo, "commit", "-q", "-m", "baseline")
+	mustMvo(t, "init", "--dir", repo)
+	patches := t.TempDir()
+	if err := os.WriteFile(filepath.Join(patches, "patch-a.patch"), []byte(fixPatch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// v1 (the workspace default): the flag is refused, by name and schema.
+	v1Intent := strings.TrimSpace(mustMvo(t, "intent", "new", "--dir", repo, "--title", "v1"))
+	_, stderr, code := mvo(t, "race", v1Intent, "--dir", repo, "--patches", patches, "--oracle-cmd", "true")
+	if code != exitUsage || !strings.Contains(stderr, "--oracle-cmd is not permitted with policy") ||
+		!strings.Contains(stderr, "policy/v1") {
+		t.Errorf("v1 + --oracle-cmd: exit %d, stderr %q", code, stderr)
+	}
+
+	// v0 (pinned deliberately, per intent): the flag is required.
+	fixturePolicy(t, repo, "legacy-v0")
+	v0Intent := strings.TrimSpace(mustMvo(t, "intent", "new", "--dir", repo, "--title", "v0", "--policy", "legacy-v0"))
+	_, stderr, code = mvo(t, "race", v0Intent, "--dir", repo, "--patches", patches)
+	if code != exitUsage || !strings.Contains(stderr, "--oracle-cmd is required with policy") {
+		t.Errorf("v0 without --oracle-cmd: exit %d, stderr %q", code, stderr)
+	}
+	// And with it, the v0 race runs exactly as M0–M1d did.
+	out := mustMvo(t, "race", v0Intent, "--dir", repo, "--patches", patches, "--oracle-cmd", "true")
+	if !strings.HasPrefix(out, "SELECT mv0:") {
+		t.Errorf("v0 race output = %q, want SELECT", out)
+	}
+
+	// --policy and --oracle-cmd pin different policies: naming both is a
+	// usage error, never a silent precedence rule.
+	if _, _, code := mvo(t, "intent", "new", "--dir", repo, "--title", "both",
+		"--policy", "legacy-v0", "--oracle-cmd", "true"); code != exitUsage {
+		t.Errorf("--policy + --oracle-cmd: exit %d, want %d", code, exitUsage)
 	}
 }

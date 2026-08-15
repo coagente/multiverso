@@ -14,6 +14,7 @@ import (
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
 	"github.com/coagente/multiverso/internal/signing"
 )
@@ -50,9 +51,10 @@ type fixture struct {
 	casRoot string
 	signer  *signing.Signer
 
-	policy object.Policy
-	polDig string
-	envDig string
+	policy    object.Policy
+	policyCmp policy.Policy
+	polDig    string
+	envDig    string
 
 	intentDig string
 	intent    object.Intent
@@ -106,6 +108,16 @@ func newFixture(t *testing.T) *fixture {
 		Ranking:   []string{"gate_pass", "wall_ms_asc"},
 	}
 	f.polDig = f.recordObj("policy.created", f.policy)
+	polCanon, err := object.Canonical(f.policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The compiled form the pure decision functions take; its Digest is the
+	// digest of these very bytes (M1e decision 1).
+	f.policyCmp, err = policy.Decode(polCanon)
+	if err != nil {
+		t.Fatalf("compile fixture policy: %v", err)
+	}
 
 	envDig, envCanon, err := object.Digest(map[string]any{"os": "test"})
 	if err != nil {
@@ -255,7 +267,15 @@ func (f *fixture) race(pass ...bool) {
 		f.receipts = append(f.receipts, r)
 		f.receiptDigs = append(f.receiptDigs, dig)
 	}
-	dec := race.Decide(f.policy, f.worlds, f.receipts)
+	recWorlds := make([]object.RecordedWorld, 0, len(f.worlds))
+	for i := range f.worlds {
+		recWorlds = append(recWorlds, object.RecordedWorld{Digest: f.worldDigs[i], World: f.worlds[i]})
+	}
+	recReceipts := make([]object.RecordedReceipt, 0, len(f.receipts))
+	for i := range f.receipts {
+		recReceipts = append(recReceipts, object.RecordedReceipt{Digest: f.receiptDigs[i], Receipt: f.receipts[i]})
+	}
+	dec := race.Decide(f.policyCmp, recWorlds, recReceipts)
 	dec.CreatedAt = "2026-08-13T00:00:03Z"
 	if f.doctorSelect != nil {
 		dec = f.doctorSelect(dec)
@@ -312,7 +332,9 @@ func (f *fixture) admitIntent() {
 	f.gateDig = f.recordObj("receipt.recorded", gate)
 	f.landingWall = 12
 
-	dec := admit.Decide(f.policy, f.intentDig, winnerDig, apply, &gate)
+	dec := admit.Decide(f.policyCmp, f.intentDig, winnerDig,
+		object.RecordedReceipt{Digest: f.applyDig, Receipt: apply},
+		[]object.RecordedReceipt{{Digest: f.gateDig, Receipt: gate}})
 	dec.CreatedAt = "2026-08-13T00:00:05Z"
 	if dec.Type != admit.TypeAdmit {
 		f.t.Fatalf("fixture admission decided %s: %s", dec.Type, dec.Rationale)
