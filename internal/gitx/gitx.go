@@ -291,6 +291,13 @@ func CommitMessage(repo, commit string) (string, error) {
 // on parent, message on stdin, under the fixed mvo identity — plumbing
 // only, no working tree involved. Returns the new commit sha.
 func CommitTree(repo, tree, parent, message string) (string, error) {
+	return commitTree(repo, tree, parent, message, nil)
+}
+
+// commitTree is the shared commit-tree plumbing behind CommitTree (real
+// timestamps, admission commits) and CommitTreeEpoch (pinned timestamps,
+// publication commits).
+func commitTree(repo, tree, parent, message string, extraEnv []string) (string, error) {
 	sha := strings.TrimPrefix(tree, TreePrefix)
 	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "commit-tree", sha, "-p", parent)...)
 	cmd.Dir = repo
@@ -301,6 +308,7 @@ func CommitTree(repo, tree, parent, message string) (string, error) {
 		"GIT_COMMITTER_NAME="+CommitterName,
 		"GIT_COMMITTER_EMAIL="+CommitterEmail,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdin = strings.NewReader(message)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -313,10 +321,301 @@ func CommitTree(repo, tree, parent, message string) (string, error) {
 }
 
 // UpdateRef compare-and-swaps ref from oldCommit to newCommit; it fails if
-// the ref no longer points at oldCommit (trunk moved mid-admission).
+// the ref no longer points at oldCommit (trunk moved mid-admission). An
+// oldCommit of "" means the ref must not exist — create-only CAS.
 func UpdateRef(repo, ref, newCommit, oldCommit string) error {
 	_, err := run(repo, "update-ref", ref, newCommit, oldCommit)
 	return err
+}
+
+// PublishEpoch pins publication-commit timestamps (M1d decision 2):
+// publication commits are transport containers, not events — time lives in
+// the ledger — and a fixed date is what makes idempotent republish
+// structural (identical content re-mints identical shas).
+const PublishEpoch = "1970-01-01T00:00:00Z"
+
+// HashObject writes data into repo's object database as a blob
+// (hash-object -w --stdin) and returns its sha.
+func HashObject(repo string, data []byte) (string, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "hash-object", "-w", "--stdin")...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	cmd.Stdin = bytes.NewReader(data)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gitx: git hash-object in %s: %w: %s",
+			repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// TreeEntry is one tree line for Mktree input and LsTreeRecursive output.
+// For LsTreeRecursive, Name is the full path relative to the tree root.
+type TreeEntry struct{ Mode, Type, SHA, Name string }
+
+// Mktree builds a tree object from entries (pre-sorted by Name by the
+// caller) and returns its sha. Entries are one level deep — nested trees
+// are built bottom-up by the caller.
+func Mktree(repo string, entries []TreeEntry) (string, error) {
+	var input bytes.Buffer
+	for _, e := range entries {
+		fmt.Fprintf(&input, "%s %s %s\t%s\n", e.Mode, e.Type, e.SHA, e.Name)
+	}
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "mktree")...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	cmd.Stdin = &input
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gitx: git mktree in %s: %w: %s",
+			repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// CommitTreeEpoch is CommitTree with author and committer dates pinned to
+// PublishEpoch: the commit sha becomes a pure function of (tree, parent,
+// message) under the fixed mvo identity.
+func CommitTreeEpoch(repo, tree, parent, message string) (string, error) {
+	return commitTree(repo, tree, parent, message, []string{
+		"GIT_AUTHOR_DATE=" + PublishEpoch,
+		"GIT_COMMITTER_DATE=" + PublishEpoch,
+	})
+}
+
+// RefValue resolves ref to a sha; an absent ref is ("", nil), not an error
+// (rev-parse --verify --quiet: exit 1 with silent stderr means absent).
+func RefValue(repo, ref string) (string, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "rev-parse", "--verify", "--quiet", ref)...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.TrimSpace(stderr.String()) == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("gitx: git rev-parse --verify --quiet %s in %s: %w: %s",
+			ref, repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// ForEachRef enumerates the refs under prefix as a ref → sha map.
+func ForEachRef(repo, prefix string) (map[string]string, error) {
+	out, err := run(repo, "for-each-ref", "--format=%(objectname) %(refname)", prefix)
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		sha, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		refs[ref] = sha
+	}
+	return refs, nil
+}
+
+// DeleteRef deletes ref iff it still points at oldCommit (update-ref -d
+// compare-and-swap).
+func DeleteRef(repo, ref, oldCommit string) error {
+	_, err := run(repo, "update-ref", "-d", ref, oldCommit)
+	return err
+}
+
+// LsRemote lists remote's refs matching pattern as a ref → sha map. An
+// empty namespace is an empty map; an unreachable remote is an error.
+//
+// The result is anchored to pattern's fixed prefix: git ls-remote
+// tail-matches its pattern from any slash boundary (it rewrites the pattern
+// to "*/<pattern>"), so a ref merely CONTAINING the pattern —
+// refs/heads/refs/multiverso/intent/<short>/wip — comes back too. Callers
+// turn this survey into delete refspecs, so an unanchored result is a
+// deletion of refs outside the surveyed namespace; the anchor is what makes
+// "publish and prune only ever touch their own namespace" true rather than
+// merely intended.
+func LsRemote(repo, remote, pattern string) (map[string]string, error) {
+	out, err := run(repo, "ls-remote", remote, pattern)
+	if err != nil {
+		return nil, err
+	}
+	fixed, _, _ := strings.Cut(pattern, "*")
+	refs := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		sha, ref, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || !strings.HasPrefix(ref, fixed) {
+			continue
+		}
+		refs[ref] = sha
+	}
+	return refs, nil
+}
+
+// MultiversoRefRoot is the only ref namespace Push may write to.
+const MultiversoRefRoot = "refs/multiverso/"
+
+// Push pushes explicit refspecs — "<sha>:<ref>" (update/create) or
+// ":<ref>" (delete) — each guarded by --force-with-lease=<ref>:<old> from
+// leases; a lease value of "" means the ref must not exist (expect-absent).
+//
+// Two properties are enforced here rather than assumed:
+//   - Every refspec destination must sit under MultiversoRefRoot. M1d
+//     decision 10 claims refs/heads can never appear "by construction";
+//     construction only covers the ref builders, not a survey that fed the
+//     refspec list, so the claim is asserted.
+//   - --atomic: the batch lands whole or not at all. Publish and prune both
+//     record what a push did in an append-only ledger and treat a failed
+//     push as "nothing landed"; without atomicity a partially applied batch
+//     makes that record permanently wrong.
+func Push(repo, remote string, refspecs []string, leases map[string]string) error {
+	for _, spec := range refspecs {
+		dst := spec
+		if _, after, ok := strings.Cut(spec, ":"); ok {
+			dst = after
+		}
+		if !strings.HasPrefix(dst, MultiversoRefRoot) {
+			return fmt.Errorf("gitx: refusing to push refspec %q: destination is outside %s", spec, MultiversoRefRoot)
+		}
+	}
+	args := []string{"push", "--atomic"}
+	leased := make([]string, 0, len(leases))
+	for ref := range leases {
+		leased = append(leased, ref)
+	}
+	slices.Sort(leased)
+	for _, ref := range leased {
+		args = append(args, "--force-with-lease="+ref+":"+leases[ref])
+	}
+	args = append(args, remote)
+	args = append(args, refspecs...)
+	_, err := run(repo, args...)
+	return err
+}
+
+// Fetch fetches refspecs from remote, pruning local refs the refspecs
+// cover that vanished remotely when prune is set.
+func Fetch(repo, remote string, refspecs []string, prune bool) error {
+	args := []string{"fetch"}
+	if prune {
+		args = append(args, "--prune")
+	}
+	args = append(args, remote)
+	args = append(args, refspecs...)
+	_, err := run(repo, args...)
+	return err
+}
+
+// LsTreeRecursive lists every blob under treeish (ls-tree -r -z); each
+// entry's Name is the full path.
+func LsTreeRecursive(repo, treeish string) ([]TreeEntry, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "ls-tree", "-r", "-z", treeish)...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gitx: git ls-tree -r %s in %s: %w: %s",
+			treeish, repo, err, strings.TrimSpace(stderr.String()))
+	}
+	var entries []TreeEntry
+	for _, rec := range strings.Split(stdout.String(), "\x00") {
+		if rec == "" {
+			continue
+		}
+		meta, name, ok := strings.Cut(rec, "\t")
+		if !ok {
+			return nil, fmt.Errorf("gitx: ls-tree entry %q has no path", rec)
+		}
+		fields := strings.Fields(meta)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("gitx: ls-tree entry %q is malformed", rec)
+		}
+		entries = append(entries, TreeEntry{Mode: fields[0], Type: fields[1], SHA: fields[2], Name: name})
+	}
+	return entries, nil
+}
+
+// CatBlob returns the raw bytes of a blob object — no trimming (the bytes
+// are evidence; a trailing newline is significant), so this takes its own
+// exec path instead of run()'s TrimSpace (the DiffCached precedent).
+func CatBlob(repo, sha string) ([]byte, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "cat-file", "blob", sha)...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gitx: git cat-file blob %s in %s: %w: %s",
+			sha, repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+// MergeBase returns the merge base of a and b, or ("", nil) when they share
+// no common ancestor (merge-base: exit 1 with silent stderr).
+func MergeBase(repo, a, b string) (string, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "merge-base", a, b)...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.TrimSpace(stderr.String()) == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("gitx: git merge-base %s %s in %s: %w: %s",
+			a, b, repo, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// CommitExists reports whether sha resolves to a commit in repo's object
+// database.
+func CommitExists(repo, sha string) bool {
+	_, err := run(repo, "cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
+// RemotePushRefspecs returns remote.<remote>.push refspecs; an unset key is
+// (nil, nil). Publish pre-flight warns when one covers refs/multiverso
+// (M1d decision 17 — the mirror-refspec foot-gun).
+func RemotePushRefspecs(repo, remote string) ([]string, error) {
+	cmd := exec.Command("git", append(append([]string{}, baseArgs...), "config", "--get-all", "remote."+remote+".push")...)
+	cmd.Dir = repo
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.TrimSpace(stderr.String()) == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("gitx: git config --get-all remote.%s.push in %s: %w: %s",
+			remote, repo, err, strings.TrimSpace(stderr.String()))
+	}
+	var specs []string
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			specs = append(specs, line)
+		}
+	}
+	return specs, nil
+}
+
+// RemoteURL resolves remote's URL; an unconfigured remote is an error
+// (publish pre-flight: fail before anything is recorded).
+func RemoteURL(repo, remote string) (string, error) {
+	return run(repo, "remote", "get-url", remote)
 }
 
 // StatusClean reports whether repo's working tree and index are clean

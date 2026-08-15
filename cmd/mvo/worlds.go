@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/publish"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -31,7 +32,7 @@ func cmdWorlds(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("worlds: %w", err)
 	}
-	intentDig, _, err := st.resolveIntent(digArg)
+	intentDig, intent, err := st.resolveIntent(digArg)
 	if err != nil {
 		return fmt.Errorf("worlds: %w", err)
 	}
@@ -61,5 +62,9 @@ func cmdWorlds(args []string, stdout, stderr io.Writer) error {
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("worlds: %w", err)
 	}
+	// Trunk drift is a display concept, computed at render time — never a
+	// ledger mutation (M1d decision 16).
+	status, detail := publish.TrunkDrift(*dir, intent.Base.Commit)
+	fmt.Fprintf(stdout, "freshness: %s (%s)\n", status, detail)
 	return nil
 }

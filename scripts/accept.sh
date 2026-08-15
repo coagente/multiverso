@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# M1c acceptance script — M1b's steps kept intact (admission, signed
+# M1d acceptance script — M1c's steps kept intact (admission, signed
 # attestation, offline verification, tamper detection; step 2 races the
-# script adapter, step 3b the fake claude-code fixture) with two M1c
-# insertions: step 3c races --parallel 2 and pins decision type + winner
-# against the serial run, and step 3d is the docker-gated T1 step that
-# skips gracefully when no daemon is reachable (see
-# docs/design/M1c-containers-parallel.md "Acceptance script"). Exits
-# non-zero on the first broken assertion. No real agent CLI is ever
-# invoked, and nothing larger than python:3.12-alpine is ever pulled.
+# script adapter, step 3b the fake claude-code fixture, step 3c --parallel
+# 2, step 3d the docker-gated T1 step) with the M1d publication steps:
+# step 3 additionally asserts the FRESH drift line, and steps 6b-6g cover
+# publish → clone → fetch-race → tamper-detection → prune against a LOCAL
+# bare remote (see docs/design/M1d-publication.md "Acceptance script").
+# Exits non-zero on the first broken assertion. No real agent CLI is ever
+# invoked, the network is never touched, and nothing larger than
+# python:3.12-alpine is ever pulled.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,6 +48,9 @@ echo "$EXPLAIN" | grep -q '^type: *SELECT$' || fail "decision is not SELECT:
 $EXPLAIN"
 WINNER="$(echo "$EXPLAIN" | awk '/^winner:/ {print $2}')"
 [ "$WINNER" = "$WORLD_A" ] || fail "winner $WINNER is not patch-a's world $WORLD_A"
+# M1d: raced at trunk head, nothing has moved yet — the drift line is FRESH.
+echo "$EXPLAIN" | grep -q '^freshness: FRESH' || fail "explain does not show freshness FRESH:
+$EXPLAIN"
 
 # --- 3b. fake-agent race (claude-code adapter against the fake fixture,
 # while the base commit still carries the bug so the fake's fix produces a
@@ -215,8 +219,151 @@ assert r.get("ok") is True, r
 "$MVO" verify HEAD --key "$REPO/.multiverso/keys/local.pub" --dir "$REPO" \
   || fail "mvo verify --key failed"
 
+# --- 6b. publish + idempotence (FI-1): winner candidate + signed evidence
+# closure land under refs/multiverso/* on a LOCAL bare remote; nothing
+# under refs/heads/ is ever pushed by mvo; an identical republish re-mints
+# identical shas so the push plan diffs to zero ---
+SHORT="${INTENT#mv0:}"; SHORT="${SHORT:0:12}"
+NS="refs/multiverso/intent/$SHORT"
+ORIGIN="$WORK/origin.git"
+git init -q --bare -b main "$ORIGIN"
+$GIT -C "$REPO" remote add origin "$ORIGIN"
+"$MVO" publish "$INTENT" --dir "$REPO" || fail "mvo publish exited non-zero"
+LSR1="$(git -C "$REPO" ls-remote origin 'refs/multiverso/*' | sort)"
+[ "$(echo "$LSR1" | awk '{print $2}' | sort)" = "$NS/cand/1
+$NS/evidence" ] || fail "published namespace is not exactly winner cand/1 + evidence:
+$LSR1"
+[ -z "$(git -C "$REPO" ls-remote origin 'refs/heads/*')" ] \
+  || fail "publish pushed something under refs/heads"
+REPUB_OUT="$("$MVO" publish "$INTENT" --dir "$REPO")" || fail "republish exited non-zero"
+echo "$REPUB_OUT" | grep -q '(0 pushed' || fail "republish was not a no-op:
+$REPUB_OUT"
+LSR2="$(git -C "$REPO" ls-remote origin 'refs/multiverso/*' | sort)"
+[ "$LSR1" = "$LSR2" ] || fail "the no-op republish changed the remote namespace:
+$LSR1
+vs
+$LSR2"
+# git ls-remote tail-matches its pattern from any slash boundary, so refs
+# whose NAMES merely contain the namespace path come back from a namespace
+# survey. Seed one branch and one tag of that shape: reconciliation and
+# retention must survey their own namespace only, never delete these.
+STRAY_BRANCH="refs/heads/$NS/wip"
+STRAY_TAG="refs/tags/release/$NS/v1"
+$GIT -C "$REPO" push -q origin "HEAD:$STRAY_BRANCH"
+$GIT -C "$REPO" push -q origin "HEAD:$STRAY_TAG"
+assert_strays() {
+  git -C "$REPO" ls-remote origin "$STRAY_BRANCH" | grep -q "$STRAY_BRANCH" \
+    || fail "$1 deleted the out-of-namespace branch $STRAY_BRANCH"
+  git -C "$REPO" ls-remote origin "$STRAY_TAG" | grep -q "$STRAY_TAG" \
+    || fail "$1 deleted the out-of-namespace tag $STRAY_TAG"
+}
+# nsRefs prints only the refs actually under refs/multiverso/ (the look-alike
+# refs above are what an unanchored survey would wrongly include).
+nsRefs() { git -C "$REPO" ls-remote origin 'refs/multiverso/*' | awk '$2 ~ /^refs\/multiverso\// {print $2}' | sort; }
+"$MVO" publish "$INTENT" --dir "$REPO" >/dev/null || fail "republish over look-alike refs exited non-zero"
+assert_strays "publish reconciliation"
+
+# --- 6c. include-rejected delta: only the loser's cand/<n> is new; prior
+# refs are untouched ---
+INCL_OUT="$("$MVO" publish "$INTENT" --include-rejected --dir "$REPO")" \
+  || fail "publish --include-rejected exited non-zero"
+echo "$INCL_OUT" | grep -q '(1 pushed' || fail "include-rejected was not a 1-ref delta:
+$INCL_OUT"
+git -C "$REPO" ls-remote origin "$NS/cand/2" | grep -q "$NS/cand/2" \
+  || fail "loser cand/2 missing after --include-rejected"
+assert_strays "publish --include-rejected"
+
+# --- 6d. fetch-race roundtrip (second machine): a plain clone + the
+# workspace public key verifies the whole closure offline. Landing trunk on
+# the remote is the operator's ordinary git push — never mvo's ---
+$GIT -C "$REPO" push -q origin main
+CONSUMER="$WORK/consumer"
+git clone -q "$ORIGIN" "$CONSUMER"
+PUBKEY="$REPO/.multiverso/keys/local.pub"
+FR_OUT="$("$MVO" fetch-race "$SHORT" --dir "$CONSUMER" --key "$PUBKEY")" \
+  || fail "fetch-race exited non-zero:
+$FR_OUT"
+echo "$FR_OUT" | grep -q 'OK: race verified' || fail "fetch-race did not verify:
+$FR_OUT"
+echo "$FR_OUT" | grep -q "winner:    $WORLD_A" || fail "fetch-race winner is not patch-a's world:
+$FR_OUT"
+echo "$FR_OUT" | grep -q 'admitted:  yes' || fail "fetch-race does not report the admission:
+$FR_OUT"
+echo "$FR_OUT" | grep -q 'freshness: STALE' || fail "fetch-race freshness is not STALE (clone head is the admission commit):
+$FR_OUT"
+
+# --- 6e. tamper detection: rewrite one published receipt blob in the bare
+# remote via git plumbing; fetch-race must fail naming the exact path; a
+# republish heals (lease against the observed tampered tip) ---
+EVREF="$NS/evidence"
+OLD_TIP="$(git -C "$ORIGIN" rev-parse "$EVREF")"
+RPATH="$(git -C "$ORIGIN" ls-tree -r --name-only "$EVREF" | grep '^receipts/' | head -1)"
+[ -n "$RPATH" ] || fail "no receipts/ file in the published evidence tree"
+BLOB="$(git -C "$ORIGIN" rev-parse "$EVREF:$RPATH")"
+git -C "$ORIGIN" cat-file blob "$BLOB" > "$WORK/receipt.blob"
+python3 -c '
+import sys
+path = sys.argv[1]
+b = bytearray(open(path, "rb").read())
+i = b.index(b"\"payload\":\"") + len(b"\"payload\":\"")
+b[i] = ord("B") if b[i] == ord("A") else ord("A")
+open(path, "wb").write(bytes(b))
+' "$WORK/receipt.blob"
+NEW_BLOB="$(git -C "$ORIGIN" hash-object -w "$WORK/receipt.blob")"
+REC_TREE="$(git -C "$ORIGIN" rev-parse "$EVREF:receipts")"
+ROOT_TREE="$(git -C "$ORIGIN" rev-parse "$EVREF^{tree}")"
+NEW_REC_TREE="$(git -C "$ORIGIN" ls-tree "$REC_TREE" | sed "s/$BLOB/$NEW_BLOB/" | git -C "$ORIGIN" mktree)"
+NEW_ROOT="$(git -C "$ORIGIN" ls-tree "$ROOT_TREE" | sed "s/$REC_TREE/$NEW_REC_TREE/" | git -C "$ORIGIN" mktree)"
+NEW_TIP="$($GIT -C "$ORIGIN" commit-tree "$NEW_ROOT" -p "$(git -C "$ORIGIN" rev-parse "$EVREF^")" -m tampered)"
+git -C "$ORIGIN" update-ref "$EVREF" "$NEW_TIP" "$OLD_TIP"
+if TAMPER_OUT="$("$MVO" fetch-race "$SHORT" --dir "$CONSUMER" --key "$PUBKEY" 2>&1)"; then
+  fail "fetch-race verified a tampered receipt:
+$TAMPER_OUT"
+fi
+echo "$TAMPER_OUT" | grep -q 'receipts/mv0_' || fail "tamper failure does not name a receipts path:
+$TAMPER_OUT"
+echo "$TAMPER_OUT" | grep -qF "$RPATH" || fail "tamper failure does not name $RPATH:
+$TAMPER_OUT"
+"$MVO" publish "$INTENT" --include-rejected --dir "$REPO" >/dev/null \
+  || fail "healing publish exited non-zero"
+"$MVO" fetch-race "$SHORT" --dir "$CONSUMER" --key "$PUBKEY" >/dev/null \
+  || fail "fetch-race still fails after the healing publish"
+assert_strays "the healing publish"
+
+# --- 6f. prune per policy: defaults keep the admitted winner + evidence;
+# --keep-admitted=false wipes the namespace; CAS and ledger stay untouched ---
+CAS_COUNT_BEFORE="$(find "$REPO/.multiverso/cas" -type f | wc -l | tr -d ' ')"
+"$MVO" prune "$INTENT" --remote origin --dir "$REPO" || fail "prune (defaults) exited non-zero"
+LSR3="$(nsRefs)"
+[ "$LSR3" = "$NS/cand/1
+$NS/evidence" ] || fail "prune (defaults) did not keep exactly winner + evidence:
+$LSR3"
+assert_strays "prune (defaults)"
+"$MVO" fetch-race "$SHORT" --dir "$CONSUMER" --key "$PUBKEY" >/dev/null \
+  || fail "fetch-race fails after the retention prune"
+"$MVO" prune "$INTENT" --remote origin --keep-admitted=false --dir "$REPO" \
+  || fail "prune --keep-admitted=false exited non-zero"
+[ -z "$(nsRefs)" ] || fail "remote namespace survived --keep-admitted=false"
+[ -z "$(git -C "$REPO" for-each-ref 'refs/multiverso')" ] \
+  || fail "local namespace survived --keep-admitted=false"
+assert_strays "prune --keep-admitted=false"
+PRUNE_EVENTS="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT count(*) FROM events WHERE type='prune.executed';")"
+[ "$PRUNE_EVENTS" -ge 2 ] || fail "prune.executed events = $PRUNE_EVENTS, want >= 2"
+CAS_COUNT_AFTER="$(find "$REPO/.multiverso/cas" -type f | wc -l | tr -d ' ')"
+[ "$CAS_COUNT_BEFORE" = "$CAS_COUNT_AFTER" ] \
+  || fail "prune changed the CAS file count ($CAS_COUNT_BEFORE -> $CAS_COUNT_AFTER)"
+
+# --- 6g. drift marker: the admission commit moved trunk past the intent
+# base, so worlds and explain both render STALE/advanced ---
+"$MVO" worlds "$INTENT" --dir "$REPO" | grep -q 'freshness: STALE (main advanced past base' \
+  || fail "mvo worlds does not show the STALE/advanced drift line"
+"$MVO" explain "$INTENT" --dir "$REPO" | grep -q 'freshness: STALE (main advanced past base' \
+  || fail "mvo explain does not show the STALE/advanced drift line"
+
 # --- 7. second machine: audit replays every race — script, fake-agent,
-# the parallel race, and (when it ran) the T1 race — AND the admission ---
+# the parallel race, and (when it ran) the T1 race — AND the admission;
+# the chain now also carries publish/prune events (observational) ---
 COPY="$WORK/toyrepo-copy"
 cp -R "$REPO" "$COPY"
 MIN_DECISIONS=4

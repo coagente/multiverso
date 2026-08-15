@@ -20,6 +20,9 @@ const (
 	evAdmissionFinished   = "admission.finished"
 	evAttestationRecorded = "attestation.recorded"
 	evKeyGenerated        = "key.generated"
+	evPublishStarted      = "publish.started"
+	evPublishFinished     = "publish.finished"
+	evPruneExecuted       = "prune.executed"
 )
 
 type worldRec struct {
@@ -58,6 +61,12 @@ type admissionFinishRec struct {
 	Commit string
 }
 
+type publishFinishRec struct {
+	Seq    int64
+	TS     string
+	Intent string
+}
+
 // ledgerState is the typed view of one full ledger scan. Payload digests
 // double as object digests because payloads are the canonical object bytes.
 type ledgerState struct {
@@ -69,6 +78,7 @@ type ledgerState struct {
 	RaceStarts        []raceStartRec           // seq order
 	AdmissionStarts   []admissionStartRec      // seq order
 	AdmissionFinishes []admissionFinishRec     // seq order
+	PublishFinishes   []publishFinishRec       // seq order (prune's --older-than input)
 }
 
 func loadState(led *ledger.Ledger) (*ledgerState, error) {
@@ -131,10 +141,20 @@ func loadState(led *ledger.Ledger) (*ledgerState, error) {
 			st.AdmissionFinishes = append(st.AdmissionFinishes, admissionFinishRec{
 				Seq: e.Seq, Intent: body.Intent, Result: body.Result, Commit: body.Commit,
 			})
+		case evPublishFinished:
+			var body struct {
+				Intent string `json:"intent"`
+			}
+			if err := json.Unmarshal(e.Payload, &body); err != nil {
+				return fmt.Errorf("seq %d: decode publish.finished: %w", e.Seq, err)
+			}
+			st.PublishFinishes = append(st.PublishFinishes, publishFinishRec{
+				Seq: e.Seq, TS: e.TS, Intent: body.Intent,
+			})
 		}
 		// Other event types (race.finished, policy.created,
-		// attestation.recorded, key.generated) carry no state the CLI
-		// views need.
+		// attestation.recorded, key.generated, publish.started,
+		// prune.executed) carry no state the CLI views need.
 		return nil
 	})
 	if err != nil {

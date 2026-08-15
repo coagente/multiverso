@@ -149,8 +149,12 @@ func TestRaceFakeClaudeAndWorldsCostColumn(t *testing.T) {
 	if !strings.Contains(lines[0], "TIER") {
 		t.Fatalf("worlds header %q missing TIER column", lines[0])
 	}
+	// M1d: the table is followed by the trunk-drift freshness line.
+	if !strings.HasPrefix(lines[len(lines)-1], "freshness: ") {
+		t.Fatalf("worlds output does not end with the freshness line:\n%s", worlds)
+	}
 	agentRows := 0
-	for _, line := range lines[1:] {
+	for _, line := range lines[1 : len(lines)-1] {
 		fields := strings.Fields(line)
 		if len(fields) != 6 {
 			t.Fatalf("worlds row %q has %d columns, want 6", line, len(fields))

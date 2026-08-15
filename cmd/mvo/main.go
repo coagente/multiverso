@@ -50,6 +50,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdAdmit(rest, stdout, stderr)
 	case "verify":
 		err = cmdVerify(rest, stdout, stderr)
+	case "publish":
+		err = cmdPublish(rest, stdout, stderr)
+	case "prune":
+		err = cmdPrune(rest, stdout, stderr)
+	case "fetch-race":
+		err = cmdFetchRace(rest, stdout, stderr)
 	case "audit":
 		err = cmdAudit(rest, stdout, stderr)
 	case "help", "-h", "--help":
@@ -95,6 +101,13 @@ commands:
   explain <intent-digest>           render the recorded decision and evidence
   admit <intent-digest>             land the SELECT winner on trunk with a signed attestation
   verify <commit> [--key PUB] [--json]  verify the admission attestation offline
+  publish <intent-digest> [--remote R] [--include-rejected]
+                                    publish candidates + signed evidence closure
+                                    under refs/multiverso/intent/<short>/
+  prune <intent-digest> [--remote R] [--older-than DUR] [--keep-admitted=BOOL]
+                                    apply the retention policy to published refs
+  fetch-race <intent-short> [--remote R] [--key PUB] [--json]
+                                    fetch and verify a published race offline
   audit [--json]                    verify hash chain and replay all decisions
 
 every command accepts --dir <repo> (default ".").

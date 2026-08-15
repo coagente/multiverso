@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/coagente/multiverso/internal/publish"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -62,5 +63,9 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 		label = "          "
 	}
 	fmt.Fprintf(stdout, "rationale: %s\n", dec.Rationale)
+	// Trunk drift is a display concept, computed at render time — never a
+	// ledger mutation (M1d decision 16).
+	status, detail := publish.TrunkDrift(*dir, intent.Base.Commit)
+	fmt.Fprintf(stdout, "freshness: %s (%s)\n", status, detail)
 	return nil
 }
