@@ -129,7 +129,16 @@ func cmdAudit(args []string, stdout, stderr io.Writer) error {
 		}
 	} else if report.ReplayIdentical {
 		// The OK line appears iff the replay is identical (M0 CLI contract).
-		fmt.Fprintf(stdout, "OK: %d events, %d decisions replayed\n", report.Events, report.Decisions)
+		// Zero decisions is a vacuous pass — nothing was verified because
+		// there was nothing to verify — and it must not look like the real
+		// thing. `audit` is the obvious verb to wire into a required check,
+		// and as shipped it exits 0 on any workspace with no races.
+		if report.Decisions == 0 {
+			fmt.Fprintf(stdout, "OK: %d events, 0 decisions replayed (no races in this workspace — nothing was verified)\n",
+				report.Events)
+		} else {
+			fmt.Fprintf(stdout, "OK: %d events, %d decisions replayed\n", report.Events, report.Decisions)
+		}
 	} else {
 		for _, m := range report.Mismatches {
 			fmt.Fprintf(stdout, "DIVERGED: seq %d decision %s: %s\n", m.Seq, m.Decision, m.Detail)

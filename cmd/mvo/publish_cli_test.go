@@ -142,10 +142,16 @@ func TestPublishPruneFetchRaceCLI(t *testing.T) {
 	}
 	// Human output too.
 	human := mustMvo(t, "fetch-race", short, "--dir", consumer, "--key", key)
-	if !strings.Contains(human, "OK: race verified (") ||
+	if !strings.Contains(human, "OK: race integrity verified (") ||
 		!strings.Contains(human, "admitted:  yes") ||
 		!strings.Contains(human, "winner:    mv0:") {
 		t.Errorf("fetch-race human output:\n%s", human)
+	}
+	// The verb proves integrity, not correctness, and must keep saying so:
+	// this line was printed verbatim over a race whose winner forged its
+	// own JUnit report, and "verified" was read as "this change is good".
+	if !strings.Contains(human, "correctness: NOT asserted") {
+		t.Errorf("fetch-race output does not disclaim correctness:\n%s", human)
 	}
 
 	// Prune (defaults, admitted): nothing deletable — winner + evidence

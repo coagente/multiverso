@@ -204,7 +204,17 @@ func TestT1WorldLifecycleDocker(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
 	}
-	if _, err := dockerInspect(t, t1.cid, "{{.State.Status}}"); err == nil {
-		t.Error("container still inspectable after Close")
+	// `docker rm` returns before the daemon has finished reaping, so poll:
+	// asserting immediately makes this test flaky, not strict.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := dockerInspect(t, t1.cid, "{{.State.Status}}"); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Error("container still inspectable 10s after Close")
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

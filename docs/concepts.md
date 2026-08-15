@@ -155,6 +155,44 @@ The generic `command` oracle is the escape hatch for non-Python repos: any argv,
 
 O2 (property/metamorphic) and O3 (mutation) are M2. The ladder's shape — spend the next unit of compute where it buys the most decision quality — is the research question this project exists to answer, and it is **not** answered yet; M1's ladder is fixed, not adaptive.
 
+### What the gate ladder catches, and what it does not
+
+"Did it pass, or did it delete the tests?" is the question above, and the ladder answers exactly that one. **Test deletion is one laundering vector among several, and it is the only one M1 catches.** Every row below was run against the default policy on the shipped `testdata/toyrepo` fixture.
+
+| Vector | Caught? | What the default policy sees |
+|---|---|---|
+| **Delete tests** (remove functions, or the whole test file) | **YES** | `collected_delta` drops, `collected-not-below` fails before the suite is ever run — or `collected_total=0` (pytest exit 5) fails `collect-nonempty` |
+| **`@pytest.mark.skip` the failing tests** | **no** | Skipped tests are still *collected*: `collected_delta=+0`, suite exits 0. Recorded as `tests_passed=6, tests_skipped=2` — and `status-pass` passes |
+| **Weaken the assertions** (`assert x == 500` → `assert x >= 0`) | **no** | 8 collected, suite exits 0, `PASS` |
+| **Rewrite assertions to match the candidate's own wrong output** | **no** | Indistinguishable from a fix by any metric the ladder reads: `tests_passed=8`, `delta=+0`, `PASS`. In the run below this candidate *won the race* |
+| **A `conftest.py` that overrides the process exit code** | **no** | `status` comes from the **exit code**, not from the report: the receipt records `tests_failed=2` and `status=pass` in the same breath |
+| **A `conftest.py` that writes the JUnit artifact the oracle reads** | **no** | Every metric is fabricated. `tests_passed=8, tests_failed=0` with the bug untouched |
+
+Four candidates — one honest fix and three of the cheats above — raced under the stock default policy:
+
+```console
+  RANK  WORLD          ORD  collect-nonempty@collect  collected-not-below@collect  status-pass@suite  RESULT
+  1     mv0:478f4a34…  3    pass (total=8)            pass (delta=+0)              pass               PASS
+  2     mv0:a4a47e05…  1    pass (total=8)            pass (delta=+0)              pass               PASS
+  3     mv0:5b7ad5d3…  2    pass (total=8)            pass (delta=+0)              pass               PASS
+  4     mv0:9040b45c…  4    pass (total=8)            pass (delta=+0)              pass               PASS
+```
+
+Rank 1 — the winner — is the candidate that rewrote the assertions to match the bug. Rank 3 is the skip. Rank 4 is the exit-code override, whose own receipt reads `tests_failed=2, status=pass`.
+
+**The structural reason is worth stating plainly: pytest-suite metrics are parsed from an artifact written inside the candidate's own writable tree.** mvo scrubs `.mvo-oracle/` host-side before each run, so a *pre-planted* report is never read — but a candidate that runs code at all can write that file while the suite runs. A candidate that can execute can author its own receipt numbers.
+
+What that does and does not undermine: the *evidence chain* is sound. The receipt honestly records what the oracle observed, it is bound to the exact tree, it is signed, and it replays. The claim it does not support is that the numbers describe reality when the candidate is adversarial. Multiverso's answer to an untrusted generator today is **isolation and ordering**, not an untamperable oracle.
+
+What closes these:
+
+- **A `no-failed-tests` gate closes the exit-code override today** — it reads `tests_failed` from the JUnit report rather than the exit code, so the two disagree loudly. It is one line in a policy file; [Author your own policy](quickstart.md#author-your-own-policy) builds it. It does **not** close a forged report.
+- **Skips**: no gate in M1's closed vocabulary reads `tests_skipped`. A `skipped-not-above` gate is an M2 vocabulary addition.
+- **Weakened and rewritten assertions**: not detectable from test outcomes at all — this is what O3 mutation testing (M2) is for. A suite that cannot kill mutants is a suite that stopped asserting.
+- **A forged report**: needs the oracle to run outside the candidate's write surface, or to sign its output. Neither ships in M1; T1 containers isolate the *host*, not the report.
+
+Until then, the honest summary is: **the ladder raises the cost of laundering and records exactly what was measured. It is not an adversarial oracle, and a green table is not proof the candidate is honest.**
+
 > Why: the MVP toolchain and its verified tool versions, plus adaptive scheduling as the open problem — [ch. 19](../research/19-mvp-oracle-toolchain.md), [ch. 3](../research/03-adaptive-verification-scheduling.md), [ch. 8](../research/08-oracles-verification.md).
 
 ## Decision

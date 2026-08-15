@@ -91,9 +91,38 @@ The two candidates in `patches/` are what an agent might plausibly produce:
 ```console
 $ mvo init --dir "$DEMO"
 initialized /tmp/mvo-demo/.multiverso (default policy mv0:c1f0b72f24aec3968626c782b5f0cc540124f35131cebaa6f3de7ff3b2a60487)
+signing key: /tmp/mvo-demo/.multiverso/keys/local.key (PRIVATE, unencrypted — never commit or copy it)
+git ignore:  /tmp/mvo-demo/.gitignore (rule already present; nothing written)
 ```
 
-That created five things, and added `.multiverso/` to the repo's `.gitignore` (the shipped fixture already had the line, so nothing changed there):
+**Read those last two lines.** `local.key` is an unencrypted ed25519 private key, and it is the trust anchor for every attestation this workspace will ever produce: anyone holding it can mint a `mvo verify` that passes. It never needs to leave the machine, and nothing in mvo ever copies it.
+
+**`init` requires a git worktree** and refuses anything else, creating nothing:
+
+```console
+$ mvo init --dir /tmp/not-a-repo
+mvo: init: /tmp/not-a-repo is not a git repository (or does not exist); mvo requires a git worktree — run `git init` there first
+$ echo $?
+1
+```
+
+**Where the ignore rule goes.** `init` makes git ignore `.multiverso/`, and it writes that rule to **`.git/info/exclude`**, not to the tracked `.gitignore`:
+
+```console
+$ mvo init --dir "$FRESH"
+…
+git ignore:  /tmp/fresh/.git/info/exclude (untracked; survives `git reset --hard`)
+
+$ git -C "$FRESH" status --short      # nothing: init leaves the tree CLEAN
+$ git -C "$FRESH" check-ignore -v .multiverso/keys/local.key
+.git/info/exclude:7:.multiverso/	.multiverso/keys/local.key
+```
+
+`.git/info/exclude` is untracked, so the rule survives `git reset --hard` and `git checkout -- .`, and `init` leaves your working tree clean. That matters more than it sounds: when `init` edited the tracked `.gitignore` instead, it dirtied the tree, `mvo admit` then warned that the tree lagged trunk, and the obvious remedy — `git reset --hard` — silently reverted mvo's own ignore line, after which the next `git add -A && git commit` swept `.multiverso/keys/local.key` into the repo. A `git push` would then have published the signing key.
+
+A repo that already lists `.multiverso/` in its committed `.gitignore` (like the shipped fixture) keeps that, and nothing is written anywhere. If `.git/info/exclude` cannot be written, `init` falls back to `.gitignore` and says so loudly on stderr, naming the private key path — commit that change immediately if you see it.
+
+That created five things:
 
 ```console
 $ find "$DEMO/.multiverso" -maxdepth 1 -mindepth 1 | sort
@@ -157,6 +186,22 @@ The intent captures `HEAD` as its base commit and tree, pins the workspace's def
 
 That digest is now a permanent statement of intent — the rules that will judge this work were fixed before any candidate existed.
 
+> **Keep the digest.** It is the handle for six verbs (`race`, `worlds`, `explain`, `admit`, `publish`, `prune`), and **there is no `mvo intent list` in M1**. Capturing it in a shell variable as above is the intended flow.
+>
+> If you lose one, it is recoverable: an object's digest is the SHA-256 of its canonical bytes, and the ledger stores exactly those bytes in the `intent.created` payload. So hashing the payload reproduces the digest —
+>
+> ```console
+> $ sqlite3 .multiverso/ledger.db "select payload from events where type='intent.created'" \
+>   | while read -r p; do
+>       printf '%s' "$p" | shasum -a 256 | awk '{printf "mv0:%s  ", $1}'
+>       printf '%s' "$p" | python3 -c 'import json,sys; print(json.load(sys.stdin)["spec"]["title"])'
+>     done
+> mv0:3b1a1d01854a20ac69c02c6989412c0aa4d05ba43fda28d23f670724e25fca85  fix mean()
+> mv0:5b7e245ed5d6765cb7e2167d999bb174e4f43643f009571fc62aa1f8b424cefd  unraced
+> ```
+>
+> That works because canonical JSON is byte-stable, which is the same property `mvo audit` relies on. It is still a workaround for a missing verb — save the digests.
+
 ### 5. `mvo race`
 
 The **script adapter** takes candidate patches from a directory instead of calling an agent. One patch, one world, sorted by filename. No API keys, no network, no money.
@@ -170,24 +215,40 @@ real	0m8.542s
 
 In those eight seconds mvo: measured the base tree's test count (the denominator for `collected_delta`), created two `git worktree` worlds at the base commit, applied one patch in each, captured the resulting diff and tree digest, ran `pytest --collect-only` and then the suite in each world, stored every raw artifact in CAS, and ran the decision function.
 
-Add `--parallel N` to run the worlds concurrently. Same patches in, same candidate wins — the decision inputs are digest-sorted before the pure function sees them, so concurrency cannot reorder them:
+Add `--parallel N` to run the worlds concurrently.
+
+**What is order-independent, and what is not.** The decision inputs are digest-sorted before the pure function sees them, so *shuffling the inputs cannot change the result*: concurrency cannot reorder them, and re-running `mvo audit` over the same recorded inputs reproduces the same decision bytes forever. That is a real guarantee, and it is the one the ledger rests on.
+
+**It does not make the winner stable across runs.** The default ranking's third key is `wall_ms_asc`, which reads *measured wall time*. Two candidates that tie on every hard gate and on `tests_passed` are separated by scheduling noise, so the winner can differ from run to run — same patches, same policy, same machine. In a scratch copy of the toy repo (`$TIE`, made exactly like `$DEMO` above), racing the two equally-correct `patches-tie` candidates ten times under the default policy, the winner changed twice:
 
 ```console
-$ P1="$(mvo intent new --dir "$DEMO" --title "serial")"
-$ P2="$(mvo intent new --dir "$DEMO" --title "parallel")"
-
-$ time mvo race "$P1" --dir "$DEMO" --agent script --patches "$DEMO/patches"
-SELECT mv0:3981db64… (decision mv0:ff3607ab…, 2 worlds)
-real	0m8.530s
-
-$ time mvo race "$P2" --dir "$DEMO" --agent script --patches "$DEMO/patches" --parallel 2
-SELECT mv0:68484c05… (decision mv0:7e06e089…, 2 worlds)
-real	0m4.590s
+$ for i in $(seq 1 10); do
+    I="$(mvo intent new --dir "$TIE" --title "run$i")"
+    mvo race "$I" --dir "$TIE" --agent script --patches "$TIE/patches-tie" >/dev/null
+    mvo explain "$I" --dir "$TIE" | awk '/^  1  /{print "winner ordinal " $3}'
+  done
+winner ordinal 2
+winner ordinal 1
+winner ordinal 2
+winner ordinal 2
+winner ordinal 2
+winner ordinal 1
+winner ordinal 2
+winner ordinal 2
+winner ordinal 2
+winner ordinal 2
 ```
 
-Both select `patch-a`'s world. The two winner digests differ because a world digest descends from its intent, and these are two different intents — the *decision* is the same one twice.
+Nothing is wrong there: the policy said "prefer the faster one", the candidates were equally correct, and the timings genuinely differed. But if you read `wall_ms_asc` as a tiebreak of last resort, you are trusting a coin flip.
 
-> This is an aside, and it is not free: it adds two intents and two races to `$DEMO`'s ledger, so if you run it, the counts in [§9](#9-mvo-audit) will be higher than the `25 events, 2 decisions` shown there. Skip it to keep the walkthrough's numbers.
+**If you need a stable answer, do not let a measured quantity be the last key.** Drop `wall_ms_asc` from your ranking and turn on `escalation.on_ranking_tie`, so a real tie is reported as a tie instead of resolved by noise — that is exactly what [When mvo refuses to decide](#when-mvo-refuses-to-decide) builds:
+
+```json
+{"escalation": {"on_ranking_tie": true},
+ "ranking": ["gate_pass", "tests_passed_desc", "coverage_desc"]}
+```
+
+`--parallel` itself is just a speed knob (`real 0m8.5s` → `0m4.6s` on the two-candidate race), and it changes no decision the sorted inputs would not have produced anyway.
 
 ### 6. `mvo worlds` and `mvo explain`
 
@@ -254,7 +315,17 @@ index f206bcb..a1dd77c 100644
 
 `--json` emits the machine-readable report (`multiverso.dev/explain-report/v0`) with the same content.
 
-> **Run `explain` before `admit`.** After an admission, `mvo explain` renders the newest decision for the intent, which is the ADMIT — one subject, no candidate table. The race decision is still in the ledger and still replayable, but this verb shows you the latest.
+> **Save `explain` before you `admit`.** `mvo explain` resolves an intent to its **latest** decision. After an admission that is the ADMIT — one subject, no candidate table, no gate rows for the rejected candidates — and **there is no `--decision` flag in M1** to ask for the earlier one. The race decision is still in the ledger and still replayable, but this verb will not show it to you again.
+>
+> This bites at exactly the wrong moment: the natural order of work is race → land the good patch → *then* write the PR comment explaining why the others lost, and by then the table you wanted is unreachable. Redirect it to a file first:
+>
+> ```bash
+> mvo explain "$INTENT" --dir "$DEMO" --json | tee explain.json
+> mvo explain "$INTENT" --dir "$DEMO" --diffs 3 | tee explain.txt
+> mvo admit "$INTENT" --dir "$DEMO"
+> ```
+>
+> Recovering it afterwards means reading the decision object out of CAS by hand (`.multiverso/cas/sha256/ab/cd…`, per [Workspace layout](#workspace-layout)) and re-deriving the table yourself. Saving two files first is much cheaper.
 
 ### 7. `mvo admit`
 
@@ -287,7 +358,27 @@ Ordinary in the strict sense: any git client, any forge, any tool reads this com
 
 `admit` updates the local branch ref by compare-and-swap. **Getting it to a remote is your ordinary `git push`** — mvo does not push trunk (see [Status](../README.md#status)).
 
-> If your working tree is dirty or you are not on the trunk branch, admission still lands the commit but cannot sync your worktree, and says so: `mvo: admit: working tree lags main (not clean or not on the trunk branch); commit <sha> landed`. Commit or stash first if you want a clean sync — note that `mvo init` modifies `.gitignore`, which is enough to make a fresh repo dirty.
+> **If your working tree is not clean, read this.** Admission still lands the commit — it exits 0 and the attestation is good — but it cannot fast-forward your worktree, so it prints, *after* the success block:
+>
+> ```console
+> note: trunk advanced to 9b0cccea358cdfc6d2d2aad1805cc01c6f199829 but your working tree was not clean, so it was not synced.
+> note: your index now contains a STAGED REVERSION of the change just admitted — `git status` will show it, and `git commit` would undo the admitted fix.
+> note: run `git reset --hard` to sync, or `git stash` first if you have work in progress.
+> ```
+>
+> That second line is the whole point, and it is not a sync inconvenience. Trunk now points at a commit containing the fix while your index still holds the old content, so git reports the admitted change as staged **in reverse**:
+>
+> ```console
+> $ git -C "$DEMO" status --short
+> M  stats.py
+> ?? notes.txt
+>
+> $ git -C "$DEMO" diff --cached HEAD
+> -    return sum(values) / len(values)
+> +    return sum(values) / (len(values) - 1)
+> ```
+>
+> A reflexive `git commit` there reships the exact bug that was just signed as fixed. **An untracked file alone is enough to trigger this** — no tracked file need be modified; the `?? notes.txt` above is what made the tree unclean.
 
 ### 8. `mvo verify`
 
@@ -303,7 +394,71 @@ OK: attestation verified (7 checks)
 
 The seven checks, in order, fail-fast: `bundle_digest` (the trailer names a bundle whose bytes hash to its own CAS key), `signature` (DSSE over canonical bytes), `statement` (in-toto shape), `subject` (the attested tree is this commit's tree and the attested parent is this commit's parent), `references` (every digest the predicate names exists in CAS and was recorded in the ledger, and the ADMIT and SELECT decisions agree with it), `freshness` (every attested gate receipt judged the admitted tree), `budget` (the predicate's consumed wall time equals the sum over the receipts).
 
-`--json` gives the same as a report; `--key PUB` verifies against someone else's public key instead of the workspace's.
+`--json` gives the same as a report.
+
+#### `--key` is the trust anchor, not a convenience
+
+By default `mvo verify` trusts `.multiverso/keys/local.pub` — **the workspace's own public key**. Inside the workspace that produced the attestation, that makes verification a *tautology*: it proves the bytes are internally consistent and signed by whoever holds this directory's key, which is the same party that made the claim.
+
+A clone that runs `mvo init`, mints its own key, races a backdoored candidate and admits it produces output **visually identical** to a genuine verification:
+
+```console
+$ mvo verify HEAD --dir /tmp/rogue-clone
+commit:      …
+attestation: sha256:…
+key:         mv0:093b32e1cdda801e1a2695a0d2996ee7b4990aa9bd4d4d72e3f2524e6e8cc79a
+OK: attestation verified (7 checks)
+```
+
+Only `--key` catches it, and then the error is unambiguous:
+
+```console
+$ mvo verify HEAD --dir /tmp/rogue-clone --key /path/to/trusted/local.pub
+mvo: verify: signature: signing: verify: no signature verified against key mv0:b2b8201560…
+  (skipped keyids: mv0:093b32e1cd…)
+$ echo $?
+1
+```
+
+**So: pass `--key` with a public key you obtained out of band whenever the answer matters.** The default is for convenience inside your own workspace, not for judging someone else's work.
+
+#### The reviewer workflow
+
+A reviewer needs no workspace, no ledger and no trust in your machine — a clone and a public key are enough:
+
+```bash
+git clone --bare "$REMOTE" review.git        # or an ordinary clone
+mvo fetch-race "$SHORT" --dir review --key /path/to/author.pub
+```
+
+`mvo publish` puts the closure under `refs/multiverso/intent/<short>/`, and the `evidence` ref's tree is plain files you can read with `git ls-tree` if you would rather not trust the verb either:
+
+```console
+$ git -C "$ORIGIN" ls-tree -r --name-only refs/multiverso/intent/<short>/evidence
+attestation/sha256_1174b22f….dsse.json
+decisions/mv0_079ba7c6….dsse.json
+decisions/mv0_2817978c….dsse.json
+intent/mv0_86d5e41e….json
+policy/mv0_c1f0b72f….json
+receipts/mv0_0aecadf9….dsse.json
+…
+worlds/mv0_3a355409….json
+```
+
+#### Not yet supported
+
+Naming these is cheaper than letting a security reviewer discover them:
+
+| | Status in M1 |
+|---|---|
+| **Key rotation** | **None.** There is no re-signing path and no way to mark a key superseded. A rotated key orphans every attestation it signed. |
+| **Revocation** | **None.** No CRL, no expiry, no revocation list. A leaked key stays valid forever. |
+| **A trust store** | **None.** `--key` takes one PEM file per invocation. There is no keyring, no `known-signers` file, no TOFU, and no way to say "any of these three". |
+| **`--signing-key`** | **Does not exist.** Signing always uses `.multiverso/keys/local.key`. |
+| **CI key supply** | **Unsolved.** There is no documented way to give CI a signing key that is not "copy the private key onto the runner". |
+| **Keyless / Sigstore** | Not in M1 — see [Status](../README.md#status). |
+
+If a leaked key is your threat model, M1's answer today is: keep the key on one machine, publish the closure, and verify with `--key` everywhere else.
 
 ### 9. `mvo audit`
 
@@ -317,7 +472,42 @@ $ mvo audit --dir "$DEMO" --json
 {"schema":"multiverso.dev/audit-report/v0","events":25,"decisions":2,"admissions":1,"chain_ok":true,"replay_identical":true,"mismatches":[]}
 ```
 
-Two independent properties: `chain_ok` verifies the hash chain over the append-only event log (nothing was inserted, removed or edited), and `replay_identical` re-runs the shipped decision functions over the recorded inputs and compares type, subject, evidence and rationale **byte for byte** against what was recorded. A divergence prints the mismatch and exits 1.
+Two independent properties:
+
+- **`chain_ok`** recomputes every payload digest and chain hash over the event log. **Insertions and edits are detected** — any edited row breaks its own hash and every hash after it. **Tail truncation is detected only against a naive `delete`**: the check is that the last seq equals SQLite's `AUTOINCREMENT` high-water mark, and that mark lives in the ordinary, writable `sqlite_sequence` table. An operator with write access to the DB who deletes the tail *and* resets the mark gets a clean `OK`. An unwitnessed local chain therefore proves the log was not corrupted; it cannot prove it is *complete* against someone who can write to the file. Completeness needs an external witness — publishing the closure to a remote (`mvo publish`) is M1's only such anchor.
+- **`replay_identical`** re-runs the shipped decision functions over the recorded inputs and compares type, subject, evidence and rationale **byte for byte** against what was recorded. A divergence prints the mismatch and exits 1.
+
+#### What `mvo audit` actually checks
+
+`audit` reads the **ledger**. It replays decisions from ledger payloads and loads each decision's pinned policy from CAS. **It does not sweep `cas/` for integrity** — it never re-hashes artifact blobs, so a deleted or edited patch, transcript, JUnit report or attestation bundle is not detected:
+
+```console
+$ printf 'TOTAL GARBAGE NOT EVEN JSON' > .multiverso/cas/sha256/11/74b22f…   # the attestation bundle itself
+$ mvo audit --dir "$DEMO"
+OK: 25 events, 2 decisions replayed
+$ echo $?
+0
+
+$ rm .multiverso/cas/sha256/11/74b22f…                                        # now delete it outright
+$ mvo audit --dir "$DEMO"
+OK: 25 events, 2 decisions replayed
+$ echo $?
+0
+```
+
+Use **`mvo verify <commit>`** for the blobs an attestation actually depends on — it catches both cases at the first check:
+
+```console
+$ mvo verify HEAD --dir "$DEMO"
+mvo: verify: bundle_digest: cas: get sha256:1174b22f…: no such file or directory
+$ echo $?
+1
+```
+
+Two further limits worth knowing before you wire `audit` into anything:
+
+- **`audit` verifies THIS WORKSPACE's ledger. It is not an admission check.** It takes no commit argument, and it exits 0 on an empty workspace — a fresh `mvo init` with zero races prints `OK: 2 events, 0 decisions replayed (no races in this workspace — nothing was verified)` and returns 0. **Never wire it into a merge queue as the check that a commit is attested**: it would pass vacuously for anyone who deletes `.multiverso/` or never creates it, enforcing nothing while looking like it enforces everything. The verb that answers "is *this commit* attested" is `mvo verify <commit>`.
+- `mvo audit <commit>` and an `--expect-admissions` flag would each fix a real gap here. Neither exists in M1, and both are out of scope for this pass — see [Status](../README.md#status).
 
 ### 10. Thirty seconds of paranoia
 
@@ -476,6 +666,24 @@ PY
 ```
 
 That renames it to `strict`, keeps the three default gates and appends two — a `no-failed-tests` gate and a coverage floor of 40% (thresholds are integer basis points — no floats anywhere in canonical JSON) — and ranks by coverage before test count.
+
+That `no-failed-tests` gate is worth more than it looks. The default `status-pass` gate reads the suite's **process exit code**; `no-failed-tests` reads `tests_failed` out of the JUnit report. A candidate that ships a `conftest.py` forcing `exitstatus = 0` passes the first and fails the second:
+
+```console
+  RANK  WORLD          ORD  …  status-pass@suite  no-failed-tests@suite                  RESULT
+  4     mv0:95576d0e…  2   …  pass               FAIL (tests_failed=2 tests_errored=0)  FAIL
+```
+
+It does **not** catch a candidate that forges the JUnit report itself, or one that skips tests rather than failing them — see [what the ladder catches](concepts.md#what-the-gate-ladder-catches-and-what-it-does-not).
+
+**The escalation block is the other knob you will reach for**, and it is a sibling of `hard_gates`, not a gate:
+
+```python
+p["escalation"]["on_ranking_tie"] = True          # a real tie is reported, not resolved by noise
+p["ranking"] = ["gate_pass", "tests_passed_desc", "coverage_desc"]   # note: no wall_ms_asc
+```
+
+Dropping `wall_ms_asc` is the point: while a *measured* quantity is in the ranking, two equally-correct candidates are separated by [scheduling noise rather than by evidence](#5-mvo-race), and `on_ranking_tie` never fires because the times are never exactly equal. The full four-key escalation vocabulary is `min_candidates_passing`, `on_ranking_tie`, `require_evidence`, `on_all_worlds_failed_machinery`; `testdata/toyrepo/policies/tie-escalate.json` in this clone is a complete worked file.
 
 Validate before installing. Validation reports **every** problem at once, located by JSON path, with the closed vocabulary printed:
 
@@ -887,10 +1095,14 @@ freshness: STALE (main advanced past base 4bd0d29c3feb)
 ORDINAL  WORLD          OUTCOME    GATE               SIGNED  REF
 1        mv0:18ba9349…  COMPLETED  pass               5       cand/1
 -        mv0:ad21cf57…  COMPLETED  status-pass@suite  2       -
-OK: race verified (16 items, 2 refs)
+OK: race integrity verified (16 items, 2 refs)
+    integrity = content addresses, signatures against the key you passed, and decision replay.
+    correctness: NOT asserted. Read the gate table above and `mvo explain` for what the oracles measured.
 ```
 
 Sixteen items authenticated: content addresses recomputed, signatures checked against the one key you passed, the cross-reference graph closed, candidate commits pinned to signed-cited world trees, and **every decision replayed through the shipped decision function**. A wrong-winner decision signed with the right key still fails. Failures are collected rather than fail-fast, each printed as `mvo: fetch-race: <path>: <detail>`.
+
+**Read the second and third lines literally.** "Verified" here means the bytes are self-consistent and signed by the key you supplied — it is a statement about *integrity*, not about whether the winning candidate is any good. This exact `OK` line prints over a race whose winner [forged its own JUnit report](concepts.md#what-the-gate-ladder-catches-and-what-it-does-not). The gate table above it is where the evidence is.
 
 `freshness: STALE` is honest and expected here: the admitted commit moved `main` past the intent's base.
 
@@ -902,6 +1114,71 @@ pruned refs/multiverso/intent/223b31124150: 0 local, 0 remote deleted, 2 kept
 ```
 
 Losers are always prunable; an admitted intent keeps its winner and evidence unless you pass `--keep-admitted=false`. `--remote` has no default — deleting remote refs is always explicit. `--older-than DUR` refuses to prune anything published more recently. CAS and the ledger are never touched.
+
+## Protected trunks and merge queues
+
+Read this **before** you plan an integration, not after. It is the constraint most likely to make Multiverso a poor fit for your pipeline, and it follows from one fact:
+
+> **An attestation survives a fast-forward of the exact admitted commit, and nothing else.**
+
+The attestation's subject is the landing *tree*, and the trailer lives in the commit message. Any operation that rewrites either — which is what a merge queue does for a living — breaks verification. Verified, all three:
+
+```console
+# 1. Fast-forward of the exact admitted commit — the supported topology.
+$ git checkout -q integration && git merge --ff-only main
+$ mvo verify HEAD
+OK: attestation verified (7 checks)
+
+# 2. `git rebase main` — what a merge queue does to keep history linear.
+$ git rebase -q main && mvo verify HEAD
+mvo: verify: subject: subject tree git:8f53a125ef5c1ee11778e0c126dac3594018e79a, commit tree git:83c6473dc4d4c89f3235fb46d73bdc6e979b918e
+$ echo $?
+1
+
+# 3. Squash merge — GitHub's "Squash and merge", and most queues' default.
+$ git merge --squash feat && git commit -qm "squashed: fix mean()"
+$ mvo verify HEAD
+mvo: verify: bundle_digest: commit cc64788e49045843c199fc20b3993244ad20e6e3 has no Multiverso-Attestation trailer
+$ echo $?
+1
+```
+
+Case 2 fails because a rebase re-parents the commit and produces a different tree; case 3 because a squash mints a brand-new commit whose message never had the trailer. Neither is recoverable after the fact — you would have to re-run `mvo admit` against the new base.
+
+### The two supported topologies
+
+1. **Fast-forward-only trunk.** Protect `main` with linear history and *no* squash/rebase on merge, and let `mvo admit` produce the commit that gets fast-forwarded. This is the only configuration where the trailer on trunk verifies.
+2. **An unprotected integration branch**, with `mvo admit` landing there and a bot identity holding ruleset bypass to move `main`. `mvo admit` updates a **local** branch ref by compare-and-swap; it does not push, so the identity that pushes needs whatever bypass your protection rules require.
+
+If your queue rebases or squashes — GitHub merge queue, Bors, most `merge_group` setups — **Multiverso's attestation does not survive it today**, and no flag changes that in M1. This is a real gap, itemized in [Status](../README.md#status) under FI-1.
+
+### CI snippet
+
+Verify the attestation on the commit that actually landed, in a job that runs *after* the merge:
+
+```yaml
+# .github/workflows/verify-attestation.yml
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # verify needs the parent commit
+      - name: Fetch the evidence closure
+        run: git fetch origin '+refs/multiverso/*:refs/multiverso/*'
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.25'}
+      - run: go install github.com/coagente/multiverso/cmd/mvo@latest
+      - name: Verify
+        run: mvo verify "$GITHUB_SHA" --key .github/trusted-signer.pub
+```
+
+Two things that snippet does deliberately. It passes **`--key`** with a public key committed to the repo — without it, verification is [a tautology](#--key-is-the-trust-anchor-not-a-convenience) against whatever key the runner happens to find. And it verifies **`mvo verify <commit>`**, not `mvo audit`: `audit` checks a local workspace's ledger, takes no commit, and [exits 0 on an empty workspace](#what-mvo-audit-actually-checks), so it enforces nothing as a required check.
 
 ## Reference
 
@@ -916,8 +1193,9 @@ Losers are always prunable; an admitted intent keeps its winner and evidence unl
 | `mvo worlds <intent>` | the scoreboard |
 | `mvo explain <intent> [--json] [--diffs N]` | the full argument, derived at render time |
 | `mvo admit <intent>` | re-gate on the landing tree, land it, sign an attestation |
-| `mvo verify <commit> [--key PUB] [--json]` | seven offline checks |
-| `mvo audit [--json]` | hash chain + byte-exact replay of every decision |
+| `mvo verify <commit> [--key PUB] [--json]` | seven offline checks. **`--key` is the trust anchor** — without it the default key makes verification a tautology inside the workspace that produced the attestation |
+| `mvo audit [--json]` | hash chain + byte-exact replay of every decision **in this workspace's ledger**. Takes no commit, does **not** check `cas/`, and exits 0 on an empty workspace — [never a merge-queue check](#what-mvo-audit-actually-checks) |
+| `mvo version` | build revision of this binary |
 | `mvo publish <intent> [--remote R]` | push the signed closure to a remote namespace |
 | `mvo fetch-race <short> [--key PUB]` | verify a published race in any clone |
 | `mvo prune <intent> […]` | apply retention to published refs |
@@ -959,11 +1237,15 @@ Event types you will see in `ledger.db`: `policy.created`, `key.generated`, `int
 | `baseline: oracle "collect" … exit=5 collected_total=0` | default policy needs collectable pytest tests | use `--oracle-cmd`, or author a policy for your repo |
 | `--oracle-cmd is required with policy … (policy/v0)` | intent pinned a legacy v0 policy | pass `--oracle-cmd`, or pin a v1 policy |
 | `--oracle-cmd is not permitted with policy … (policy/v1)` | a v1 policy names its own oracles | drop the flag; edit the policy instead |
-| `--candidates N exceeds intent budget max_candidates=M` | race asked for more than the intent allows | raise `--budget-candidates` on a new intent |
+| `N candidates exceed intent budget max_candidates=M` | race asked for more than the intent allows; the default is **2**, so three patches trip it | budgets are pinned at creation: `mvo intent new --budget-candidates N` on a **new** intent |
+| `pre-flight probe did not complete: budget exhausted` | `--budget-wall-ms` is too small for the probe to run; says nothing about pytest | raise `--budget-wall-ms` on a new intent, or drop it |
+| `is not a git repository … mvo requires a git worktree` | `mvo init --dir` pointed outside a worktree (often a typo) | `git init` there, or fix the path — nothing was created |
 | `adapter claude-code: binary "claude" not found in PATH: …` | agent CLI missing (pre-flight; nothing was spawned) | install it, or use `--agent script` |
 | `exec T1: docker daemon unavailable` | Docker not running | start it, or drop `--exec T1` |
 | `includes invalid characters for a local volume name` | relative `--dir` under T1 | use an absolute path |
-| `working tree lags main (not clean …)` | dirty tree at admit time | the commit **did** land; `git status`, then `git reset --hard` if you want the sync |
+| `note: trunk advanced to <sha> but your working tree was not clean` | tree not clean at admit time — **an untracked file is enough** | the commit **did** land and exit was 0; your index holds a **staged reversion** of it, so `git reset --hard` (or `git stash` first), and do **not** reflexively `git commit` |
+| `ARTIFACT MISSING OR ALTERED IN CAS` from `explain --diffs` | the patch blob is gone or its bytes changed | the evidence store is damaged; `mvo verify <commit>` — this is not an empty patch |
+| a world with `OUTCOME CONFIG_ERROR` and no explanation | one label over several causes: an empty patch file, a patch that did not apply, a tracked `.multiverso/` | the World schema has no reason field in M1, but the adapter writes one to the world's captured **stderr** — read it [from CAS](#the-cage-is-recorded-so-it-is-auditable) via the `stderr` key on that world's `agent.finished` ledger event |
 | `admit: no SELECT decision for intent …` | the race ended in ESCALATE or REJECT | read `mvo explain`; there is nothing to admit |
 | `admit: intent already admitted (commit …)` | one admission per intent | create a new intent |
 | `verify: subject: subject tree …, commit tree …` | the commit's tree is not the attested one | that is the check working |
@@ -973,7 +1255,7 @@ Event types you will see in `ledger.db`: `policy.created`, `key.generated`, `int
 
 - **Do not point `--agent claude-code|codex` at anything you are not prepared to pay for.** There is no dry-run and no aggregate spend cap. Rehearse with `testdata/fakeagent/` on `PATH`.
 - **Do not treat a green race as a merge.** `mvo admit` re-gates on the landing tree, and that is the gate that counts.
-- **Do not hand-edit `ledger.db` or `cas/`.** `mvo audit` will catch it, which is the good outcome; the bad one is a workspace that no longer replays.
+- **Do not hand-edit `ledger.db` or `cas/`.** An edited ledger row is caught by `mvo audit`. An edited or deleted **CAS blob is not** — see [what `audit` actually checks](#what-mvo-audit-actually-checks). Use `mvo verify <commit>` for the blobs an attestation depends on.
 
 ## Next
 

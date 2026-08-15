@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -188,6 +189,113 @@ func TestInitRefusesReinit(t *testing.T) {
 	}
 }
 
+// TestInitIgnoresViaExcludeInAGitRepo is the regression test for the key
+// disclosure this rule exists to prevent. In a real worktree, Init must
+// write the ignore rule to the UNTRACKED .git/info/exclude and leave the
+// tracked .gitignore — and therefore the working tree — untouched.
+//
+// The bug it locks out: init dirtied .gitignore, `mvo admit` then warned
+// "working tree lags main", the documented remedy `git reset --hard`
+// reverted mvo's own line, and the next `git add -A && git commit` swept
+// .multiverso/keys/local.key — the unencrypted ed25519 private key that
+// signs every attestation in the workspace — into the repo's history.
+func TestInitIgnoresViaExcludeInAGitRepo(t *testing.T) {
+	root := t.TempDir()
+	gitInit(t, root)
+	gitignore := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(gitignore, []byte("__pycache__/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "-c", "user.name=t", "-c", "user.email=t@invalid",
+		"-c", "commit.gpgsign=false", "commit", "-q", "-m", "baseline")
+
+	ws := mustInit(t, root)
+
+	if ws.Ignore.Fallback {
+		t.Fatalf("fell back to the tracked .gitignore in a git repo: %s", ws.Ignore.Reason)
+	}
+	// Compared through EvalSymlinks: CommonDir resolves symlinks, and on
+	// macOS t.TempDir() hands back /var/... for a real /private/var/...
+	exclude := filepath.Join(resolve(t, root), ".git", "info", "exclude")
+	if resolve(t, ws.Ignore.Path) != exclude {
+		t.Errorf("ignore rule written to %q, want %q", ws.Ignore.Path, exclude)
+	}
+	if b, err := os.ReadFile(exclude); err != nil {
+		t.Fatalf("read exclude: %v", err)
+	} else if !strings.Contains(string(b), ignoreLine) {
+		t.Errorf("exclude does not carry %q:\n%s", ignoreLine, b)
+	}
+	// The tracked file must be byte-identical to what the user committed.
+	if b, err := os.ReadFile(gitignore); err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	} else if string(b) != "__pycache__/\n" {
+		t.Errorf(".gitignore was modified: %q", b)
+	}
+	// The working tree must be clean, so admit's fast-forward runs and no
+	// operator is ever told to `git reset --hard` to fix it.
+	if out := gitRun(t, root, "status", "--porcelain"); out != "" {
+		t.Errorf("init dirtied the working tree:\n%s", out)
+	}
+	// And the key must actually be ignored.
+	if out := gitRun(t, root, "check-ignore", ".multiverso/keys/local.key"); out == "" {
+		t.Error("git does not ignore .multiverso/keys/local.key")
+	}
+}
+
+// TestInitReusesAnExistingGitignoreRule keeps a repo that already ignores
+// the workspace in its tracked .gitignore working unchanged: the rule is
+// honoured where it is and nothing new is written anywhere.
+func TestInitReusesAnExistingGitignoreRule(t *testing.T) {
+	root := t.TempDir()
+	gitInit(t, root)
+	gitignore := filepath.Join(root, ".gitignore")
+	if err := os.WriteFile(gitignore, []byte("vendor/\n.multiverso/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws := mustInit(t, root)
+	if !ws.Ignore.Existed || ws.Ignore.Path != gitignore {
+		t.Errorf("Ignore = %+v, want the existing .gitignore honoured", ws.Ignore)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git", "info", "exclude")); err == nil {
+		if b, _ := os.ReadFile(filepath.Join(root, ".git", "info", "exclude")); strings.Contains(string(b), ignoreLine) {
+			t.Error("wrote a duplicate rule to exclude when .gitignore already had one")
+		}
+	}
+}
+
+// resolve canonicalizes a path for comparison, leaving it as-is when it
+// cannot be resolved (the file may not exist yet).
+func resolve(t *testing.T, path string) string {
+	t.Helper()
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
+	}
+	return path
+}
+
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	gitRun(t, dir, "init", "-q")
+}
+
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	// check-ignore exits 1 when the path is not ignored; the caller reads
+	// the empty output rather than failing here.
+	if err != nil && args[0] != "check-ignore" {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestInitGitignore covers the FALLBACK path: outside a git worktree there
+// is no .git/info/exclude to write, so the rule goes to .gitignore. The
+// `mvo init` CLI refuses this case outright; the library keeps working so
+// callers that manage their own repo layout are not broken.
 func TestInitGitignore(t *testing.T) {
 	tests := []struct {
 		name     string

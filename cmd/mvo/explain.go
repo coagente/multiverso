@@ -47,6 +47,12 @@ type explainDiff struct {
 	Bytes     int64  `json:"bytes"`
 	Truncated bool   `json:"truncated"`
 	Patch     string `json:"patch"`
+	// RecordedBytes is the World's own patch_bytes: what the store SHOULD
+	// hold. Damaged is set when the artifact is unreadable or its size
+	// disagrees with it, and Detail says which.
+	RecordedBytes int64  `json:"recorded_bytes"`
+	Damaged       bool   `json:"damaged,omitempty"`
+	Detail        string `json:"detail,omitempty"`
 }
 
 // explainReport is the derived CP-6 payload. NOTHING here is stored: every
@@ -252,7 +258,23 @@ func candidateDiffs(ws *workspace.Workspace, cands []race.CandidateTrace, n int)
 			var world object.World
 			if err := json.Unmarshal(b, &world); err == nil {
 				d.CASKey = world.Patch
-				if patch, err := ws.CAS.Get(world.Patch); err == nil {
+				d.RecordedBytes = world.PatchBytes
+				patch, err := ws.CAS.Get(world.Patch)
+				switch {
+				case err != nil:
+					// CAS.Get re-hashes, so it refuses to hand back the
+					// WRONG bytes — but swallowing that error rendered a
+					// damaged store as "0 bytes" and an empty diff, which
+					// is indistinguishable from a genuine do-nothing
+					// candidate. This is a reviewer's only view of what
+					// actually changed; it has to be able to tell those apart.
+					d.Damaged = true
+					d.Detail = err.Error()
+				case int64(len(patch)) != world.PatchBytes:
+					d.Damaged = true
+					d.Bytes = int64(len(patch))
+					d.Detail = fmt.Sprintf("recorded patch_bytes=%d, store has %d", world.PatchBytes, len(patch))
+				default:
 					d.Bytes = int64(len(patch))
 					if len(patch) > diffCap {
 						d.Truncated = true
@@ -285,6 +307,11 @@ func writeExplain(w io.Writer, rep explainReport) {
 		// "winner" would launder exactly the ambiguity the rule reported.
 		label := "winner:   "
 		if rep.Type == race.TypeEscalate {
+			// "leader:" alone is a quiet distinction to hang the whole
+			// meaning of the output on, and the leader is not the safer
+			// candidate — it is merely the first one the ranking reached.
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "ESCALATE — no candidate was selected. The ordering below is rank order, not a recommendation.")
 			label = "leader:   "
 		}
 		fmt.Fprintf(w, "%s %s\n", label, rep.Winner)
@@ -381,10 +408,25 @@ func writeExplain(w io.Writer, rep explainReport) {
 		label = "          "
 	}
 	fmt.Fprintf(w, "rationale: %s\n", rep.Rationale)
+	// The rationale is part of the signed, byte-replayed Decision object
+	// (audit compares it verbatim), so an ESCALATE keeps embedding the
+	// SELECT sentence it displaced — including the word "selected", on a
+	// decision whose entire point is that nothing was selected. Rewording
+	// the frozen sentence would break replay of every existing
+	// attestation; annotating it at render time does not.
+	if rep.Type == race.TypeEscalate && strings.Contains(rep.Rationale, "selected") {
+		fmt.Fprintln(w, "note:      the rationale above embeds the SELECT sentence this escalation displaced; the word \"selected\" in it does not mean a candidate was chosen.")
+	}
 	fmt.Fprintf(w, "freshness: %s (%s)\n", rep.Freshness, rep.FreshnessDetail)
 
 	for _, d := range rep.Diffs {
 		fmt.Fprintln(w, "")
+		if d.Damaged {
+			fmt.Fprintf(w, "patch (rank %d) %s  [%s] — ARTIFACT MISSING OR ALTERED IN CAS: %s\n",
+				d.Rank, d.World, d.CASKey, d.Detail)
+			fmt.Fprintln(w, "  Evidence store may be damaged; run `mvo verify <commit>`. This is NOT an empty patch.")
+			continue
+		}
 		fmt.Fprintf(w, "patch (rank %d) %s  [%s, %d bytes]\n", d.Rank, d.World, d.CASKey, d.Bytes)
 		fmt.Fprint(w, d.Patch)
 		if !strings.HasSuffix(d.Patch, "\n") && d.Patch != "" {

@@ -82,10 +82,12 @@ func newScenario(t *testing.T) *scenario {
 	gitCLI(t, repo, "commit", "-q", "-m", "baseline")
 
 	mustMvo(t, "init", "--dir", repo)
-	// Commit the .gitignore that init wrote so the working tree is clean
-	// and the admission fast-forward path runs.
-	gitCLI(t, repo, "add", "-A")
-	gitCLI(t, repo, "commit", "-q", "-m", "ignore workspace")
+	// No commit is needed to clean the tree here: init writes its ignore
+	// rule to the untracked .git/info/exclude, so the working tree is
+	// already clean and the admission fast-forward path runs. When init
+	// edited the tracked .gitignore instead, this test had to commit that
+	// change first — and a user who instead ran the documented `git reset
+	// --hard` reverted the rule and then committed their private key.
 
 	// The intent pins a synthesized command-oracle policy (M1e decision 18):
 	// this repo has no Python suite, so the gate is a command — named INSIDE

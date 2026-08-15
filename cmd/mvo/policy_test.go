@@ -33,9 +33,15 @@ func fixturePolicy(t *testing.T, repo, name string) (string, string) {
 	return dst, object.DigestBytes(b)
 }
 
+// initWorkspace makes a git worktree and initializes a workspace in it.
+// The `git init` is not decoration: `mvo init` refuses a directory git
+// does not recognise, because a workspace outside a worktree is a dead end
+// that used to surface one verb later as a raw `git rev-parse` failure —
+// after minting a signing keypair into it.
 func initWorkspace(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
+	gitCLI(t, repo, "init", "-q")
 	mustMvo(t, "init", "--dir", repo)
 	return repo
 }

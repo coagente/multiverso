@@ -73,6 +73,15 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
+	// The adapter name is validated BEFORE the flag-combination rules.
+	// Checked the other way round, `--agent gpt5 --patches DIR` reported
+	// "--patches applies only to --agent script" — blaming a flag the user
+	// spelled correctly for a typo in one they did not.
+	ad, err := agent.New(*agentName)
+	if err != nil {
+		return usagef("race: %v", err)
+	}
+
 	isScript := *agentName == "script"
 	if isScript {
 		for _, name := range agentOnlyFlags {
@@ -90,10 +99,6 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		if set["prompt"] && set["prompt-file"] {
 			return usagef("race: --prompt and --prompt-file are mutually exclusive")
 		}
-	}
-	ad, err := agent.New(*agentName)
-	if err != nil {
-		return usagef("race: %v", err)
 	}
 	var budgetUSDMicro int64
 	if *maxUSD != "" {
@@ -324,8 +329,8 @@ func agentCandidates(fv agentFlagValues, intent object.Intent) ([]race.Candidate
 		return nil, usagef("race: --candidates must be at least 1")
 	}
 	if n > intent.Budget.MaxCandidates {
-		return nil, usagef("race: --candidates %d exceeds intent budget max_candidates=%d (CP-2)",
-			n, intent.Budget.MaxCandidates)
+		return nil, usagef("race: --candidates %d exceeds intent budget max_candidates=%d (CP-2) — an intent's budget is pinned at creation, so raise it on a NEW intent with `mvo intent new --budget-candidates %d`",
+			n, intent.Budget.MaxCandidates, n)
 	}
 	task := fv.prompt
 	if fv.promptFile != "" {

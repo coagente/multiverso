@@ -50,6 +50,16 @@ type Result struct {
 	Commit         string   // admitted commit sha; "" unless ADMIT landed
 	StatementDig   string   // "mv0:…" of the canonical statement; "" unless landed
 	AttestationKey string   // CAS key of the DSSE bundle; "" unless landed
+	// WorktreeSynced reports whether the operator's working tree was
+	// fast-forwarded onto the admitted commit. False means trunk advanced
+	// underneath an unsynced tree, which leaves a STAGED REVERSION of the
+	// admitted change in the index — a fact only the CLI can phrase for a
+	// human, so it is reported here and rendered there rather than written
+	// to os.Stderr from library code.
+	WorktreeSynced bool
+	// SyncError is why an attempted fast-forward failed; "" when none was
+	// attempted or it succeeded.
+	SyncError string
 }
 
 // Run executes one admission: apply the SELECT winner's patch onto the
@@ -371,11 +381,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// and on the trunk branch.
 	if syncable {
 		if err := gitx.ResetHard(cfg.Repo); err != nil {
-			fmt.Fprintf(os.Stderr, "mvo: admit: working tree lags %s (reset failed: %v)\n", branch, err)
+			res.SyncError = err.Error()
+		} else {
+			res.WorktreeSynced = true
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "mvo: admit: working tree lags %s (not clean or not on the trunk branch); commit %s landed\n",
-			branch, commit)
 	}
 
 	if err := appendEvent(cfg.Ledger, "attestation.recorded", map[string]any{

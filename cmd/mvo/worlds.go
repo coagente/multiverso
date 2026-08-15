@@ -40,9 +40,19 @@ func cmdWorlds(args []string, stdout, stderr io.Writer) error {
 
 	gates, walls := gateColumn(ws, st, intentDig)
 
+	// A bare header row and exit 0 is indistinguishable, to a script, from
+	// a race whose worlds all vanished. Say which one this is.
+	worlds := st.worldsFor(intentDig, 0, 0)
+	if len(worlds) == 0 {
+		fmt.Fprintf(stdout, "no worlds recorded for intent %s; run `mvo race` first\n", intentDig)
+		status, detail := publish.TrunkDrift(*dir, intent.Base.Commit)
+		fmt.Fprintf(stdout, "freshness: %s (%s)\n", status, detail)
+		return nil
+	}
+
 	tw := tabwriter.NewWriter(stdout, 2, 8, 2, ' ', 0)
 	fmt.Fprintln(tw, "WORLD\tOUTCOME\tGATE\tWALL_MS\tUSD_MICRO\tTIER")
-	for _, wr := range st.worldsFor(intentDig, 0, 0) {
+	for _, wr := range worlds {
 		gate, wall := "-", "-"
 		if g, ok := gates[wr.Dig]; ok {
 			gate = g

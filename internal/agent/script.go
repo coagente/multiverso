@@ -43,13 +43,23 @@ func (scriptAdapter) Start(ctx context.Context, spec RunSpec) (Run, error) {
 			res.Outcome, res.KilledBy = object.OutcomeInterrupted, KilledByInterrupt
 		}
 	case spec.Prompt == "":
+		// CONFIG_ERROR is one label over several unrelated causes, and the
+		// World schema has no field for a reason (M1). Writing it to the
+		// captured stderr at least puts the distinction in CAS, where the
+		// ledger's agent.finished event names the blob that holds it.
 		res.Outcome, res.ExitCode = object.OutcomeConfigError, 1 // empty patch
-	case gitx.Apply(spec.WorldDir, []byte(spec.Prompt)) != nil:
-		// git apply --index is atomic on conflict: the worktree stays at
-		// the base tree — exact M0 behavior. gitx does not surface git's
-		// own exit code (M1a landing-apply precedent: 1 on conflict).
-		res.Outcome, res.ExitCode = object.OutcomeConfigError, 1
+		res.Stderr = []byte("mvo: script adapter: candidate patch file is empty — nothing to apply\n")
 	default:
+		if applyErr := gitx.Apply(spec.WorldDir, []byte(spec.Prompt)); applyErr != nil {
+			// git apply --index is atomic on conflict: the worktree stays
+			// at the base tree — exact M0 behavior. gitx does not surface
+			// git's own exit code (M1a landing-apply precedent: 1 on
+			// conflict).
+			res.Outcome, res.ExitCode = object.OutcomeConfigError, 1
+			res.Stderr = []byte("mvo: script adapter: patch did not apply to the intent's base tree: " +
+				applyErr.Error() + "\n")
+			break
+		}
 		res.Outcome = object.OutcomeCompleted
 	}
 	res.Cost = object.RunCost{WallMS: time.Since(start).Milliseconds(), Source: CostSourceNone}

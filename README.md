@@ -56,6 +56,23 @@ The interesting run is the one where a candidate goes green by **deleting tests*
   3     mv0:37796ba0…  3    FAIL (collected_total=0 (exit 5))  n/a                                       n/a                FAIL
 ```
 
+### What the ladder catches, and what it does not
+
+Test deletion is **one** laundering vector, and in M1 it is the only one the default policy catches. All of the following were verified against the shipped fixture and sail through as `PASS`:
+
+| Vector | Caught by the default policy? |
+|---|---|
+| Delete tests (functions, or the whole file) | **yes** — `collected_delta` drops, or exit 5 |
+| `@pytest.mark.skip` the failing tests | **no** — skipped tests are still collected; `delta=+0`, exit 0 |
+| Weaken the assertions | **no** |
+| Rewrite assertions to match the candidate's own wrong output | **no** — and in our four-candidate run this one *won* |
+| A `conftest.py` overriding the process exit code | **no** — `status` reads the exit code; the same receipt records `tests_failed=2, status=pass` |
+| A `conftest.py` writing the JUnit report the oracle reads | **no** — every metric fabricated |
+
+The structural reason: **pytest-suite metrics are parsed from an artifact written inside the candidate's own writable tree**, so a candidate that runs code can author its own receipt numbers. Adding a `no-failed-tests` gate closes the exit-code override today (verified); skips, weakened assertions and forged reports need M2 (a `skipped-not-above` gate, O3 mutation, and an oracle that runs outside the candidate's write surface).
+
+**→ [The full itemized table, with the run that produced it](docs/concepts.md#what-the-gate-ladder-catches-and-what-it-does-not)**
+
 **→ [Quickstart](docs/quickstart.md)** — run all of this yourself in about five minutes, with no API keys and no network.
 **→ [Concepts](docs/concepts.md)** — Intent, World, Receipt, Decision, Attestation, Policy, and why this exists when you already have CI.
 
@@ -118,7 +135,7 @@ The two tables below are an audit against [PRD §7](PRD.md#7-functional-requirem
 | **EP-2** | Receipts carry status, integer metrics, the tools that produced them, content-addressed artifacts, freshness, isolation caps and wall cost | **Three named fields are absent**: `producer` (the identity that produced the *evidence* is recorded nowhere — only worlds carry a producer), `cost.usd`/`cost.tokens`, and `inputs`. |
 | **EP-7** | One shared execution envelope across all oracles; artifacts content-addressed *before* parsing | **`seeds` is absent.** Nothing pins or records an oracle-side seed (no `PYTHONHASHSEED`, no test-order seed) even though receipts claim `recheck_tier: V1-replayable`. |
 | **TP-2** | Every world records `producer.identity_tier` | **It is one hardcoded literal (`"claimed"`), not a modelled concept.** No vocabulary constants, and **no validator anywhere refuses an inflated tier** — a hand-crafted world claiming `"attested"` passes ingest, publication and verification unremarked. Receipts carry no producer at all, so the tier of whatever produced the evidence is recorded nowhere. |
-| **FI-1** | `mvo publish` / `fetch-race` / `prune`: signed evidence closure under `refs/multiverso/*`, offline verification from a public key alone, tested against real remotes | **Admission is a local compare-and-swap `update-ref`, not a fast-forward push** — getting the commit onto a remote trunk is your ordinary `git push`. The trailer is `Multiverso-Attestation: sha256:<bundle CAS key>`, not the specified `Multiverso-Receipt`. "Freshness by merge-base drift polling" is a **render-time comparison against the local HEAD**; nothing fetches or polls a remote. Push-exclusion refspecs are not configured — the namespace living outside `refs/heads` plus a non-fatal warning on mirror-style push refspecs is the substitute. Protected-trunk gating needs a bot identity with ruleset bypass, or an unprotected integration branch. |
+| **FI-1** | `mvo publish` / `fetch-race` / `prune`: signed evidence closure under `refs/multiverso/*`, offline verification from a public key alone, tested against real remotes | **Admission is a local compare-and-swap `update-ref`, not a fast-forward push** — getting the commit onto a remote trunk is your ordinary `git push`. The trailer is `Multiverso-Attestation: sha256:<bundle CAS key>`, not the specified `Multiverso-Receipt`. "Freshness by merge-base drift polling" is a **render-time comparison against the local HEAD**; nothing fetches or polls a remote. Push-exclusion refspecs are not configured — the namespace living outside `refs/heads` plus a non-fatal warning on mirror-style push refspecs is the substitute. **An attestation survives a fast-forward of the exact admitted commit and nothing else: `git rebase` fails verification at the subject check, and a squash merge produces a commit with no trailer at all — so a rebasing or squashing merge queue is structurally incompatible with M1.** The two supported topologies (fast-forward-only trunk, or an unprotected integration branch with a bot identity holding ruleset bypass) and a CI snippet are in [the quickstart](docs/quickstart.md#protected-trunks-and-merge-queues). |
 
 ### Not in M1 at all
 

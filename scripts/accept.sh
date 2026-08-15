@@ -491,7 +491,11 @@ PUBKEY="$REPO/.multiverso/keys/local.pub"
 FR_OUT="$("$MVO" fetch-race "$SHORT" --dir "$CONSUMER" --key "$PUBKEY")" \
   || fail "fetch-race exited non-zero:
 $FR_OUT"
-echo "$FR_OUT" | grep -q 'OK: race verified' || fail "fetch-race did not verify:
+echo "$FR_OUT" | grep -q 'OK: race integrity verified' || fail "fetch-race did not verify:
+$FR_OUT"
+# The verb proves integrity, not correctness, and must keep saying so: this
+# line printed verbatim over a race whose winner forged its own JUnit report.
+echo "$FR_OUT" | grep -q 'correctness: NOT asserted' || fail "fetch-race does not disclaim correctness:
 $FR_OUT"
 echo "$FR_OUT" | grep -q "winner:    $WORLD_A" || fail "fetch-race winner is not patch-a's world:
 $FR_OUT"

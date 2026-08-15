@@ -226,8 +226,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// CP-2: the candidate count is hard-capped before race.started — an
 	// over-budget race is refused, never recorded (closes the M0 TODO).
 	if len(cfg.Candidates) > intent.Budget.MaxCandidates {
-		return nil, fmt.Errorf("race: %d candidates exceed intent budget max_candidates=%d (CP-2)",
-			len(cfg.Candidates), intent.Budget.MaxCandidates)
+		// Name the flag that fixes it: the default max_candidates is 2, so
+		// every user with three or more patches hits this, and citing a PRD
+		// section instead of a flag leaves them nowhere to go.
+		return nil, fmt.Errorf("race: %d candidates exceed intent budget max_candidates=%d (CP-2) — an intent's budget is pinned at creation, so raise it on a NEW intent with `mvo intent new --budget-candidates %d`",
+			len(cfg.Candidates), intent.Budget.MaxCandidates, len(cfg.Candidates))
 	}
 	// Budget: MaxWallMS bounds the whole race; per-world wall budgets are
 	// the candidates' own (agent watchdog, AG-2).
@@ -283,7 +286,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		// Decision 15: a repo without pytest fails at pre-flight as
 		// machinery, never as a receipt — and the ledger stays empty of race
 		// events.
-		if err := preflight(raceCtx, pol, base.wh, execDesc(cfg.Backend)); err != nil {
+		if err := preflight(raceCtx, pol, base.wh, execDesc(cfg.Backend), intent.Budget.MaxWallMS); err != nil {
 			base.close(r)
 			os.Remove(r.raceDir)
 			return nil, err

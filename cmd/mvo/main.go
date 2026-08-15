@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"runtime/debug"
 )
 
 // Exit codes per the M0 CLI contract: 0 ok, 1 failure, 2 usage.
@@ -60,6 +62,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdFetchRace(rest, stdout, stderr)
 	case "audit":
 		err = cmdAudit(rest, stdout, stderr)
+	case "version", "--version", "-v":
+		writeVersion(stdout)
+		return exitOK
 	case "help", "-h", "--help":
 		usage(stdout)
 		return exitOK
@@ -81,6 +86,32 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	return exitFail
+}
+
+// writeVersion prints the build's own identity. There is no stamped
+// version string in M1, so this reports what the Go toolchain embedded in
+// the binary — the VCS revision when the build had one. CI can pin a
+// binary by it, and an operator can say which build replayed an
+// attestation, which a usage dump at exit 2 could not.
+func writeVersion(w io.Writer) {
+	rev, modified, mod := "unknown", false, "unknown"
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if bi.Main.Version != "" {
+			mod = bi.Main.Version
+		}
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				modified = s.Value == "true"
+			}
+		}
+	}
+	if modified {
+		rev += " (dirty)"
+	}
+	fmt.Fprintf(w, "mvo %s\nrevision: %s\ngo:       %s\n", mod, rev, runtime.Version())
 }
 
 func usage(w io.Writer) {
@@ -119,6 +150,10 @@ commands:
   fetch-race <intent-short> [--remote R] [--key PUB] [--json]
                                     fetch and verify a published race offline
   audit [--json]                    verify hash chain and replay all decisions
+                                    THIS WORKSPACE's ledger only: it takes no
+                                    commit and exits 0 on an empty workspace,
+                                    so it is not an admission check
+  version                           build revision of this binary
 
 every command accepts --dir <repo> (default ".").
 `)

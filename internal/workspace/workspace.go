@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/coagente/multiverso/internal/cas"
+	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
@@ -26,8 +27,27 @@ const SchemaConfig = "multiverso.dev/config/v0"
 // DirName is the workspace directory created inside a repo.
 const DirName = ".multiverso"
 
-// gitignoreLine keeps the workspace out of the repo's history.
-const gitignoreLine = ".multiverso/"
+// ignoreLine keeps the workspace — and the unencrypted signing key inside
+// it — out of the repo's history.
+const ignoreLine = ".multiverso/"
+
+// IgnoreResult records where Init put the rule that keeps .multiverso/ out
+// of git, so `mvo init` can say so out loud.
+//
+// The rule belongs in .git/info/exclude, not in the tracked .gitignore:
+// exclude is untracked, so it survives `git reset --hard` and `git checkout
+// -- .`, and writing it leaves the working tree CLEAN. Editing .gitignore
+// instead did the opposite on both counts — it dirtied the tree at init,
+// and the documented remedy for the resulting "working tree lags" warning
+// (`git reset --hard`) reverted mvo's own line, after which the next `git
+// add -A` committed .multiverso/keys/local.key: the unencrypted ed25519
+// private key that signs every attestation in the workspace.
+type IgnoreResult struct {
+	Path     string // file the rule was written to, or already present in
+	Existed  bool   // the rule was already there; nothing was written
+	Fallback bool   // .git/info/exclude was unusable, .gitignore was used
+	Reason   string // why the fallback happened; "" unless Fallback
+}
 
 // Config is .multiverso/config.json.
 type Config struct {
@@ -42,6 +62,9 @@ type Workspace struct {
 	Config Config
 	Ledger *ledger.Ledger
 	CAS    *cas.Store
+	// Ignore is where Init wrote the git ignore rule. Set by Init only;
+	// Open leaves it zero. Render-only: nothing decides on it.
+	Ignore IgnoreResult
 }
 
 // DefaultPolicy is the policy `mvo init` writes: since M1e the v1 artifact
@@ -115,10 +138,11 @@ func Init(root string) (ws *Workspace, err error) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfgCanon, 0o644); err != nil {
 		return nil, fmt.Errorf("workspace: write config: %w", err)
 	}
-	if err := ensureGitignore(root); err != nil {
+	ign, err := ensureIgnored(root)
+	if err != nil {
 		return nil, err
 	}
-	ws = &Workspace{Root: root, Dir: dir, Config: cfg, Ledger: led, CAS: store}
+	ws = &Workspace{Root: root, Dir: dir, Config: cfg, Ledger: led, CAS: store, Ignore: ign}
 	if _, err = ws.GenerateKeys(); err != nil {
 		return nil, err
 	}
@@ -243,24 +267,91 @@ func (w *Workspace) GetObject(dig string) ([]byte, error) {
 	return b, nil
 }
 
-// ensureGitignore appends gitignoreLine to <root>/.gitignore, creating the
-// file if missing and leaving it untouched if the line is already there.
-func ensureGitignore(root string) error {
-	path := filepath.Join(root, ".gitignore")
+// ensureIgnored makes git ignore the workspace, preferring the untracked
+// .git/info/exclude over the tracked .gitignore.
+//
+// Order: an existing rule in either file is honoured and nothing is written
+// (a repo that already ignores .multiverso/ in its .gitignore keeps doing
+// so). Otherwise the rule goes to .git/info/exclude. Only when that file
+// cannot be written — no git dir, read-only .git, a git that will not
+// answer rev-parse — does it fall back to .gitignore, and the caller is
+// told so it can warn: that path dirties the operator's tree, and a tree
+// dirtied by mvo is how the signing key got committed.
+func ensureIgnored(root string) (IgnoreResult, error) {
+	gitignore := filepath.Join(root, ".gitignore")
+	present, err := ignoreLinePresent(gitignore)
+	if err != nil {
+		return IgnoreResult{}, err
+	}
+	if present {
+		return IgnoreResult{Path: gitignore, Existed: true}, nil
+	}
+
+	exclude, excErr := excludePath(root)
+	if excErr == nil {
+		present, err := ignoreLinePresent(exclude)
+		if err != nil {
+			return IgnoreResult{}, err
+		}
+		if present {
+			return IgnoreResult{Path: exclude, Existed: true}, nil
+		}
+		if err := os.MkdirAll(filepath.Dir(exclude), 0o755); err != nil {
+			excErr = err
+		} else if err := appendIgnoreLine(exclude); err != nil {
+			excErr = err
+		} else {
+			return IgnoreResult{Path: exclude}, nil
+		}
+	}
+
+	if err := appendIgnoreLine(gitignore); err != nil {
+		return IgnoreResult{}, err
+	}
+	return IgnoreResult{Path: gitignore, Fallback: true, Reason: excErr.Error()}, nil
+}
+
+// excludePath locates <git-common-dir>/info/exclude for root. The common
+// dir is asked of git rather than assumed to be "<root>/.git": in a linked
+// worktree .git is a file, and exclude lives with the main repository.
+func excludePath(root string) (string, error) {
+	common, err := gitx.CommonDir(root)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(common, "info", "exclude"), nil
+}
+
+// ignoreLinePresent reports whether path already carries the rule. A
+// missing file is not present and not an error.
+func ignoreLinePresent(path string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("workspace: read %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == ignoreLine {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// appendIgnoreLine appends the rule to path, creating the file if missing
+// and inserting the separating newline the previous last line may lack.
+func appendIgnoreLine(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("workspace: read %s: %w", path, err)
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == gitignoreLine {
-			return nil
-		}
 	}
 	out := append([]byte(nil), b...)
 	if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
 		out = append(out, '\n')
 	}
-	out = append(out, gitignoreLine+"\n"...)
+	out = append(out, ignoreLine+"\n"...)
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		return fmt.Errorf("workspace: write %s: %w", path, err)
 	}

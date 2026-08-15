@@ -2,6 +2,7 @@ package race
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -108,7 +109,14 @@ func oraclePython(o policy.Oracle) string {
 // BEFORE race.started, so a missing toolchain leaves the ledger empty of race
 // events: a missing toolchain is machinery, never a failing candidate, and
 // recording it as one would be a lie about the candidates.
-func preflight(ctx context.Context, pol policy.Policy, w backend.World, envDesc string) error {
+//
+// An empty tools map is not by itself evidence that pytest is absent: a
+// probe the race context cancelled or timed out reports exactly the same
+// nothing. Diagnosing that as "pytest is not importable" was confidently
+// wrong AND sent the operator off to rewrite their policy for a language
+// problem they did not have, so the two causes are told apart here and
+// budgetMS names the bound that actually stopped it.
+func preflight(ctx context.Context, pol policy.Policy, w backend.World, envDesc string, budgetMS int64) error {
 	probed := make(map[string]map[string]string)
 	for _, o := range pytestOracles(pol) {
 		py := oraclePython(o)
@@ -117,12 +125,27 @@ func preflight(ctx context.Context, pol policy.Policy, w backend.World, envDesc 
 			tools, _ = oracle.Probe(ctx, w, py)
 			probed[py] = tools
 		}
-		if tools[oracle.ToolPytest] == "" {
-			return fmt.Errorf("race: policy requires oracle %q (%s) but pytest is not importable in this environment (%s); Multiverso's oracle ladder is Python-first (PRD §10) — author a command-kind policy for other languages",
-				o.Name, o.Kind, envDesc)
+		if tools[oracle.ToolPytest] != "" {
+			continue
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("race: oracle %q (%s) pre-flight probe did not complete: %s (intent budget_wall_ms=%d) — raise --budget-wall-ms on a new intent, or drop the budget; this says nothing about whether pytest is installed",
+				o.Name, o.Kind, probeStopReason(ctxErr), budgetMS)
+		}
+		return fmt.Errorf("race: policy requires oracle %q (%s) but pytest is not importable in this environment (%s); Multiverso's oracle ladder is Python-first (PRD §10) — author a command-kind policy for other languages",
+			o.Name, o.Kind, envDesc)
 	}
 	return nil
+}
+
+// probeStopReason names what ended the probe, in the operator's terms: a
+// deadline is the intent's wall budget, a cancel is an earlier failure in
+// the same race tearing the context down.
+func probeStopReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "budget exhausted"
+	}
+	return "race cancelled"
 }
 
 // execDesc names the environment the pre-flight probed, for its error.
@@ -186,6 +209,13 @@ func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *ba
 		return 0, err
 	}
 	if rec.Result.Status != oracle.StatusPass || !known || total < 1 {
+		// Same discipline as the pre-flight probe: a measurement the race
+		// budget cut short is a budget fact, not a fact about the repo's
+		// tests, and must not be reported as one.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, fmt.Errorf("race: baseline: oracle %q on base tree %s did not complete: %s (intent budget_wall_ms=%d) — raise --budget-wall-ms on a new intent, or drop the budget",
+				spec.Name, r.intent.Base.Tree, probeStopReason(ctxErr), r.intent.Budget.MaxWallMS)
+		}
 		return 0, fmt.Errorf("race: baseline: oracle %q on base tree %s: status=%s exit=%d collected_total=%s; a collected-not-below gate has no honest denominator here",
 			spec.Name, r.intent.Base.Tree, rec.Result.Status, rec.Execution.ExitCode, countText(total, known))
 	}

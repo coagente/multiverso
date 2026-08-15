@@ -137,7 +137,15 @@ func cmdFetchRace(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("fetch-race: %w", err)
 		}
 		if rep.OK {
-			fmt.Fprintf(stdout, "OK: race verified (%d items, %d refs)\n", len(rep.Items), len(rep.Refs))
+			// "race verified" was read as "this change is good" by every
+			// non-engineer who saw it — and it was printed, unchanged, over
+			// a race whose winner forged its own JUnit report. What this
+			// verb proves is that the bytes are internally consistent and
+			// signed by the key you passed. It proves nothing about whether
+			// the winning candidate is correct.
+			fmt.Fprintf(stdout, "OK: race integrity verified (%d items, %d refs)\n", len(rep.Items), len(rep.Refs))
+			fmt.Fprintln(stdout, "    integrity = content addresses, signatures against the key you passed, and decision replay.")
+			fmt.Fprintln(stdout, "    correctness: NOT asserted. Read the gate table above and `mvo explain` for what the oracles measured.")
 		} else {
 			fmt.Fprintf(stdout, "FAIL: %d of %d items failed verification\n", failed, len(rep.Items))
 		}
