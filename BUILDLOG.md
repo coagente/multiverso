@@ -2,6 +2,234 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-16 — M2b1: the arm the comparison was missing
+
+**M2b's own BUILDLOG said this block had to exist, and said why.** `--schedule=fixed`
+is the **unbudgeted** exhaustive M1 ladder: it reads `max_oracle_ms` never.
+Every "matched budget" number M2b published compared *adaptive under B*
+against *exhaustive under ∞*, and the budget-truncated fixed figures beside
+them were arithmetic replayed over a recorded ledger, not races that were run.
+`--schedule=fixed-budget` is the missing arm: a depth-first ladder that is
+given the same money and stops when it runs out.
+
+**One loop, two selectors, and that is the whole design.** The arms differ in
+ORDERING and in nothing else, because the cheapest way to guarantee that two
+arms share a cost model, an affordability rule, a charge point, a stop
+vocabulary and a trace shape is to make them literally the same code.
+`internal/schedule/selector.go` holds a `Selector` seam with `Rank` (order an
+already-computed frontier) and `Contenders` (the equal-share denominator);
+`SelectorVOC` is M2b's rule moved unchanged, `SelectorLadder` is new. The
+frontier rule, `budget.affordable`, the charge point, the elimination rule,
+the stop clauses, the batch fill and the trace stay in `schedule.go` and are
+executed identically by both. The seam is not implementable outside the
+package — `Rank` takes the unexported frontier type — so an ordering rule
+cannot be injected by a caller and therefore cannot be authored by a
+candidate.
+
+The stop vocabulary falls out rather than being special-cased, which is the
+sign the layout is right: every ladder row is admissible, so an empty batch
+implies some admissible row was unaffordable, so the shared clause returns
+`S-budget`. The ladder cannot reach `S-frontier` or `S-ranking` because it
+cannot construct them, not because anything tests its name.
+
+**World order is control-plane authored, and digest order is refused
+outright.** `schedule.Config.Order` is handed in by `internal/race` as
+candidate ordinal ascending — slot order, which is what phase A already is —
+and recorded in `schedule.started.world_order`. The same list replaces
+`world digest asc` as the **terminal tie-break of the adaptive arm too**. A
+world digest is a function of candidate-authored bytes (`world.tree` is the
+candidate's own tree), and under a binding budget the verification order
+decides who is verified at all: ordering on the digest hands a candidate a
+lever on whether its rivals are ever measured. It is also not stable across
+runs — `created_at`, the agent `RunCost` and a transcript digest are in the
+pre-image — so it is randomization without a recorded seed, which AG-3
+forbids, and it makes replicates unpairable. What removes the positional
+advantage instead is **rotation**: replicate *r* rotates the order by
+*r mod N*, so over *N* replicates every candidate holds the head exactly once
+and the advantage becomes a measured variance component. Ordinal order is not
+innocent either, and the residual is named: the generator prompt still renders
+`"candidate k of N"`, so a candidate knows its ordinal, and under a budgeted
+depth-first arm knowing your ordinal is knowing whether you will be verified.
+It cannot *change* its ordinal, so this is a conditioning channel and not a
+steering one — but the ordinal must leave the prompt before a budgeted arm is
+pointed at untrusted generators.
+
+**The measured comparison, at matched budget, both arms budgeted.**
+`scripts/schedule-compare.sh --replicates 3 --level B2` on the shipped default
+over the toyrepo patches — one seeded workspace copied per arm per replicate,
+arms interleaved, R = 3:
+
+| arm | modal | spend (median) | receipts | complete worlds | self-disagreement |
+|---|---|---|---|---|---|
+| adaptive (voc) | REJECT | 583 ms | 4 | **0** | 0 % |
+| fixed-budget (ladder) | SELECT | 1 253 ms | 5 | **1** | 33 % |
+
+Reference spend S = 1 965 ms; the allocation bound says 974 ms was enough.
+Paired: `REJECT/SELECT` twice, `REJECT/REJECT` once — a 67 % disagreement rate
+against a 33 % noise floor. **This is M2b's predicted arithmetic, now raced.**
+The adaptive rule degenerates to round robin on symmetric worlds: it advances
+every world one rung and completes none, so nothing passes and it rejects. The
+depth-first arm completes one world and can decide. Two honest riders. First,
+the ladder's 33 % self-disagreement *is* the rotation working — the replicate
+that started on the losing world decided differently, and that variance is now
+visible instead of hidden inside a digest. Second, the arms differ in a second
+thing besides ordering, and it is sanctioned by the contract rather than
+smuggled: equal shares are a VOC concept, so the adaptive arm tested a 296 ms
+purchase against a 164 ms *share* with 328 ms still in the pool and declined
+it, while the ladder — one contender by construction — tested against the pool.
+That is `budget.affordable`'s `contenders == 1` case, not a second predicate,
+but it is a real second difference and the number above contains it.
+
+**A third arm ships and it is derived, not raced.** `mvo explain --schedule
+--bound` computes the **retrospective allocation bound**: over the
+prefix-closed subsets of a recorded race's own receipts — per world, a prefix
+of the policy's gate order, which is exactly the constraint both arms operate
+under — the cheapest allocation that still reaches the recorded decision.
+`minspend`, the headroom, and reachability at *B*. It converts "adaptive won
+by two points" into "adaptive won two of the eleven that were available",
+which is the difference between a result and a rounding error, and it supplies
+the exclusion criterion for instances no allocator could have won. It is
+`Π(L_w + 1)` calls to the real `Decide` (16 subsets on a two-world race, 0.25 s
+at six worlds), it **refuses above 10⁶ subsets rather than approximating**, and
+it is derived rather than recorded, so improving it invalidates no race. What
+it is NOT, in the name and in the caveats it carries: it bounds *allocation of
+a fixed evidence set*, not selection and not generation. If every candidate is
+wrong, *d\** is wrong and this bounds reaching a wrong answer efficiently. It
+is not PRD §11's arm 7; that needs M2d's labels.
+
+**`--budget-basis={actual|predicted}`, because wall-clock is not in the
+determinism tuple.** `actual` charges the receipt's measured `wall_ms` and is
+the default and the honest one; it is also why M2b saw one budget produce
+different decisions run to run. `predicted` charges the pinned cost table's
+prediction, which puts spend back inside M2b decision 13's tuple: given
+(policy, worlds, receipts, cost table, budget, constants, order) the
+allocation is a pure function and every difference between the arms is
+allocation rather than jitter. Its price is stated rather than hidden — it
+measures allocation under a *model* of cost, and the model's error is already
+reported as the calibration residual. It **refuses by name** when the
+workspace cannot price a buyable kind ("no local measurement for
+pytest-collect, pytest-suite, tree-guard"), because a basis under which half
+the rungs are free is not a basis.
+
+**Absent is absent, in the wire and in the renderer.** A ladder row computes
+no `flip`, no `discount_bp`, no `executor_bp`, no `value_bp` and no
+`score_bpps`, and calls `Decide` for lookahead exactly zero times — the
+`State` seam makes the base decision lazy, so that is enforced rather than
+promised. The fields stay serialized (M1b decision 5 forbids `omitempty`
+games) and a test asserts they are zero; `mvo explain --schedule` renders `—`
+where a VOC row renders a number, and a `0` under FLIP is a VOC row that
+scored zero, which is a different fact. `decision_now` is still recorded for
+both arms, and `selection_us` — the arm's own metalevel time — is now measured
+and **reported, not charged**: PRD §11's budget is tokens + runner time +
+oracle cost + selection cost, this harness charges the third term and not all
+of it, so no figure it produces may be called budget-matched in §11's sense.
+The correct label is **oracle-budget-matched** and the harness prints it on
+every report.
+
+**The harness enforces the anecdote rule instead of asking for discipline.**
+`scripts/schedule-compare.sh` seeds ONE workspace, warms the cost table, runs
+the reference arm to measure *S* and `minspend`, derives the budget level
+(B1 = ceil(minspend × 1.1), B2 = the middle of the informative band, B3 = S),
+creates ONE intent before any copy, then per replicate copies the workspace
+per arm, times a host-load probe before each arm, and interleaves them. It
+**aborts** if the two arms' cost table, budget, basis, dispatch degree,
+rotation or policy digest differ. It reports median + IQR + min/max — never a
+mean alone — plus the decision histogram, the stop histogram, the overrun
+count, the paired 3×3 table and each arm's **self-disagreement**, which is the
+noise floor a difference has to clear. Below R = 3 it prints
+`ANECDOTE (R=n): no verdict` and exits 3 under `--strict`. Every number M2b's
+BUILDLOG quotes was produced at R = 1 and is, by this rule, an anecdote.
+
+**What is enforced, what is not, and what that costs.** The design's sixteen
+fairness conditions are in the doc with their enforcement; five are unmet and
+say so. The largest is unchanged and unfixable here: **the two arms cannot
+verify the same worlds**, because a world binds `created_at`, the agent
+`RunCost` and a transcript digest, so two runs of one patch produce different
+world digests by construction. With the script adapter phase A is
+deterministic and the trees match; with a live agent the arms differ by
+generation variance plus allocation, confounded. Closing it needs a
+`race --reverify <world-digests>` path — a contract change, M2d/M3, named
+rather than assumed. Second: a race whose winner was chosen at the terminal
+`world_digest_asc` key was chosen by a coin flip that lands differently in
+each arm, so the harness detects those and quarantines them into their own
+bucket instead of pooling them.
+
+**Compatibility, proved rather than claimed.** `Decide` is untouched.
+`Receipt`, `World`, `Intent`, `Decision` and `PolicyV1` gain nothing — no
+policy field, no ranking key, no gate predicate, no metric, no oracle kind.
+The four new fields are additive on observational `schedule.*` events, carry
+no payload digest and are ignored by replay; a pre-M2b1 trace normalizes to
+selector `voc` (exact: no earlier binary could record a trace for any other
+arm), basis `actual`, and world order **unknown** — rendered as such, never as
+digest order, because inventing a past ordering is inventing evidence. The
+shipped default policy digest does not move (`mv0:f207c3fa…`), every M0–M2b
+ledger replays byte-for-byte, and `mvo audit` is OK over a ledger carrying the
+new fields. Validation rule 25 now covers any arm that can withhold, and
+`fixed-budget` **errors** where the adaptive arm silently falls back: a silent
+fallback from a budgeted arm to an unbudgeted one turns a matched-budget
+experiment into an unmatched one and records nothing that says so.
+
+**Numbers:** 2 new files in `internal/schedule` (selector, bound), 1 new arm,
+4 additive trace fields, 3 new CLI flags, 0 new receipt fields, 0 new ranking
+keys, 0 changes to `Decide`. `scripts/accept.sh` at 6 new steps (m2b1-6a…6f);
+`gofmt -l`, `go vet ./...`, `go test -count=1 ./...`, `accept.sh`,
+`m0-accept.sh` and `adversarial.sh` all green.
+
+## 2026-08-16 — M2b.1: a comparison that means something, and it says tie or worse
+
+**The headline is a null, and on the shipped default policy it is worse than a
+null.** M2b could not run the head-to-head CP-4 asks for: `--schedule=fixed` was
+the *unbudgeted* exhaustive ladder, so every "matched budget" figure compared
+adaptive-under-B against exhaustive-under-nothing, and the truncation numbers
+were arithmetic replayed over a recorded ledger. This block builds the arm that
+was missing — a fixed ladder that is handed the same money and stops when it
+runs out — and then actually races the two. Five paired replicates per level,
+because the harness refuses to print a verdict below three and reports each
+arm's **own** run-to-run self-disagreement as the noise floor a difference has
+to clear.
+
+Three levels, `testdata/toyrepo`, `k=1`:
+
+| Policy | Budget | Adaptive | Fixed-budget | Verdict |
+|---|---|---|---|---|
+| `schedule` | B1 (tightest) | SELECT 5/5, 1218 ms | SELECT 5/5, 1226 ms | **tie** — 0 % disagreement |
+| `schedule` | B2 (mid-band) | SELECT 5/5, 1227 ms | SELECT 4/5, ESCALATE 1/5 | **tie** — 20 % disagreement against a 20 % noise floor |
+| default | B2 (mid-band, 1529 ms) | **REJECT 5/5**, 586 ms, 4 receipts, **0 complete worlds** | SELECT 3/5, 1284 ms, 5 receipts, 1 complete world | **differs by more than noise** — 60 % against a 40 % floor |
+
+The third row is the one to read. Given 1 529 ms the adaptive scheduler spent
+**586 of them and gave up**, completing not one world, while the fixed ladder
+spent 1 284 and completed one. That is M2b's round-robin degeneration — the
+frontier offers one rung per alive world, symmetric worlds tie on every score,
+the tie-break falls to world digest, so the allocator advances everybody and
+finishes nobody — measured in races rather than inferred by arithmetic. It is a
+**false rejection**, which decision 4 named as adaptivity's real risk, and it is
+the shape a scheduler fails in when its rule has no notion of *finishing* a
+world.
+
+What the measurement does **not** say: which arm was right. Withholding
+monotonicity says adaptivity cannot cause a false *admission*; it says nothing
+about false rejections, and only labelled correctness outcomes — M2d — can price
+one against the other. A `REJECT` where the truth is "no candidate was any good"
+is the correct answer; a `REJECT` where an honest fix was sitting there unbought
+is a failure. We do not have the labels yet, so the honest statement is the one
+above and no more.
+
+**Two things the harness now refuses to let us do.** It will not print a verdict
+under three replicates, and it will not call a difference a win when it does not
+exceed both arms' own self-disagreement — the `schedule` B2 row is exactly that
+case, 20 % against 20 %, reported as a tie rather than as a 4-vs-5. And every
+output carries the label **ORACLE-BUDGET-MATCHED**, because PRD §11 defines the
+budget as tokens + runner time + oracle cost + selection cost and this harness
+charges only the third. Selection cost is measured and printed beside it —
+adaptive's is 1.8–2.6 ms per race against the ladder's 60 µs, a 30–40× ratio
+that is invisible at pytest scale and would not be at a cheaper one. Tokens and
+runner time are uncharged, and that belongs in every caption.
+
+So: the instrument is honest, and the instrument currently says the rule as
+specified does not beat running the ladder in order. The next move is not to
+tune constants until the number flips — it is M2d's labels, without which "worse"
+and "more cautious" are the same measurement.
+
 ## 2026-08-15 — M2b: spending the next dollar of verification
 
 **The rule, in one sentence you can check against the code.** At every step,

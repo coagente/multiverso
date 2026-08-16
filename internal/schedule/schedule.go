@@ -36,10 +36,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
 )
+
+// nowNS is the ONE clock this package reads, and it reads it for exactly one
+// purpose: measuring the arm's own metalevel time for
+// schedule.finished.selection_us (decision 6). No allocation decision is a
+// function of it — the allocation is a pure function of (policy, worlds,
+// receipts, cost table, budget, constants, order), which is what makes a
+// replicate replayable — and a test replaces it to keep the measurement out
+// of a golden.
+var nowNS = func() int64 { return time.Now().UnixNano() }
 
 // Config wires one scheduler. Policy, Decide and Batch are required.
 type Config struct {
@@ -69,6 +79,26 @@ type Config struct {
 	// CorpusDigest is the pinned corpus object's digest: the `corpus`
 	// coordinate of the correlation descriptor for the kinds that read it.
 	CorpusDigest string
+	// Selector is decision 1's seam: the arm. Nil means SelectorVOC, so every
+	// caller written before M2b1 keeps the adaptive rule it asked for.
+	Selector Selector
+	// Order is the CONTROL-PLANE world order (decision 3): world digests in
+	// the orchestrator's own order, which is candidate ordinal ascending.
+	// It is HANDED IN and never derived here — internal/race knows which
+	// world came from which candidate ordinal and this package must not
+	// guess, because the only key available to it would be the world digest,
+	// which is a function of candidate-authored bytes.
+	//
+	// Empty is tolerated (the pure tests hand no order) and falls back to
+	// digest order for tie-breaking only, which is exactly what M2b did.
+	Order []string
+	// Rotation is the replicate's order rotation ρ (decision 6). Order is
+	// rotated by ρ mod N before use, and both are recorded.
+	Rotation int
+	// BudgetBasis is what the pool is CHARGED per purchase (decision 5b):
+	// BudgetBasisActual (default) charges the receipt's measured wall_ms,
+	// BudgetBasisPredicted charges the pinned cost table's prediction.
+	BudgetBasis string
 }
 
 // Scheduler is the allocation loop's state. It is deterministic given
@@ -95,12 +125,21 @@ type Scheduler struct {
 	// last step, so a world leaving it can release its share.
 	contender map[string]bool
 
+	// sel is the arm (decision 1). order is the control-plane world order
+	// AFTER rotation — the list the ranking reads and the trace records —
+	// and orderOf is its index, so a rank comparison costs no scan.
+	sel     Selector
+	order   []string
+	orderOf map[string]int
+	basis   string
+
 	bud     budget
 	step    int
 	stop    string
 	nBought int
 	nSeen   int
 	nDecl   int
+	selUS   int64
 	skipped []Skipped
 	done    bool
 }
@@ -116,6 +155,18 @@ func New(cfg Config, worlds []object.RecordedWorld) (*Scheduler, error) {
 	case cfg.Batch < 1:
 		return nil, errors.New("schedule: config: batch must be at least 1")
 	}
+	sel := cfg.Selector
+	if sel == nil {
+		sel = SelectorVOC()
+	}
+	basis := cfg.BudgetBasis
+	if basis == "" {
+		basis = BudgetBasisActual
+	}
+	if basis != BudgetBasisActual && basis != BudgetBasisPredicted {
+		return nil, fmt.Errorf("schedule: config: budget basis %q must be %s or %s",
+			basis, BudgetBasisActual, BudgetBasisPredicted)
+	}
 	ws := append([]object.RecordedWorld(nil), worlds...)
 	sort.Slice(ws, func(i, j int) bool { return ws[i].Digest < ws[j].Digest })
 	s := &Scheduler{
@@ -127,7 +178,14 @@ func New(cfg Config, worlds []object.RecordedWorld) (*Scheduler, error) {
 		perWorld:   map[string][]object.RecordedReceipt{},
 		bought:     map[string]map[string]bool{},
 		contender:  map[string]bool{},
+		sel:        sel,
+		order:      rotate(cfg.Order, cfg.Rotation),
+		orderOf:    map[string]int{},
+		basis:      basis,
 		bud:        budget{max: cfg.BudgetMS},
+	}
+	for i, w := range s.order {
+		s.orderOf[w] = i
 	}
 	for _, w := range ws {
 		s.byDig[w.Digest] = w
@@ -136,7 +194,57 @@ func New(cfg Config, worlds []object.RecordedWorld) (*Scheduler, error) {
 	for _, r := range s.costRows {
 		s.costByKind[r.Kind] = r
 	}
+	if unpriced := s.UnpricedKinds(); basis == BudgetBasisPredicted && len(unpriced) > 0 {
+		// A basis under which half the rungs are free is not a basis. Under
+		// `predicted` the pool is charged the model's prediction, and a
+		// declared-rank kind HAS no prediction — its cost_ms is 0 and that
+		// zero is not a measurement of zero (M2b decision 7c) — so the budget
+		// would silently stop binding on exactly the kinds nobody measured.
+		// Refused by name, so the operator learns which measurement is
+		// missing rather than which flag to drop.
+		return nil, fmt.Errorf("schedule: --budget-basis=%s needs a fitted cost for every buyable kind; this workspace has no local measurement for %s (race once under --budget-basis=%s to accumulate samples, or drop the basis)",
+			BudgetBasisPredicted, strings.Join(unpriced, ", "), BudgetBasisActual)
+	}
 	return s, nil
+}
+
+// UnpricedKinds are the buyable kinds this race would price by DECLARED RANK
+// — no local fit, no millisecond figure, and therefore no prediction a
+// `predicted` budget basis could charge. It is read at construction and by
+// `mvo race`'s pre-flight, so the CLI and the library refuse the same
+// workspaces for the same reason.
+func (s *Scheduler) UnpricedKinds() []string {
+	var out []string
+	for _, r := range s.costRows {
+		if r.Basis == CostBasisDeclaredRank {
+			out = append(out, r.Kind)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// WorldOrder is the control-plane order this race allocates in, AFTER
+// rotation: what schedule.started records and what both selectors rank by.
+func (s *Scheduler) WorldOrder() []string { return append([]string{}, s.order...) }
+
+// orderIndex is a world's position in the control-plane order. A world the
+// order does not name sorts AFTER every world it does, by digest — the
+// fallback the pure tests and every pre-M2b1 caller run under, and the only
+// place a digest is still allowed to order anything.
+func (s *Scheduler) orderIndex(world string) int {
+	if i, ok := s.orderOf[world]; ok {
+		return i
+	}
+	n := len(s.order)
+	for _, w := range s.worlds {
+		if w.Digest < world {
+			if _, named := s.orderOf[w.Digest]; !named {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // Kinds are the registry kinds this race's ladder can buy, sorted. The cost
@@ -168,13 +276,53 @@ func (s *Scheduler) Started(intent, arm string, parallel int) Started {
 		mode = ModeCollectInert
 	}
 	return Started{
-		Budget:    StartBudget{MaxOracleMS: s.cfg.BudgetMS},
-		Constants: Constants{ExecutorBP: ExecutorConstants(), RedundancyBP: RedundancyConstants()},
-		CostTable: s.costRows,
-		Intent:    intent,
-		Mode:      mode,
-		Parallel:  parallel,
-		Schedule:  arm,
+		Budget:      StartBudget{MaxOracleMS: s.cfg.BudgetMS},
+		BudgetBasis: s.basis,
+		Constants:   Constants{ExecutorBP: ExecutorConstants(), RedundancyBP: RedundancyConstants()},
+		CostTable:   s.costRows,
+		Intent:      intent,
+		Mode:        mode,
+		Parallel:    parallel,
+		Rotation:    s.cfg.Rotation,
+		Schedule:    arm,
+		Selector:    s.sel.Name(),
+		WorldOrder:  s.WorldOrder(),
+	}
+}
+
+// state is the read-only view handed to the selector. The two Decide-bearing
+// reads are LAZY and memoized per step: the VOC arm asks for the base
+// decision once and the ladder arm never asks at all, so decision 6's "it
+// does not call Decide for lookahead" is enforced by the seam rather than
+// promised by the prose.
+func (s *Scheduler) state() State {
+	var clamped []object.RecordedReceipt
+	var base object.Decision
+	haveClamped, haveBase := false, false
+	clampedFn := func() []object.RecordedReceipt {
+		if !haveClamped {
+			clamped, haveClamped = clampReceipts(s.cfg.Policy, s.receipts, s.cfg.Bounds), true
+		}
+		return clamped
+	}
+	return State{
+		Policy:  s.cfg.Policy,
+		Worlds:  s.worlds,
+		Decide:  s.cfg.Decide,
+		Bounds:  s.cfg.Bounds,
+		Inert:   s.cfg.CollectInert,
+		clamped: clampedFn,
+		base: func() object.Decision {
+			if !haveBase {
+				base, haveBase = s.cfg.Decide(s.cfg.Policy, s.worlds, clampedFn()), true
+			}
+			return base
+		},
+		price:     s.cfg.Costs.Predict,
+		costBasis: s.costBasis,
+		bought:    s.boughtEvidence,
+		readBy:    s.readBy,
+		orderIdx:  s.orderIndex,
 	}
 }
 
@@ -265,20 +413,36 @@ func (s *Scheduler) Next() (Step, bool) {
 	}
 	s.step++
 
-	// The lookahead reasons over CLAMPED receipts (decision 3b): the
-	// incumbent's ranking key values are bounded by the same control-plane
-	// ceilings the bracket is, or the bracket is measured against an
-	// unbounded self-report and rival starvation works anyway. The RECORDED
-	// decision is computed from the real receipts and is untouched by this.
-	clamped := clampReceipts(s.cfg.Policy, s.receipts, s.cfg.Bounds)
-	base := s.cfg.Decide(s.cfg.Policy, s.worlds, clamped)
-	share := s.bud.share(len(front))
+	// THE SELECTOR ORDERS; THE LOOP PAYS (decision 1). Everything from here
+	// to the end of the function is shared verbatim by both arms: one
+	// affordability predicate, one share rule, one batch fill, one stop
+	// vocabulary, one trace shape. The arms differ in the line below and in
+	// nothing else.
+	//
+	// The lookahead — which only the VOC arm runs — reasons over CLAMPED
+	// receipts (decision 3b): the incumbent's ranking key values are bounded
+	// by the same control-plane ceilings the bracket is, or the bracket is
+	// measured against an unbounded self-report and rival starvation works
+	// anyway. The RECORDED decision is computed from the real receipts and is
+	// untouched by this.
+	t0 := nowNS()
+	ranked := s.sel.Rank(front, s.state())
+	share := s.bud.share(s.sel.Contenders(front))
 
-	rows := make([]Considered, 0, len(front))
-	for _, p := range front {
-		rows = append(rows, s.score(p, clamped, base, share))
+	rows := make([]Considered, 0, len(ranked))
+	for _, r := range ranked {
+		row := r.Row
+		row.Affordable = s.bud.affordable(r.Cost, share)
+		if row.Declined == "" && row.Admissible && !row.Affordable {
+			row.Declined = unaffordableReason(r.Cost, share, s.bud.remaining())
+		}
+		rows = append(rows, row)
 	}
-	chosen := s.choose(rows, share)
+	chosen := s.batch(ranked, rows)
+	// Reported, not charged (F8). The measurement covers the frontier walk,
+	// the ranking, the lookahead and the batch fill — everything the arm
+	// spends on deciding what to buy, and nothing it spends buying.
+	s.selUS += (nowNS() - t0) / 1000
 
 	real := s.cfg.Decide(s.cfg.Policy, s.worlds, s.receipts)
 	st := Step{
@@ -311,97 +475,44 @@ func (s *Scheduler) Next() (Step, bool) {
 		for _, r := range rows {
 			s.skipped = append(s.skipped, Skipped{Oracle: r.Oracle, Reason: r.Declined, World: r.World})
 		}
+		s.skipStarvedRemainder(rows)
 		return st, false
 	}
 	s.nBought += len(chosen)
 	return st, true
 }
 
-// score prices one prospective purchase. DP-1 forbids floats in canonical
-// JSON and the trace is canonical JSON, so the score is integer basis points
-// throughout — the coverage_bp / mutation_score_bp discipline, reused:
+// skipStarvedRemainder is decision 4 made observable: when the money runs
+// out mid-ladder a world keeps the prefix it bought, EVERY remaining rung is
+// never purchased, and every one of them gets an oracle.skipped naming budget
+// exhaustion — not only the frontier rung that was priced and refused.
 //
-//	value_bp   = flip × discount_bp × executor_bp / 10 000    ∈ [0, 10 000]
-//	score_bpps = value_bp × 1 000 / max(ĉost_ms, 1)           -- bp per second
-//
-// ADMISSIBILITY IS NOT THE SCORE, and separating them is the red team's
-// correction (M2b decision 3c). `flip` answers "may this purchase be
-// declined?"; the discount and the executor weight answer "in what order
-// should the affordable ones go out". A row is BOUGHT iff it is admissible
-// and affordable; value_bp and score_bpps only order the queue. Conflating
-// the two let a correlation discount of 0 — the near-duplicate tier, which
-// two instances of one kind on one world reach — refuse a HARD GATE, which
-// is the one thing an ordering term must never be able to do (§2.2's own
-// ASHA argument: "VOC estimates reordering the queue rather than owning
-// termination").
-func (s *Scheduler) score(p purchase, clamped []object.RecordedReceipt, base object.Decision, share int64) Considered {
-	flip, notes := Lookahead(s.cfg.Decide, s.cfg.Policy, s.worlds, clamped, base, p.world, p.rung, p.rest, s.cfg.Bounds)
-	disc := DiscountBP(p.rung.evidence(), s.boughtEvidence(p.world.Digest))
-	exec := ExecutorBP(p.rung.Corr.Executor)
-	value := flip * disc * exec / FullBP
-	cost := s.cfg.Costs.Predict(p.rung)
-	row := Considered{
-		Admissible:   flip == 1 || p.rung.HardGate,
-		Affordable:   s.bud.affordable(cost, share),
-		Basis:        BasisDecision,
-		CostBasis:    s.costBasis(p.rung, cost),
-		CostMS:       cost.MS,
-		DiscountBP:   disc,
-		ExecutorBP:   exec,
-		Flip:         int(flip),
-		FlipOutcomes: notes,
-		HardGate:     p.rung.HardGate,
-		Kind:         p.rung.Kind,
-		Oracle:       p.rung.Name,
-		ValueBP:      value,
-		World:        p.world.Digest,
+// M2a's purchase law, verbatim: the scheduler may not mark a rung "skipped,
+// assume fine"; there is no such state and there will not be one. An
+// unpurchased hard gate leaves a required metric absent, an absent required
+// metric fails the gate, and `Decide` never names a failing world as Subject.
+// The skips are the operator's whole record of what was never found out —
+// without them a partially verified world reads like a fully verified one
+// that lost.
+func (s *Scheduler) skipStarvedRemainder(rows []Considered) {
+	if s.stop != StopBudget {
+		return
 	}
-	// The two orderings never share a field, because they never shared a
-	// unit: score_bpps is basis points per second and exists only for a row
-	// priced from a fit, score_rank is the declared ordinal position of an
-	// unpriced one (decision 7c). One argmax over both was an argmax over
-	// milliseconds and rank positions under one name — `guard` fitted at
-	// 1 ms scoring 10 000 000 against `mutation-diff` at rank 6 scoring
-	// 833 333 is not a comparison, it is a unit error.
-	if cost.Measured {
-		row.ScoreBPPS = value * 1000 / cost.Divisor()
-	} else {
-		row.ScoreRank = cost.Rank
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		seen[r.World+"\x00"+r.Oracle] = true
 	}
-	switch {
-	case !row.Admissible && s.cfg.CollectInert:
-		// M2a ships the mutation and property metrics with NO ranking key,
-		// because every key derivable from them is wrong-signed — and
-		// correctly so. The consequence for a flip-driven scheduler is sharp
-		// and must be said out loud: A RUNG NOTHING READS IS DECISION-INERT
-		// AND IS NEVER BOUGHT. But M2a also ships those metrics because
-		// M2b's evaluation must correlate them against ground truth before
-		// anyone ranks by them, which requires buying them. This is that
-		// mode.
-		row.Basis = BasisResearch
-	case !row.Admissible:
-		row.Declined = s.inadmissibleReason(p, notes)
-	case !row.Affordable:
-		row.Declined = unaffordableReason(cost, share, s.bud.remaining())
+	reason := fmt.Sprintf("budget exhausted after %d ms", s.bud.spent)
+	for _, r := range rows {
+		for _, rung := range s.rungs {
+			key := r.World + "\x00" + rung.Name
+			if s.bought[r.World][rung.Name] || seen[key] {
+				continue
+			}
+			seen[key] = true
+			s.skipped = append(s.skipped, Skipped{Oracle: rung.Name, Reason: reason, World: r.World})
+		}
 	}
-	return row
-}
-
-// inadmissibleReason names WHY a purchase was refused for good, derived from
-// the term that actually refused it rather than printed from a template.
-//
-// The first draft emitted "decision-inert: no gate, ranking key or
-// escalation rule reads X" for EVERY zero-valued row, which is a permanently
-// recorded false statement whenever something does read the rung — and
-// `oracle.skipped` carries it into the ledger, where `mvo explain --schedule`
-// renders it to an operator who has no way to check it. A trace that is
-// "recorded evidence, never recomputed" (decision 17) has to be evidence.
-func (s *Scheduler) inadmissibleReason(p purchase, notes []string) string {
-	if !s.readBy(p.rung) {
-		return fmt.Sprintf("decision-inert: no gate, ranking key or escalation rule reads %s", p.rung.label())
-	}
-	return fmt.Sprintf("no bracket outcome moves the decision at this world's control-plane ceiling [%s]",
-		strings.Join(notes, "; "))
 }
 
 // readBy reports whether anything in the pinned policy reads this rung: a
@@ -443,6 +554,14 @@ func unaffordableReason(c Cost, share, remaining int64) string {
 		return fmt.Sprintf("unaffordable: %s and the oracle budget is spent (%d ms remain)",
 			c.render(), remaining)
 	}
+	if share >= remaining {
+		// ONE CONTENDER: the share IS the pool, and there is no division to
+		// report. This is the depth-first arm's ordinary case (decision 5 —
+		// equal shares are a VOC-arm concept) and the VOC arm's last-world
+		// case, and printing "this world's share" for either would describe an
+		// apportionment that did not happen.
+		return fmt.Sprintf("unaffordable: predicted %s exceeds the %d ms left in the pool", c.render(), remaining)
+	}
 	return fmt.Sprintf("unaffordable: predicted %s exceeds this world's share of %d ms", c.render(), share)
 }
 
@@ -456,59 +575,36 @@ func (s *Scheduler) costBasis(r Rung, c Cost) string {
 	return c.Basis
 }
 
-// choose takes the top-k affordable frontier purchases by score, ties broken
-// by (ĉost_ms asc, world digest asc, oracle name asc) — total,
-// deterministic, replayable. A row is eligible iff it is ADMISSIBLE and
-// affordable; research rows are admitted by decision 11's mode.
+// batch fills the dispatch from the SELECTOR'S OWN ORDER: the first k rows
+// that are admissible and affordable. It applies no ordering of its own —
+// ordering is the one thing the arms differ in, and a batch fill that re-sorted
+// would put a second ranking rule underneath the first.
 //
-// PRICED ROWS GO FIRST, and unpriced ones are ordered among themselves by
-// declared rank. Ordering the two together would argmax over two units
-// (decision 7c), and buying the priced purchases first is also what makes
-// the budget bind at all: an unpriced purchase is affordable while any pool
-// remains, so spending the pool on unpriced rungs first is precisely how the
-// bound is overrun.
-func (s *Scheduler) choose(rows []Considered, share int64) []Chosen {
-	idx := make([]int, 0, len(rows))
-	for i, r := range rows {
-		if !r.Bought() || !r.Affordable {
-			continue
-		}
-		idx = append(idx, i)
-	}
-	sort.SliceStable(idx, func(a, b int) bool {
-		x, y := rows[idx[a]], rows[idx[b]]
-		xp, yp := x.ScoreRank == 0, y.ScoreRank == 0
-		switch {
-		case xp != yp:
-			return xp
-		case xp && x.ScoreBPPS != y.ScoreBPPS:
-			return x.ScoreBPPS > y.ScoreBPPS
-		case !xp && x.ScoreRank != y.ScoreRank:
-			return x.ScoreRank < y.ScoreRank
-		case !xp && x.ValueBP != y.ValueBP:
-			return x.ValueBP > y.ValueBP
-		case x.CostMS != y.CostMS:
-			return x.CostMS < y.CostMS
-		case x.World != y.World:
-			return x.World < y.World
-		default:
-			return x.Oracle < y.Oracle
-		}
-	})
+// A row is eligible iff it is ADMISSIBLE and affordable; research rows are
+// admitted by decision 11's mode. Everything else in the frontier is either
+// terminally declined (the selector said so, or the budget did) or DEFERRED —
+// considered, beaten, and buyable two batches later, which is exactly what
+// distinguishes a step decline from oracle.skipped.
+//
+// At k > 1 under the ladder selector this is DEPTH-FIRST PRIORITY FILL rather
+// than depth-first (decision 7): a world's rung k+1 needs rung k's result, so
+// a strictly depth-first arm has exactly one dispatchable purchase at a time,
+// and filling the batch from the next k worlds commits money to world 3's rung
+// while world 1's next rung is still pending. That is why the canonical
+// comparison runs both arms at --parallel 1 and why the harness refuses to
+// compare two arms whose recorded `parallel` differs.
+func (s *Scheduler) batch(ranked []Ranked, rows []Considered) []Chosen {
 	k := s.cfg.Batch
-	if k > len(idx) {
-		k = len(idx)
-	}
 	out := make([]Chosen, 0, k)
-	for i, j := range idx {
-		if i < k {
-			out = append(out, Chosen{Oracle: rows[j].Oracle, Reason: ReasonTopScore, World: rows[j].World})
+	for i := range rows {
+		if !rows[i].Bought() || !rows[i].Affordable {
 			continue
 		}
-		// Considered, priced, and beaten — not refused. It may be bought two
-		// batches later, which is exactly what distinguishes a step decline
-		// from oracle.skipped.
-		rows[j].Declined = "not this batch"
+		if len(out) < k {
+			out = append(out, Chosen{Oracle: rows[i].Oracle, Reason: ranked[i].Reason, World: rows[i].World})
+			continue
+		}
+		rows[i].Declined = "not this batch"
 	}
 	return out
 }
@@ -543,25 +639,61 @@ func (s *Scheduler) Record(rr object.RecordedReceipt) {
 	s.receipts = append(s.receipts, rr)
 	w := rr.Receipt.World
 	s.perWorld[w] = append(s.perWorld[w], rr)
+	var rung Rung
 	for _, r := range s.rungs {
 		if r.Selector().Match(rr.Receipt) {
 			if s.bought[w] == nil {
 				s.bought[w] = map[string]bool{}
 			}
 			s.bought[w][r.Name] = true
+			rung = r
 			break
 		}
 	}
-	// The ACTUAL cost, from the receipt itself, never the prediction. The
-	// trace records predicted and the receipt records actual, so
-	// cost_error_ms = actual − predicted falls out for free.
-	s.bud.charge(rr.Receipt.Cost.WallMS)
+	s.bud.charge(s.chargeFor(rung, rr))
+}
+
+// chargeFor is THE CHARGE POINT, and there is exactly one of it for both
+// arms (F5).
+//
+// Under BudgetBasisActual the pool is charged what the purchase ACTUALLY
+// cost — the receipt's own cost.wall_ms, never the prediction — so the trace
+// records predicted, the receipt records actual, and cost_error_ms = actual −
+// predicted falls out for free. That is the honest basis, and its price is
+// that actual wall-clock is not in the determinism tuple: two replicates at
+// one budget can buy different things because the machine was busier.
+//
+// Under BudgetBasisPredicted the pool is charged the PINNED SNAPSHOT's
+// prediction instead, which puts spend back inside the tuple and makes every
+// difference between the arms allocation rather than jitter (decision 5b).
+// The receipt still records what it really cost, so nothing is hidden: the
+// residual between the two is the cost model's own error, already reported.
+func (s *Scheduler) chargeFor(rung Rung, rr object.RecordedReceipt) int64 {
+	if s.basis != BudgetBasisPredicted {
+		return rr.Receipt.Cost.WallMS
+	}
+	if c := s.cfg.Costs.Predict(rung); c.Measured {
+		return c.MS
+	}
+	// Unreachable: New refuses this basis when any buyable kind is unpriced,
+	// precisely so that no purchase is ever charged a prediction that does
+	// not exist. Charging the actual is the failure that loses the least.
+	return rr.Receipt.Cost.WallMS
 }
 
 // releaseNonContenders records the shares of worlds that have left the
 // contender set since the last step. Equal shares are made adaptive by this
 // recomputation and by nothing else (decision 8).
+//
+// It is a NO-OP for an arm that does not hold equal shares. A depth-first
+// arm reserves nothing for the worlds behind the head, so it has nothing to
+// release, and a released_ms it never reserved would be a number about a
+// mechanism that did not run.
 func (s *Scheduler) releaseNonContenders(front []purchase) {
+	if s.sel.Contenders(front) != len(front) {
+		s.contender = map[string]bool{}
+		return
+	}
 	now := make(map[string]bool, len(front))
 	for _, p := range front {
 		now[p.world.Digest] = true
@@ -596,6 +728,7 @@ func (s *Scheduler) Finish() Finished {
 		// safety claim admits has to be observable in the artifact, or the
 		// claim is stronger in the document than in the ledger.
 		RankingIncomplete: !s.RankingComplete(),
+		SelectionUS:       s.selUS,
 		Steps:             s.step,
 		Stop:              s.stop,
 		Violation:         s.PurchaseLaw(),

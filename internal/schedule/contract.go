@@ -76,9 +76,44 @@ const (
 // equivalent (decision 13), which is a test rather than a claim — and the
 // comparison harness (scripts/schedule-compare.sh) races the same fixture
 // both ways at matched budget to show it.
+// ScheduleFixedBudget is M2b1's arm: the depth-first ladder GIVEN THE SAME
+// MONEY. The label is not reused, and that is decision 2 rather than
+// fastidiousness. `schedule.started.schedule` records the LABEL and not the
+// semantics, so a "fixed" in an old ledger and a "fixed" in a new one would
+// mean different things depending on which binary wrote it and no reader
+// could tell them apart — the honesty rule pointed at our own
+// instrumentation. `--schedule=fixed` therefore keeps its meaning exactly:
+// the UNBUDGETED exhaustive M1 ladder on the M1c worker pool, unchanged and
+// untraced.
+//
+// The experiment's reference arm is `fixed-budget` with max_oracle_ms = 0,
+// not `fixed`: same evidence set (an unbounded budget buys every rung), but
+// it emits a trace, so evidence waste, spend and the cost-table snapshot are
+// computable for the reference too.
 const (
-	ScheduleAdaptive = "adaptive"
-	ScheduleFixed    = "fixed"
+	ScheduleAdaptive    = "adaptive"
+	ScheduleFixed       = "fixed"
+	ScheduleFixedBudget = "fixed-budget"
+)
+
+// Budget bases (M2b1 decision 5b): what the pool is CHARGED per purchase.
+//
+// Under BudgetBasisActual — the default, and the honest one — the pool is
+// charged the receipt's measured wall_ms, and two replicates at one budget
+// can buy different things because the machine was busier. Actual wall-clock
+// is not in M2b decision 13's determinism tuple, which is why M2b observed
+// the same budget producing different decisions run to run.
+//
+// Under BudgetBasisPredicted the pool is charged the PINNED COST TABLE's
+// prediction for that purchase, which puts spend back inside the tuple:
+// given (policy, worlds, receipts, cost table, budget, constants, order) the
+// allocation is a pure function, both arms are exactly replayable, and every
+// difference between the arms is allocation rather than jitter. Its cost is
+// stated rather than hidden: it measures allocation under a MODEL of cost,
+// and the model's error is already recorded as the calibration residual.
+const (
+	BudgetBasisActual    = "actual"
+	BudgetBasisPredicted = "predicted"
 )
 
 // Race modes recorded in schedule.started (decision 11). ModeCollectInert is

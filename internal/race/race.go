@@ -63,6 +63,17 @@ type Config struct {
 	// decision-inert rungs M2a ships unranked, labelled `research` in the
 	// trace and excluded from the waste metric. Off by default.
 	CollectInert bool
+	// BudgetBasis is `mvo race --budget-basis` (M2b1 decision 5b): what the
+	// oracle pool is CHARGED per purchase — the receipt's measured wall_ms
+	// ("actual", the default) or the pinned cost table's prediction
+	// ("predicted", which puts spend back inside the determinism tuple).
+	BudgetBasis string
+	// Rotation is `mvo race --world-order-rotation` (M2b1 decision 6): the
+	// replicate's rotation ρ of the control-plane world order. Over N
+	// replicates every candidate holds the head position exactly once, which
+	// turns a depth-first arm's positional advantage into a measured variance
+	// component instead of a confound.
+	Rotation int
 	// ScheduleTrace records the allocation trace. Nil records nothing and
 	// changes no allocation: the scheduler's product is observational.
 	ScheduleTrace ScheduleTrace

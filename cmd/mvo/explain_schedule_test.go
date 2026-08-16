@@ -371,3 +371,131 @@ func TestScheduleWindowIsBoundedByTheRace(t *testing.T) {
 		t.Fatal("a corpus bound was reported for a race that recorded none; absence must stay absent")
 	}
 }
+
+// M2b1: A LADDER ROW RENDERS "—" WHERE A VOC ROW RENDERS A NUMBER
+// (decision 6). The depth-first arm computes no flip, no discount, no
+// executor weight and no score, and under "absent source implies absent
+// metric" those columns must not print zeros a reader could aggregate — a `0`
+// under FLIP is a VOC row that scored zero, which is a different fact about a
+// different arm.
+func TestScheduleRendersLadderRowsAsAbsentNotZero(t *testing.T) {
+	s := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleFixedBudget, Selector: schedule.SelectorNameLadder,
+		BudgetBasis: schedule.BudgetBasisActual, Parallel: 1,
+		WorldOrder: []string{"mv0:aa1000000000", "mv0:bb2000000000"},
+		BudgetMS:   5000, Batches: 2, SpentMS: 900, Stop: schedule.StopEmpty, SelectionUS: 74,
+		Steps: []explainScheduleRow{{
+			Step: 1, Order: 1, World: "mv0:aa1000000000", Oracle: "suite", Kind: policy.KindPytestSuite,
+			CostMS: 427, CostBasis: "fit(pytest-suite,off) n=4",
+			Affordable: true, Bought: true, Status: "pass", ActualMS: 430,
+		}},
+	}
+	got := renderSchedule(s)
+	for _, want := range []string{
+		"selector:   ladder (depth-first, world order recorded)",
+		"charged:    actual",
+		"#1 mv0:aa100000…", "rotation 0",
+		"—",
+		"selection:  74 µs of metalevel time, reported and NOT charged",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rendering is missing %q:\n%s", want, got)
+		}
+	}
+	// The row's own cells: a ladder row prints no zeros in the VOC columns.
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.Contains(line, "suite") || strings.Contains(line, "STEP") {
+			continue
+		}
+		if strings.Contains(line, " 0 ") {
+			t.Fatalf("a ladder row printed a zero in a value column:\n%s", line)
+		}
+	}
+	// A VOC row scoring zero still renders 0: the two facts stay distinct.
+	voc := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC,
+		BudgetBasis: schedule.BudgetBasisActual, WorldOrder: []string{"mv0:aa1000000000"},
+		BudgetMS: 5000, Batches: 1, SpentMS: 10, Stop: schedule.StopFrontier,
+		Steps: []explainScheduleRow{{
+			Step: 1, World: "mv0:aa1000000000", Oracle: "suite", Kind: policy.KindPytestSuite,
+			Flip: 0, DiscountBP: 0, ExecutorBP: 5000, ValueBP: 0, CostMS: 427,
+			CostBasis: "fit(pytest-suite,off) n=4", Declined: "no bracket outcome moves the decision",
+		}},
+	}
+	for _, line := range strings.Split(renderSchedule(voc), "\n") {
+		if strings.Contains(line, "suite") && strings.Contains(line, "—") {
+			t.Fatalf("a VOC row rendered an em dash where it holds a measured zero:\n%s", line)
+		}
+	}
+}
+
+// At k > 1 the arm is no longer pure depth-first (decision 7) and the
+// rendering says so, because results at different k are never pooled.
+func TestScheduleRendersPriorityFillAtParallelAboveOne(t *testing.T) {
+	got := renderSchedule(&explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleFixedBudget, Selector: schedule.SelectorNameLadder,
+		BudgetBasis: schedule.BudgetBasisPredicted, Parallel: 4, BudgetMS: 500, Stop: schedule.StopBudget,
+	})
+	if !strings.Contains(got, "depth-first PRIORITY FILL (k=4)") {
+		t.Fatalf("a k=4 ladder race does not say it is not pure depth-first:\n%s", got)
+	}
+	if !strings.Contains(got, "charged:    predicted") {
+		t.Fatalf("the predicted basis is not rendered:\n%s", got)
+	}
+}
+
+// A pre-M2b1 trace records no world order, and the renderer says UNKNOWN
+// rather than printing digest order. Inventing a past ordering is inventing
+// evidence about the one field that decides, under a binding budget, who was
+// verified at all.
+func TestScheduleRendersUnknownWorldOrderRatherThanInventingOne(t *testing.T) {
+	got := renderSchedule(&explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC,
+		BudgetBasis: schedule.BudgetBasisActual, BudgetMS: 0, Stop: schedule.StopEmpty,
+	})
+	if !strings.Contains(got, "unknown (pre-M2b1 trace)") {
+		t.Fatalf("an absent world order is not reported as unknown:\n%s", got)
+	}
+}
+
+// THE ALLOCATION BOUND renders its number, its target, the allocation behind
+// it and its caveats — and a REFUSAL renders as a refusal rather than as a
+// zero, because no approximation is reported under the name of an exact
+// bound.
+func TestScheduleRendersTheAllocationBound(t *testing.T) {
+	s := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleFixedBudget, Selector: schedule.SelectorNameLadder,
+		BudgetMS: 2000, Stop: schedule.StopEmpty,
+		Bound: &schedule.BoundReport{
+			Available: true, Subsets: 16, TotalMS: 1520, MinSpendMS: 710,
+			SavingMS: 810, SavingBP: 5328, Decision: "SELECT", Subject: "mv0:aa1000000000",
+			BudgetMS: 2000, Reachable: true, AlwaysMS: 40,
+			Prefixes: []schedule.BoundPrefix{{
+				World: "mv0:aa1000000000", Rungs: 3, Bought: 3, CostMS: 710,
+				Oracles: []string{policy.KindTreeGuard, policy.KindPytestCollect, policy.KindPytestSuite},
+			}},
+			Caveats: []string{"costs are counterfactual"},
+		},
+	}
+	got := renderSchedule(s)
+	for _, want := range []string{
+		"allocation bound: minspend 710 ms of 1520 spent (53.3% headroom)",
+		"target d* = SELECT mv0:aa100000…",
+		"3 of 3 rungs", "held constant", "caveat: costs are counterfactual",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the bound rendering is missing %q:\n%s", want, got)
+		}
+	}
+	refused := renderSchedule(&explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleFixedBudget, Selector: schedule.SelectorNameLadder,
+		Stop:  schedule.StopEmpty,
+		Bound: &schedule.BoundReport{Refused: "enumeration exceeds the cap of 1000000 prefix-closed subsets"},
+	})
+	if !strings.Contains(refused, "allocation bound: not computed — enumeration exceeds the cap") {
+		t.Fatalf("a refused bound does not render as a refusal:\n%s", refused)
+	}
+	if strings.Contains(refused, "minspend") {
+		t.Fatalf("a refused bound printed a number anyway:\n%s", refused)
+	}
+}

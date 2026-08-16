@@ -971,16 +971,14 @@ func TestScoreOrderReproducesTheHandAuthoredLadder(t *testing.T) {
 	}
 	s := newSched(t, pol, Config{Bounds: bounds, Costs: NewTable(samples, policy.AutoloadOff, bounds)}, a)
 
-	calls := 0
-	dec := stubDecide(&calls)
-	base := dec(pol, s.worlds, nil)
 	type scored struct {
 		name  string
 		score int64
 	}
 	var got []scored
+	st := s.state()
 	for i, r := range s.rungs {
-		row := s.score(purchase{world: a, rung: r, rest: s.rungs[i+1:]}, nil, base, 0)
+		row := scoreVOC(purchase{world: a, rung: r, rest: s.rungs[i+1:]}, st).Row
 		got = append(got, scored{name: row.Oracle, score: row.ScoreBPPS})
 	}
 	sort.SliceStable(got, func(i, j int) bool { return got[i].score > got[j].score })

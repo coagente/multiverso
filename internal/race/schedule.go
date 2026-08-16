@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/coagente/multiverso/internal/ledger"
@@ -63,33 +64,83 @@ type ScheduleTrace interface {
 // fallback needs a sensitive key AND evidence the policy counts that no hard
 // gate backs. cmd/mvo's pre-flight refusal reads the same two predicates, so
 // the CLI and the library cannot disagree about which policies are safe.
-func scheduleArm(cfg Config, pol policy.Policy) (string, []string) {
+// M2b1 decision 8 widens the rule to any arm that can WITHHOLD, and splits
+// the two arms' responses. Where the adaptive arm falls back, `fixed-budget`
+// ERRORS: a silent fallback from a budgeted arm to an unbudgeted one turns a
+// matched-budget experiment into an unmatched one and records nothing that
+// says so — which is precisely the failure M2b1 exists to correct.
+func scheduleArm(cfg Config, pol policy.Policy) (string, []string, error) {
 	sensitive := pol.AllocationSensitiveKeys()
 	if len(sensitive) > 0 && len(pol.UngatedEvidence()) == 0 {
 		sensitive = nil
 	}
-	if cfg.Schedule == schedule.ScheduleFixed {
-		return schedule.ScheduleFixed, sensitive
+	switch cfg.Schedule {
+	case schedule.ScheduleFixed:
+		return schedule.ScheduleFixed, sensitive, nil
+	case schedule.ScheduleFixedBudget:
+		if len(sensitive) > 0 {
+			return "", sensitive, fmt.Errorf("race: policy %s ranks by %s AND counts evidence no hard gate backs (%s), which cannot be raced under --schedule=%s (M2b validation rule 25, M2b1 decision 8): a budgeted arm withholds, the key rewards the world verified least, and this arm REFUSES rather than falling back to the unbudgeted ladder — a silent fallback would turn a matched-budget comparison into an unmatched one",
+				pol.Digest, strings.Join(sensitive, ","), strings.Join(pol.UngatedEvidence(), ","),
+				schedule.ScheduleFixedBudget)
+		}
+		return schedule.ScheduleFixedBudget, nil, nil
 	}
 	if len(sensitive) > 0 {
-		return schedule.ScheduleFixed, sensitive
+		return schedule.ScheduleFixed, sensitive, nil
 	}
-	return schedule.ScheduleAdaptive, nil
+	return schedule.ScheduleAdaptive, nil, nil
+}
+
+// selectorFor maps the recorded arm to decision 1's selector. It is the ONE
+// place the arms diverge in this package: everything downstream — the
+// frontier, the budget, the charge point, the dispatch, the trace — is the
+// same code for both.
+func selectorFor(arm string) schedule.Selector {
+	if arm == schedule.ScheduleFixedBudget {
+		return schedule.SelectorLadder()
+	}
+	return schedule.SelectorVOC()
+}
+
+// worldOrder is the CONTROL-PLANE world order (M2b1 decision 3): candidate
+// ordinal ascending, which is slot order, because slot k−1 is candidate k by
+// construction (M1c decision 15).
+//
+// It is computed HERE and handed to the scheduler, never derived there, and
+// it is emphatically not world-digest order. A world digest is a function of
+// candidate-authored bytes, and under a binding budget the verification order
+// decides who is verified at all — so ordering on the digest would hand a
+// candidate a lever on whether its rivals are ever measured, which M1f
+// forbids absolutely. It is also not stable across runs (world.created_at,
+// world.cost and the transcript digest are in the pre-image), so digest order
+// would be randomization without a recorded seed.
+func (r *raceRun) worldOrder() []string {
+	out := make([]string, 0, len(r.slots))
+	for i := range r.slots {
+		if r.slots[i].dig != "" {
+			out = append(out, r.slots[i].dig)
+		}
+	}
+	return out
 }
 
 // verifyAll is phase B: the scheduled allocation, or the M1 fixed ladder
 // when the arm says so.
 func (r *raceRun) verifyAll(ctx context.Context, completed []int) error {
-	arm, _ := scheduleArm(r.cfg, r.pol)
+	arm, _, err := scheduleArm(r.cfg, r.pol)
+	if err != nil {
+		return err
+	}
 	if arm == schedule.ScheduleFixed {
 		r.pool(completed, func(i int) error { return r.verify(ctx, i) })
 		return r.failed()
 	}
-	return r.scheduledVerify(ctx, completed)
+	return r.scheduledVerify(ctx, completed, arm)
 }
 
-// scheduledVerify runs phase B under the M2b scheduler.
-func (r *raceRun) scheduledVerify(ctx context.Context, completed []int) error {
+// scheduledVerify runs phase B under the M2b scheduler — either arm. The loop
+// below is decision 1 in force: it does not know which selector it is running.
+func (r *raceRun) scheduledVerify(ctx context.Context, completed []int, arm string) error {
 	// The oracles are built ONCE per world, exactly as the fixed ladder
 	// builds them, and the scheduler never sees them: it allocates over the
 	// policy's declared instances and hands back names.
@@ -130,11 +181,14 @@ func (r *raceRun) scheduledVerify(ctx context.Context, completed []int) error {
 		Batch:        r.cfg.Parallel,
 		CollectInert: r.cfg.CollectInert,
 		CorpusDigest: corpusDigest,
+		Selector:     selectorFor(arm),
+		Order:        r.worldOrder(),
+		Rotation:     r.cfg.Rotation,
+		BudgetBasis:  r.cfg.BudgetBasis,
 	}, worlds)
 	if err != nil {
 		return fmt.Errorf("race: %w", err)
 	}
-	arm, _ := scheduleArm(r.cfg, r.pol)
 	if err := r.traceStarted(sch.Started(r.cfg.Intent, arm, r.cfg.Parallel)); err != nil {
 		return err
 	}

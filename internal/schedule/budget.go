@@ -8,10 +8,19 @@ package schedule
 // parallelism.
 
 // budget is the race's oracle-millisecond pool.
+//
+// nAfford and nCharge count the calls to the two methods that make a
+// comparison fair (M2b1 F5: same affordability predicate, same charge point).
+// They are OBSERVED rather than asserted in prose, because "both arms reach
+// one `affordable` and one `charge`" is the kind of claim that stays true
+// until somebody adds a second path, and a counter is what notices. They
+// influence no allocation.
 type budget struct {
 	max      int64 // 0 = unbounded
 	spent    int64
 	released int64
+	nAfford  int
+	nCharge  int
 }
 
 func (b *budget) unbounded() bool { return b.max <= 0 }
@@ -104,6 +113,7 @@ func (b *budget) share(contenders int) int64 {
 // which is a change to internal/oracle's contract and not an affordability
 // fix, so it is named here rather than half-done.
 func (b *budget) affordable(c Cost, share int64) bool {
+	b.nAfford++
 	if b.unbounded() {
 		return true
 	}
@@ -122,6 +132,7 @@ func (b *budget) affordable(c Cost, share int64) bool {
 // for free — the calibration residual M2d needs to know whether the cost
 // model is worth anything, at the cost of zero new recorded bytes.
 func (b *budget) charge(ms int64) {
+	b.nCharge++
 	if ms > 0 {
 		b.spent += ms
 	}

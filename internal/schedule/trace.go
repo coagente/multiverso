@@ -54,14 +54,34 @@ const (
 // since moved (decision 13).
 //
 // Every field is always serialized (M1b decision 5: no omitempty games).
+// M2b1 adds FOUR fields, all observational, all additive, all ignored by
+// replay and none carrying a payload digest. Their absence on a pre-M2b1
+// trace is normalized rather than guessed at: selector "voc" (EXACT — no
+// earlier binary could record a trace for any arm but the adaptive one),
+// budget_basis "actual", and world_order EMPTY, which the renderer reports
+// as "unknown (pre-M2b1 trace)" and never as digest order, because inventing
+// a past ordering is inventing evidence.
 type Started struct {
-	Budget    StartBudget `json:"budget"`
-	Constants Constants   `json:"constants"`
-	CostTable []CostRow   `json:"cost_table"`
-	Intent    string      `json:"intent"`
-	Mode      string      `json:"mode"`     // ModeDecision | ModeCollectInert
-	Parallel  int         `json:"parallel"` // the dispatch degree k
-	Schedule  string      `json:"schedule"` // ScheduleAdaptive | ScheduleFixed
+	Budget      StartBudget `json:"budget"`
+	BudgetBasis string      `json:"budget_basis"` // BudgetBasisActual | BudgetBasisPredicted
+	Constants   Constants   `json:"constants"`
+	CostTable   []CostRow   `json:"cost_table"`
+	Intent      string      `json:"intent"`
+	Mode        string      `json:"mode"`     // ModeDecision | ModeCollectInert
+	Parallel    int         `json:"parallel"` // the dispatch degree k
+	// Rotation is the replicate's order rotation ρ = r mod N (decision 3).
+	// Over N replicates every candidate holds the head position exactly once,
+	// which turns the depth-first arm's positional advantage into a measured
+	// variance component instead of a confound.
+	Rotation int    `json:"rotation"`
+	Schedule string `json:"schedule"` // ScheduleAdaptive | ScheduleFixed | ScheduleFixedBudget
+	Selector string `json:"selector"` // SelectorNameVOC | SelectorNameLadder
+	// WorldOrder is the CONTROL-PLANE world order this race allocated in —
+	// candidate ordinal ascending, rotated by Rotation. It is recorded
+	// because under a binding budget the verification order decides who gets
+	// verified at all, and an order nobody recorded is an allocation nobody
+	// can audit.
+	WorldOrder []string `json:"world_order"`
 }
 
 // StartBudget is the race's pinned oracle budget. 0 means UNBOUNDED, which
@@ -199,10 +219,16 @@ type Considered struct {
 	// they are separate units: one field carrying both would be a
 	// milliseconds-and-rank average, and M2d would aggregate it across kinds
 	// and races without ever seeing the seam.
-	ScoreBPPS int64  `json:"score_bpps"`
-	ScoreRank int64  `json:"score_rank"`
-	ValueBP   int64  `json:"value_bp"`
-	World     string `json:"world"`
+	ScoreBPPS int64 `json:"score_bpps"`
+	ScoreRank int64 `json:"score_rank"`
+	// Order is the LADDER arm's depth-first rank of this row within its own
+	// step — 1 for the world the arm is currently completing — and 0 on a VOC
+	// row, which has no depth-first rank at all. It is the one field a ladder
+	// row carries that a VOC row does not, and it is the reason a reader can
+	// reconstruct the arm's order from the trace alone.
+	Order   int    `json:"order"`
+	ValueBP int64  `json:"value_bp"`
+	World   string `json:"world"`
 }
 
 // Bought reports whether this row was purchased in its own batch.
@@ -215,10 +241,16 @@ type Chosen struct {
 	World  string `json:"world"`
 }
 
-// ReasonTopScore is the ordinary purchase reason, kept as a constant so
-// every step spells it identically and a reader can grep a ledger for the
-// purchases that were NOT ordinary.
+// ReasonTopScore is the VOC arm's ordinary purchase reason, kept as a
+// constant so every step spells it identically and a reader can grep a ledger
+// for the purchases that were NOT ordinary.
 const ReasonTopScore = "highest score_bpps among affordable frontier"
+
+// ReasonLadderOrder is the LADDER arm's ordinary purchase reason. It is a
+// separate sentence because it is a separate fact: the depth-first arm buys
+// no score at all, and recording "highest score_bpps" beside a row whose
+// score is absent would put a rule nobody ran into the permanent record.
+const ReasonLadderOrder = "next rung of the leading world in control-plane order"
 
 // There is no cohort-close reason, and its absence is recorded rather than
 // left as a gap. §2.2 and §10 describe `corpus-differential` as a dependent
@@ -280,9 +312,17 @@ type Finished struct {
 	// and the winner can change. True means the race stopped with a passing
 	// candidate missing such a receipt, so the ORDER below the pass set is
 	// not covered by the safety claim — and the operator has to know that.
-	RankingIncomplete bool   `json:"ranking_incomplete"`
-	Steps             int    `json:"steps"`
-	Stop              string `json:"stop"` // Stop* — S-budget is the STARVED stop
+	RankingIncomplete bool `json:"ranking_incomplete"`
+	// SelectionUS is the arm's own metalevel time in microseconds: the
+	// frontier walk, the lookahead, the ranking and the batch fill, measured.
+	// It is REPORTED AND NOT CHARGED (M2b1 F8): PRD §11's budget includes
+	// selection cost, this harness charges only oracle milliseconds, and the
+	// field exists so the claim that selection is 0.07–0.3% of the purchase
+	// it prices stays re-checkable rather than inherited from a benchmark run
+	// once.
+	SelectionUS int64  `json:"selection_us"`
+	Steps       int    `json:"steps"`
+	Stop        string `json:"stop"` // Stop* — S-budget is the STARVED stop
 	// Violation is the purchase-law assertion (decision 9), and it MUST
 	// always be empty. "The prospective winner has paid for everything" is
 	// not a condition the scheduler maintains — it is what a SELECT from
@@ -389,6 +429,20 @@ func (r *Recorder) Skipped(s Skipped) error { return r.emit(EventOracleSkipped, 
 // field is missing" are different facts and only one of them can be true
 // (the EP-2 rule, applied to the trace).
 func normalizeStarted(s Started) Started {
+	// A pre-M2b1 trace carries neither field, and the defaults are EXACT
+	// rather than assumed: only the adaptive arm could record a trace before
+	// M2b1, and only actual wall-clock could charge the pool. WorldOrder is
+	// left EMPTY on purpose — "unknown" is a fact and digest order would be
+	// an invention.
+	if s.Selector == "" {
+		s.Selector = SelectorNameVOC
+	}
+	if s.BudgetBasis == "" {
+		s.BudgetBasis = BudgetBasisActual
+	}
+	if s.WorldOrder == nil {
+		s.WorldOrder = []string{}
+	}
 	if s.CostTable == nil {
 		s.CostTable = []CostRow{}
 	}

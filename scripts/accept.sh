@@ -1783,6 +1783,363 @@ $M2A_SCHED"
   git -C "$ROOT" worktree remove --force "$M2ATREE" >/dev/null 2>&1 || true
 fi
 
+# ============================ M2b1 ============================
+# THE BUDGETED FIXED ARM. M2b shipped an adaptive allocator, a trace and a
+# comparison harness, and its own BUILDLOG says why none of its numbers
+# settled anything: `--schedule=fixed` is the UNBUDGETED exhaustive M1 ladder,
+# it reads max_oracle_ms never, and every "matched budget" figure compared
+# adaptive under B against exhaustive under infinity. These six steps are the
+# missing arm under test.
+#
+# The step names are M2b1's own (6a-6f) and are prefixed `m2b1-` because
+# steps 6b-6g of the M1d publication flow already exist below.
+
+# --- m2b1-6a. THE NEW NULL CASE. `--schedule=fixed-budget --budget-oracle-ms 0`
+# against `--schedule=fixed`: the reference arm is the M1 ladder PLUS A TRACE,
+# and this is the proof. Same evidence set, same decision, same rationale —
+# modulo world digest, which two races of one intent mint differently by
+# construction — and the budgeted arm additionally records a trace, which is
+# what makes spend, waste and the cost-table snapshot computable for the
+# reference at all. ---
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "m2b1-6a: policy use default failed"
+INTENT_REF="$("$MVO" intent new --dir "$REPO" --title "m2b1: reference arm" --budget-oracle-ms 0)"
+[ -n "$INTENT_REF" ] || fail "m2b1-6a: mvo intent new printed no digest"
+"$MVO" race "$INTENT_REF" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed \
+  || fail "m2b1-6a: the untraced fixed race failed"
+REF_FIXED="$("$MVO" explain "$INTENT_REF" --dir "$REPO" --json)"
+"$MVO" race "$INTENT_REF" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed-budget \
+  || fail "m2b1-6a: the budgeted reference race failed"
+REF_BUDGETED="$("$MVO" explain "$INTENT_REF" --dir "$REPO" --json --schedule)"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT type || '|' || payload_dig || '|' || cast(payload AS text) FROM events WHERE type='world.created' ORDER BY seq;" \
+  | FIXED="$REF_FIXED" BUDGETED="$REF_BUDGETED" INTENT="$INTENT_REF" python3 -c '
+import json, os, sys
+
+intent = os.environ["INTENT"]
+worlds = {}
+for line in sys.stdin:
+    typ, dig, payload = line.rstrip("\n").split("|", 2)
+    p = json.loads(payload)
+    if p.get("intent") == intent:
+        worlds[dig] = p["patch"]
+
+def label(text):
+    for dig, patch in worlds.items():
+        text = text.replace(dig, "world<%s>" % patch)
+    return text
+
+def projection(doc):
+    return {
+        "type": doc["type"],
+        "rationale": doc["rationale"],
+        "escalation": doc.get("escalation", {}),
+        "candidates": [{
+            "world": c["world"], "pass": c["pass"], "outcome": c["outcome"],
+            "rank": c["rank"], "ordinal": c["ordinal"],
+            "gates": [(g["label"], g["result"], g["detail"]) for g in c["gates"]],
+            "keys": [(k["key"], k["known"], k["text"]) for k in c["keys"] if k["key"] != "wall_ms_asc"],
+        } for c in doc["candidates"]],
+        "trace": doc.get("trace", []),
+    }
+
+fixed, budgeted = json.loads(os.environ["FIXED"]), json.loads(os.environ["BUDGETED"])
+a = label(json.dumps(projection(fixed), sort_keys=True))
+b = label(json.dumps(projection(budgeted), sort_keys=True))
+assert a == b, "the reference arm decided differently from the M1 ladder:\n%s\n%s" % (a[:600], b[:600])
+
+# And the half that is the POINT: the budgeted arm TRACES where the M1 ladder
+# does not, so evidence waste, spend and the cost table exist for the
+# reference too.
+sched = budgeted.get("schedule") or {}
+assert sched.get("recorded") is True, "the reference arm recorded no allocation trace"
+assert sched["arm"] == "fixed-budget", sched["arm"]
+assert sched["selector"] == "ladder", sched["selector"]
+assert sched["stop"] == "S-empty", sched["stop"]
+assert sched["budget_ms"] == 0, sched["budget_ms"]
+assert sched["world_order"], "the reference arm recorded no control-plane world order"
+assert sched["cost_model"], "the reference arm recorded no cost-table snapshot"
+assert (sched.get("waste") or {}).get("available") is True, "evidence waste is not computable for the reference arm"
+assert (fixed.get("schedule") or None) is None, "the --json report carried a schedule block without --schedule"
+print("m2b1-6a: the reference arm is the M1 ladder plus a trace (%s, %d rows)"
+      % (fixed["type"], len(sched["steps"])))
+' || fail "m2b1-6a: --schedule=fixed-budget at an unbounded budget is not the M1 ladder"
+# The receipt SETS, world by world and rung by rung — the explain report is a
+# view, and this is the evidence itself.
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT json_object('seq', seq, 'type', type, 'dig', coalesce(payload_dig,''), 'payload', cast(payload AS text))
+     FROM events WHERE type IN ('race.started','world.created','receipt.recorded') ORDER BY seq;" \
+  | INTENT="$INTENT_REF" python3 -c '
+import json, os, sys
+intent = os.environ["INTENT"]
+rows = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    rows.append((int(r["seq"]), r["type"], r["dig"], json.loads(r["payload"])))
+starts = [s for s, t, d, p in rows if t == "race.started" and p.get("intent") == intent]
+assert len(starts) == 2, ("want two races of the reference intent", len(starts))
+patch_of = {d: p["patch"] for s, t, d, p in rows if t == "world.created" and p.get("intent") == intent}
+def rungs(lo, hi):
+    return sorted((patch_of[p["world"]], p["oracle"]["id"], p["result"]["status"])
+                  for s, t, d, p in rows if t == "receipt.recorded" and lo < s < hi)
+first, second = rungs(starts[0], starts[1]), rungs(starts[1], 10**9)
+assert first and second, (len(first), len(second))
+assert first == second, ("the arms bought different evidence", first, second)
+print("m2b1-6a: both arms bought the same %d receipts" % len(first))
+' || fail "m2b1-6a: the reference arm bought different evidence from the M1 ladder"
+
+# --- m2b1-6b. THE BUDGET BINDS, AND THE PARTIAL WORLD IS HONEST. At a binding
+# budget the arm stops on S-budget, at least one world holds a STRICT ladder
+# prefix, every rung it never bought carries an oracle.skipped naming the
+# budget, and no unbought rung is marked passed anywhere. The decision is
+# REJECT or ESCALATE depending on F14's two policy configurations, and BOTH
+# are run: reporting only the one where on_evidence_incomplete is declared
+# would describe a product nobody runs, since the rule ships OFF. ---
+"$MVO" policy use schedule --dir "$REPO" >/dev/null || fail "m2b1-6b: policy use schedule failed"
+INTENT_LADDER_FULL="$("$MVO" intent new --dir "$REPO" --title "m2b1: ladder reference")"
+"$MVO" race "$INTENT_LADDER_FULL" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed-budget \
+  || fail "m2b1-6b: the unbounded ladder race failed"
+LADDER_S="$("$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --json --schedule \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule"]["spent_ms"])')"
+[ "$LADDER_S" -gt 0 ] 2>/dev/null || fail "m2b1-6b: the reference ladder race recorded no spend"
+# A budget that binds without starving the first purchase: half of what the
+# exhaustive ladder actually spent, DERIVED rather than guessed, because a
+# hard-coded figure is a guess about this machine and both ways it can be
+# wrong are silent.
+LADDER_B=$((LADDER_S / 2))
+INTENT_LADDER_CUT="$("$MVO" intent new --dir "$REPO" --title "m2b1: ladder starved" --budget-oracle-ms "$LADDER_B")"
+"$MVO" race "$INTENT_LADDER_CUT" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed-budget \
+  || fail "m2b1-6b: the starved ladder race failed"
+"$MVO" explain "$INTENT_LADDER_CUT" --dir "$REPO" --json --schedule | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+sched = doc["schedule"]
+assert sched["selector"] == "ladder", sched["selector"]
+assert sched["stop"] == "S-budget", ("the budget did not bind", sched["stop"])
+assert sched["skipped"], "a starved race recorded no oracle.skipped rows"
+for sk in sched["skipped"]:
+    assert "budget" in sk["reason"] or "pool" in sk["reason"], sk
+# THE PARTIAL WORLD. A world named in an oracle.skipped row holds a strict
+# ladder prefix: the rungs it never bought are absent, not assumed fine, and
+# an absent required metric fails its gate. There is no "skipped, assume fine"
+# state and there will not be one (M2a purchase law).
+truncated = {sk["world"] for sk in sched["skipped"]}
+assert truncated, "no world was truncated"
+for c in doc["candidates"]:
+    if c["world"] not in truncated:
+        continue
+    unbought = [g for g in c["gates"] if g["result"] not in ("pass", "fail")]
+    assert not c["pass"] or not unbought, ("a world with an unpurchased gate PASSED", c["world"])
+    for g in unbought:
+        assert g["result"] != "pass", ("an unbought rung was marked passed", g)
+assert doc["type"] in ("REJECT", "ESCALATE"), doc["type"]
+print("m2b1-6b: %s, stop %s, %d world(s) truncated, %d skipped rung(s)"
+      % (doc["type"], sched["stop"], len(truncated), len(sched["skipped"])))
+' || fail "m2b1-6b: the budgeted ladder did not stop honestly when the money ran out"
+LADDER_CUT_TYPE="$("$MVO" explain "$INTENT_LADDER_CUT" --dir "$REPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')"
+# F14's CONTROL: the same fixture and the same derived budget under a policy
+# that does NOT declare on_evidence_incomplete. The rule ships off, so the
+# comparison has to be run under both configurations and both reported.
+"$MVO" policy use differential --dir "$REPO" >/dev/null || fail "m2b1-6b: policy use differential failed"
+INTENT_LADDER_CTL="$("$MVO" intent new --dir "$REPO" --title "m2b1: ladder starved control" --budget-oracle-ms "$LADDER_B")"
+"$MVO" race "$INTENT_LADDER_CTL" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed-budget \
+  || fail "m2b1-6b: the control race failed"
+LADDER_CTL_TYPE="$("$MVO" explain "$INTENT_LADDER_CTL" --dir "$REPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')"
+echo "m2b1-6b: on_evidence_incomplete declared -> $LADDER_CUT_TYPE; not declared -> $LADDER_CTL_TYPE (F14's two configurations, both reported)"
+case "$LADDER_CTL_TYPE" in
+  REJECT|SELECT|ESCALATE) ;;
+  *) fail "m2b1-6b: the control race decided $LADDER_CTL_TYPE" ;;
+esac
+
+# --- m2b1-6c. THE ARMS ARE COMPARABLE. A paired run of both arms over ONE
+# seeded workspace: the cost table, the budget, the basis, the dispatch degree,
+# the world-order length and the policy digest are byte-equal across the arms,
+# and the SELECTOR is the only recorded field that differs. A comparison whose
+# arms disagree about any of the others is not a comparison. ---
+"$MVO" policy use schedule --dir "$REPO" >/dev/null || fail "m2b1-6c: policy use schedule failed"
+PAIR_SEED="$WORK/m2b1-pair"
+rm -rf "$PAIR_SEED"
+cp -R "$REPO" "$PAIR_SEED"
+PAIR_INTENT="$("$MVO" intent new --dir "$PAIR_SEED" --title "m2b1: paired" --budget-oracle-ms "$LADDER_B")"
+rm -rf "$WORK/m2b1-pair-a" "$WORK/m2b1-pair-b"
+cp -R "$PAIR_SEED" "$WORK/m2b1-pair-a"
+cp -R "$PAIR_SEED" "$WORK/m2b1-pair-b"
+"$MVO" race "$PAIR_INTENT" --dir "$WORK/m2b1-pair-a" --agent script --patches "$WORK/m2b1-pair-a/patches" \
+  --schedule=adaptive --budget-basis actual --world-order-rotation 0 >/dev/null \
+  || fail "m2b1-6c: the adaptive arm failed"
+"$MVO" race "$PAIR_INTENT" --dir "$WORK/m2b1-pair-b" --agent script --patches "$WORK/m2b1-pair-b/patches" \
+  --schedule=fixed-budget --budget-basis actual --world-order-rotation 0 >/dev/null \
+  || fail "m2b1-6c: the budgeted ladder arm failed"
+A_SCHED="$("$MVO" explain "$PAIR_INTENT" --dir "$WORK/m2b1-pair-a" --json --schedule)"
+B_SCHED="$("$MVO" explain "$PAIR_INTENT" --dir "$WORK/m2b1-pair-b" --json --schedule)"
+A_JSON="$A_SCHED" B_JSON="$B_SCHED" python3 -c '
+import json, os
+a, b = json.loads(os.environ["A_JSON"]), json.loads(os.environ["B_JSON"])
+sa, sb = a["schedule"], b["schedule"]
+assert a["policy"]["digest"] == b["policy"]["digest"], "F1: different policies"
+assert json.dumps(sa["cost_model"], sort_keys=True) == json.dumps(sb["cost_model"], sort_keys=True), \
+    "F3: the arms allocated against different cost models"
+assert sa["budget_ms"] == sb["budget_ms"] > 0, ("F4: different budgets", sa["budget_ms"], sb["budget_ms"])
+assert sa["budget_basis"] == sb["budget_basis"] == "actual", (sa["budget_basis"], sb["budget_basis"])
+assert sa["parallel"] == sb["parallel"], "F9: different dispatch degrees"
+assert sa["rotation"] == sb["rotation"], "F12: different rotations in one pair"
+assert len(sa["world_order"]) == len(sb["world_order"]) > 0, "the arms ranked over different world sets"
+assert sa["selector"] != sb["selector"], ("both arms recorded the same selector", sa["selector"])
+assert sa["selector"] == "voc" and sb["selector"] == "ladder", (sa["selector"], sb["selector"])
+# Both arms charge the SAME pool through the same predicate, so both report
+# the same fields — including the ones only one of them used to have.
+for s in (sa, sb):
+    assert s["recorded"] is True and s["stop"], s
+    assert (s.get("waste") or {}).get("available") is True, "evidence waste is not computable for an arm"
+    assert s["selection_us"] >= 0, s["selection_us"]
+print("m2b1-6c: arms comparable at %d ms (a=%s %s, b=%s %s)"
+      % (sa["budget_ms"], sa["selector"], a["type"], sb["selector"], b["type"]))
+' || fail "m2b1-6c: the two arms are not comparable field by field"
+
+# --- m2b1-6d. ABSENT IS ABSENT. A ladder row carries no value-of-computation
+# term at all — the arm computes none — and the renderer prints an em dash
+# rather than a zero a reader could aggregate. A `0` under FLIP is a VOC row
+# that scored zero, which is a different fact about a different arm. ---
+"$MVO" explain "$PAIR_INTENT" --dir "$WORK/m2b1-pair-b" --json --schedule | python3 -c '
+import json, sys
+sched = json.load(sys.stdin)["schedule"]
+assert sched["selector"] == "ladder", sched["selector"]
+assert sched["steps"], "the ladder race considered nothing"
+for r in sched["steps"]:
+    for field in ("flip", "discount_bp", "executor_bp", "value_bp", "score_bpps"):
+        assert r[field] == 0, ("a ladder row carries a VOC term", field, r)
+    assert r["flip_outcomes"] == [], r
+    assert r["order"] >= 1, ("a ladder row carries no depth-first rank", r)
+print("m2b1-6d: %d ladder rows, none of them carrying a value term" % len(sched["steps"]))
+' || fail "m2b1-6d: a ladder row carries a value-of-computation term it never computed"
+LADDER_RENDER="$("$MVO" explain "$PAIR_INTENT" --dir "$WORK/m2b1-pair-b" --schedule)"
+printf '%s' "$LADDER_RENDER" | grep -q 'selector:   ladder (depth-first, world order recorded)' \
+  || fail "m2b1-6d: the ladder race does not name its selector:
+$LADDER_RENDER"
+printf '%s' "$LADDER_RENDER" | grep -q '—' \
+  || fail "m2b1-6d: the ladder rendering prints no em dash where it holds no number:
+$LADDER_RENDER"
+# The FLIP column of every ladder DATA ROW is an em dash and never a digit.
+# The check is scoped to the rows on purpose: the header, the cost model and
+# the bound legitimately print an em dash wherever a field is absent.
+printf '%s' "$LADDER_RENDER" | awk '/^  STEP +WORLD/ { table = 1; next }
+  table && /^  [0-9]+ +mv0:/ { rows++; if ($4 != "—") bad++ }
+  END { if (rows == 0 || bad > 0) exit 1 }' \
+  || fail "m2b1-6d: a ladder row printed a number under FLIP, which is a VOC row's fact:
+$LADDER_RENDER"
+# THE CONTROL: a VOC row still renders its numbers, including a measured
+# ZERO. Without it the rule above would only say "the renderer prints dashes".
+VOC_RENDER="$("$MVO" explain "$PAIR_INTENT" --dir "$WORK/m2b1-pair-a" --schedule)"
+printf '%s' "$VOC_RENDER" | grep -q 'selector:   voc' \
+  || fail "m2b1-6d: the adaptive race does not name its selector:
+$VOC_RENDER"
+printf '%s' "$VOC_RENDER" | awk '/^  STEP +WORLD/ { table = 1; next }
+  table && /^  [0-9]+ +mv0:/ { rows++; if ($4 !~ /^[0-9]+$/) bad++ }
+  END { if (rows == 0 || bad > 0) exit 1 }' \
+  || fail "m2b1-6d: a VOC row rendered an em dash where it holds a measured number:
+$VOC_RENDER"
+printf '%s' "$VOC_RENDER" | awk '/^  STEP +WORLD/ { table = 1; next }
+  table && /^  [0-9]+ +mv0:/ { if ($4 == "0") zero++ }
+  END { exit (zero > 0 ? 0 : 1) }' \
+  || echo "note m2b1-6d: no VOC row scored flip 0 in this race; the zero-vs-absent contrast is asserted in cmd/mvo's unit tests"
+
+# --- m2b1-6e. THE BOUND. On the reference ledger: minspend <= S, the cheapest
+# sufficient allocation re-decides d* under `Decide`, two computations agree
+# byte for byte, and the enumeration cap REFUSES rather than approximating. It
+# is DERIVED, never recorded: improving its definition invalidates no race. ---
+BOUND_A="$("$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --json --schedule --bound)"
+BOUND_B="$("$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --json --schedule --bound)"
+A_JSON="$BOUND_A" B_JSON="$BOUND_B" S="$LADDER_S" python3 -c '
+import json, os
+a = json.loads(os.environ["A_JSON"])["schedule"]
+b = json.loads(os.environ["B_JSON"])["schedule"]
+bound = a["bound"]
+assert bound["available"] is True, bound
+assert json.dumps(bound, sort_keys=True) == json.dumps(b["bound"], sort_keys=True), \
+    "two computations of the bound disagree"
+assert bound["minspend_ms"] <= bound["total_ms"], bound
+assert bound["total_ms"] <= int(os.environ["S"]), (bound["total_ms"], os.environ["S"])
+assert bound["decision"], bound
+assert bound["subsets"] >= 1 and bound["subsets"] <= bound["cap"], bound
+assert bound["caveats"], "the bound was reported without its caveats"
+for p in bound["prefixes"]:
+    assert 0 <= p["rungs"] <= p["bought"], p
+print("m2b1-6e: minspend %d ms of %d over %d prefix-closed allocations (%s)"
+      % (bound["minspend_ms"], bound["total_ms"], bound["subsets"], bound["decision"]))
+' || fail "m2b1-6e: the allocation bound is not computable, deterministic or consistent"
+"$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --json --schedule --bound --bound-cap 2 | python3 -c '
+import json, sys
+bound = json.load(sys.stdin)["schedule"]["bound"]
+assert bound["available"] is False, "the bound reported a number above its own cap"
+assert "cap" in bound["refused"], bound["refused"]
+assert bound["minspend_ms"] == 0, "a refused bound reported a number anyway"
+print("m2b1-6e: above the cap the bound refuses rather than approximating")
+' || fail "m2b1-6e: the enumeration cap approximates instead of refusing"
+# Captured, not piped: `grep -q` exits on its first match and the bound is
+# printed mid-report, so under `set -o pipefail` the writer's EPIPE would turn
+# a HIT into a failure.
+BOUND_RENDER="$("$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --schedule --bound)"
+printf '%s' "$BOUND_RENDER" | grep -q 'allocation bound: minspend' \
+  || fail "m2b1-6e: the human rendering does not print the bound:
+$BOUND_RENDER"
+printf '%s' "$BOUND_RENDER" | grep -q 'caveat: it bounds ALLOCATION of a fixed evidence set' \
+  || fail "m2b1-6e: the bound is rendered without the caveat that says what it is not:
+$BOUND_RENDER"
+set +e
+"$MVO" explain "$INTENT_LADDER_FULL" --dir "$REPO" --bound >"$WORK/bound-usage.out" 2>&1
+BOUND_CODE=$?
+set -e
+[ "$BOUND_CODE" = "2" ] || fail "m2b1-6e: --bound without --schedule exited $BOUND_CODE, want 2 (usage)"
+
+# --- m2b1-6f. REPLICATION. The harness prints dispersion and a verdict at
+# R >= 3 and refuses to print a verdict below it: a single run at a budget
+# level is an anecdote, and the rule is enforced by the harness rather than by
+# discipline. Every number M2b's own BUILDLOG quotes was produced at R = 1. ---
+COMPARE_R3="$WORK/compare-r3.json"
+if bash "$ROOT/scripts/schedule-compare.sh" --replicates 3 --level B2 --warmup 1 --json >"$COMPARE_R3" 2>"$WORK/compare-r3.err"; then
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+v = d["verdict"]
+assert v["verdict_available"] is True, v
+assert v["replicates"] == 3, v
+assert d["a"]["selector"] != d["b"]["selector"], (d["a"]["selector"], d["b"]["selector"])
+# Dispersion, not a mean alone: median + IQR + min/max per arm.
+for arm in ("a", "b"):
+    sp = d[arm]["spend_ms"]
+    assert sp["n"] >= 1 and sp["min"] <= sp["median"] <= sp["max"], (arm, sp)
+    assert "self_disagreement" in d[arm], arm
+assert "noise_floor" in v and "disagreement_rate" in v, v
+assert v["oracle_budget_matched_ms"] > 0, v
+print("m2b1-6f: R=%d, kept %d, disagreement %.0f%%, noise floor %.0f%%"
+      % (v["replicates"], v["kept"], v["disagreement_rate"] * 100, v["noise_floor"] * 100))
+' "$COMPARE_R3" || fail "m2b1-6f: the replicated comparison printed no usable verdict"
+else
+  code=$?
+  [ "$code" = "77" ] || fail "m2b1-6f: schedule-compare.sh --replicates 3 exited $code
+$(cat "$WORK/compare-r3.err")"
+  echo "SKIP m2b1-6f (verdict half): this binary does not expose both budgeted arms"
+fi
+set +e
+bash "$ROOT/scripts/schedule-compare.sh" --replicates 1 --warmup 1 --strict >"$WORK/compare-r1.out" 2>&1
+R1_CODE=$?
+set -e
+[ "$R1_CODE" = "3" ] || [ "$R1_CODE" = "77" ] \
+  || fail "m2b1-6f: --replicates 1 --strict exited $R1_CODE, want 3 (no verdict) or 77 (skip)
+$(cat "$WORK/compare-r1.out")"
+if [ "$R1_CODE" = "3" ]; then
+  grep -q 'ANECDOTE (R=1): no verdict' "$WORK/compare-r1.out" \
+    || fail "m2b1-6f: a single replicate printed no ANECDOTE banner:
+$(cat "$WORK/compare-r1.out")"
+  grep -q 'verdict:' "$WORK/compare-r1.out" \
+    && fail "m2b1-6f: a single replicate printed a verdict:
+$(cat "$WORK/compare-r1.out")"
+fi
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "m2b1-6f: policy use default (restore) failed"
+"$MVO" audit --dir "$REPO" | grep -q '^OK:' \
+  || fail "m2b1: mvo audit is not OK with the fixed-budget arm's events present"
+
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"
 "$MVO" admit "$INTENT" --dir "$REPO" || fail "mvo admit exited non-zero"

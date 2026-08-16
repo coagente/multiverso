@@ -112,6 +112,8 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	jsonOut := fs.Bool("json", false, "emit the machine-readable explain report")
 	diffs := fs.Int("diffs", 0, "append the top-N ranked candidates' captured patches")
 	sched := fs.Bool("schedule", false, "append the recorded allocation trace: what the scheduler bought, what it declined, and evidence waste")
+	boundCap := fs.Int64("bound-cap", 0, "override the allocation bound's enumeration cap (0 = the built-in 1e6); above it the bound REFUSES rather than approximating")
+	bound := fs.Bool("bound", false, "append the RETROSPECTIVE ALLOCATION BOUND: the cheapest prefix-respecting allocation of this race's own evidence that reaches the same decision (M2b1 §5; costs ~0.25 s, so it is off by default)")
 	if err := parseFlags(fs, rest); err != nil {
 		return err
 	}
@@ -121,6 +123,15 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	}
 	if *diffs < 0 {
 		return usagef("explain: --diffs must not be negative")
+	}
+	if *boundCap < 0 {
+		return usagef("explain: --bound-cap must not be negative")
+	}
+	if *bound && !*sched {
+		// The bound is part of the allocation story and is rendered inside it.
+		// Silently turning --schedule on would print a block the operator did
+		// not ask for; refusing names the flag that produces it.
+		return usagef("explain: --bound requires --schedule (the allocation bound is rendered with the allocation)")
 	}
 
 	ws, err := workspace.Open(*dir)
@@ -188,7 +199,7 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 			rep.Winner = tr.Winner
 		}
 		if *sched {
-			rep.Schedule = scheduleBlock(st, found, pol, worlds, receipts)
+			rep.Schedule = scheduleBlock(st, found, pol, worlds, receipts, *bound, *boundCap)
 		}
 	}
 	for _, e := range dec.Evidence {

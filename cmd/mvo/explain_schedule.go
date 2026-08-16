@@ -37,19 +37,38 @@ type explainSchedule struct {
 	// fixed-ladder race and a pre-M2b race record none, and the block says so
 	// rather than rendering an empty table that reads like "the scheduler
 	// bought nothing".
-	Recorded  bool                 `json:"recorded"`
-	Arm       string               `json:"arm"`
-	Mode      string               `json:"mode"`
-	BudgetMS  int64                `json:"budget_ms"`
-	Parallel  int                  `json:"parallel"`
-	Inert     bool                 `json:"collect_inert"`
-	Steps     []explainScheduleRow `json:"steps"`
-	CostModel []explainCostRow     `json:"cost_model"`
-	Skipped   []schedule.Skipped   `json:"skipped"`
-	Stop      string               `json:"stop"`
-	Batches   int                  `json:"batches"`
-	SpentMS   int64                `json:"spent_ms"`
-	Released  int64                `json:"released_ms"`
+	Recorded bool   `json:"recorded"`
+	Arm      string `json:"arm"`
+	// Selector is which of decision 1's two rules ordered this race's
+	// purchases, and it is a different fact from the arm label: `arm` is what
+	// the operator asked for, `selector` is what ranked the frontier. On a
+	// pre-M2b1 trace it reads "voc" exactly rather than by assumption — no
+	// earlier binary could record a trace for any other arm.
+	Selector string `json:"selector"`
+	// BudgetBasis, Rotation and WorldOrder are the three fields that make two
+	// races COMPARABLE (M2b1 §3): what the pool was charged, which rotation
+	// of the control-plane order this replicate ran, and the order itself. An
+	// empty world order is reported as unknown and NEVER as digest order,
+	// because inventing a past ordering is inventing evidence.
+	BudgetBasis string               `json:"budget_basis"`
+	Rotation    int                  `json:"rotation"`
+	WorldOrder  []string             `json:"world_order"`
+	Mode        string               `json:"mode"`
+	BudgetMS    int64                `json:"budget_ms"`
+	Parallel    int                  `json:"parallel"`
+	Inert       bool                 `json:"collect_inert"`
+	Steps       []explainScheduleRow `json:"steps"`
+	CostModel   []explainCostRow     `json:"cost_model"`
+	Skipped     []schedule.Skipped   `json:"skipped"`
+	Stop        string               `json:"stop"`
+	Batches     int                  `json:"batches"`
+	SpentMS     int64                `json:"spent_ms"`
+	Released    int64                `json:"released_ms"`
+	// SelectionUS is the arm's own metalevel time, measured: REPORTED AND NOT
+	// CHARGED (F8). PRD §11's budget includes selection cost and this harness
+	// charges only oracle milliseconds, so the field is what keeps the claim
+	// "selection is 0.07-0.3% of the purchase it prices" re-checkable.
+	SelectionUS int64 `json:"selection_us"`
 	// Predicted and Actual are the calibration residual's two halves and
 	// they cover THE SAME ROWS: the purchases priced from a fit. A
 	// declared-rank purchase has no prediction to compare against, so its
@@ -73,6 +92,10 @@ type explainSchedule struct {
 	// It is rendered only when it is not, because an invariant this
 	// load-bearing should be observed rather than assumed.
 	Violation string `json:"violation"`
+	// Bound is the retrospective allocation bound (M2b1 §5), computed only
+	// under --bound because it costs a quarter-second. It is DERIVED, never
+	// recorded: improving its definition invalidates no race.
+	Bound *schedule.BoundReport `json:"bound,omitempty"`
 }
 
 // explainUnscheduled is one receipt the allocation trace never named: it was
@@ -99,7 +122,10 @@ type explainScheduleTotals struct {
 // derived cell: the receipt's own status, so a reader sees what the purchase
 // actually reported next to what it was predicted to be worth.
 type explainScheduleRow struct {
-	Step         int      `json:"step"`
+	Step int `json:"step"`
+	// Order is the LADDER arm's depth-first rank of this row within its step,
+	// and 0 on a VOC row, which has no depth-first rank at all.
+	Order        int      `json:"order"`
 	World        string   `json:"world"`
 	Oracle       string   `json:"oracle"`
 	Kind         string   `json:"kind"`
@@ -143,7 +169,8 @@ type explainCostRow struct {
 // trace returns a block with Recorded == false, which is a different fact and
 // gets a different sentence.
 func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
-	worlds []object.RecordedWorld, receipts []object.RecordedReceipt) *explainSchedule {
+	worlds []object.RecordedWorld, receipts []object.RecordedReceipt,
+	bound bool, boundCap int64) *explainSchedule {
 
 	raceStart := st.raceStartBefore(dr.Decision.Intent, dr.Seq)
 	tr, err := schedule.Collect(st.scheduleWindow(raceStart, dr.Seq))
@@ -155,6 +182,11 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	}
 	out := &explainSchedule{
 		Recorded:          !tr.Empty(),
+		Selector:          tr.Started.Selector,
+		BudgetBasis:       tr.Started.BudgetBasis,
+		Rotation:          tr.Started.Rotation,
+		WorldOrder:        tr.Started.WorldOrder,
+		SelectionUS:       tr.Finished.SelectionUS,
 		Mode:              tr.Started.Mode,
 		BudgetMS:          tr.Started.Budget.MaxOracleMS,
 		Parallel:          tr.Started.Parallel,
@@ -178,6 +210,24 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	if out.Skipped == nil {
 		out.Skipped = []schedule.Skipped{}
 	}
+	if out.WorldOrder == nil {
+		out.WorldOrder = []string{}
+	}
+	// THE BOUND IS COMPUTED WHETHER OR NOT A TRACE EXISTS, and that is not an
+	// oversight: it is a function of the recorded POLICY, WORLDS and RECEIPTS
+	// alone, so it answers "how much allocation headroom did this instance
+	// have" for an untraced M1 race exactly as well as for a scheduled one.
+	// A denominator that only existed for the arm that recorded a trace would
+	// be no denominator at all.
+	if bound {
+		rep, berr := schedule.Bound(schedule.BoundInput{
+			Policy: pol, Worlds: worlds, Receipts: receipts,
+			Decide: race.Decide, BudgetMS: tr.Started.Budget.MaxOracleMS, Cap: boundCap,
+		})
+		if berr == nil {
+			out.Bound = &rep
+		}
+	}
 	if !out.Recorded {
 		return out
 	}
@@ -190,7 +240,7 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	for _, s := range tr.Steps {
 		for _, r := range s.Considered {
 			row := explainScheduleRow{
-				Step: s.Step, World: r.World, Oracle: r.Oracle, Kind: r.Kind,
+				Step: s.Step, Order: r.Order, World: r.World, Oracle: r.Oracle, Kind: r.Kind,
 				Flip: r.Flip, FlipOutcomes: r.FlipOutcomes, DiscountBP: r.DiscountBP,
 				ExecutorBP: r.ExecutorBP, ValueBP: r.ValueBP, CostMS: r.CostMS,
 				CostBasis: r.CostBasis, ScoreBPPS: r.ScoreBPPS, Affordable: r.Affordable,
@@ -372,6 +422,9 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 		fmt.Fprint(w, ", --collect-inert")
 	}
 	fmt.Fprintln(w, "):")
+	fmt.Fprintf(w, "  selector:   %s\n", selectorText(s))
+	fmt.Fprintf(w, "  charged:    %s\n", basisText(s.BudgetBasis))
+	fmt.Fprintf(w, "  order:      %s\n", worldOrderText(s))
 
 	// The table is laid out ALONE and the decline reasons are interleaved
 	// afterwards, and that two-step is not fussiness. §4.4 puts a declined
@@ -384,11 +437,18 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 	// afterwards is what gives both properties at once.
 	var tb strings.Builder
 	tw := tabwriter.NewWriter(&tb, 2, 8, 2, ' ', 0)
+	ladder := s.Selector == schedule.SelectorNameLadder
 	fmt.Fprintln(tw, "  STEP\tWORLD\tORACLE\tFLIP\tDISC\tEXEC\tCOST\tSCORE\tOUTCOME")
 	for _, r := range s.Steps {
-		fmt.Fprintf(tw, "  %d\t%s\t%s\t%d\t%d\t%d\t%s\t%d\t%s\n",
-			r.Step, short(r.World), r.Oracle, r.Flip, r.DiscountBP, r.ExecutorBP,
-			costCell(r), r.ScoreBPPS, outcomeCell(r))
+		// A LADDER ROW RENDERS "—" WHERE A VOC ROW RENDERS A NUMBER (decision
+		// 6). The depth-first arm computes no flip, no discount, no executor
+		// weight and no score, and under "absent source implies absent metric"
+		// those columns must not print zeros a reader could aggregate: a `0`
+		// under FLIP is a VOC row that scored zero, which is a different fact.
+		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.Step, short(r.World), r.Oracle,
+			voc(ladder, int64(r.Flip)), voc(ladder, r.DiscountBP), voc(ladder, r.ExecutorBP),
+			costCell(r), voc(ladder, r.ScoreBPPS), outcomeCell(r))
 	}
 	_ = tw.Flush()
 	laid := strings.Split(strings.TrimSuffix(tb.String(), "\n"), "\n")
@@ -452,6 +512,15 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 				short(u.World), u.Kind, u.ActualMS, u.Status, u.Phase)
 		}
 	}
+	if s.SelectionUS > 0 {
+		// Reported, not charged (F8). PRD §11's matched budget is tokens +
+		// runner time + oracle cost + selection cost; this harness charges the
+		// third term and part of it, so no figure it produces may be called
+		// budget-matched in PRD §11's sense. The correct label is
+		// ORACLE-BUDGET-MATCHED, and this line is the measurement that makes
+		// the omission checkable rather than assumed.
+		fmt.Fprintf(w, "  selection:  %d µs of metalevel time, reported and NOT charged (PRD §11's selection-cost term)\n", s.SelectionUS)
+	}
 	if s.RankingIncomplete {
 		fmt.Fprintln(w, "  ranking:    a passing candidate is missing a receipt a ranking key reads; the ORDER is not monotone under withholding (only the pass set is)")
 	}
@@ -459,6 +528,106 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 		fmt.Fprintf(w, "  VIOLATION:  %s\n", s.Violation)
 	}
 	writeWaste(w, s.Waste)
+	writeBound(w, s.Bound)
+}
+
+// selectorText names the rule that ordered this race's purchases, and at
+// k > 1 it names what the depth-first arm actually did instead.
+//
+// Decision 7 is not a footnote: a world's rung k+1 needs rung k's result, so
+// a strictly depth-first arm has exactly one dispatchable purchase at a time.
+// At k > 1 it fills the batch from the next k worlds — money committed to
+// world 3's rung while world 1's next rung is pending, which is the
+// truncation behaviour the arm exists to avoid. Results at different k are
+// never pooled, so the rendering says which one produced this trace.
+func selectorText(s *explainSchedule) string {
+	switch s.Selector {
+	case schedule.SelectorNameLadder:
+		if s.Parallel > 1 {
+			return fmt.Sprintf("ladder (depth-first PRIORITY FILL (k=%d) — not pure depth-first; do not pool with k=1 results)", s.Parallel)
+		}
+		return "ladder (depth-first, world order recorded)"
+	case schedule.SelectorNameVOC:
+		return "voc (value of computation: flip x discount x executor / predicted cost)"
+	default:
+		return dash(s.Selector)
+	}
+}
+
+// basisText says what the pool was charged, because the two bases answer
+// different questions and a comparison across them is not a comparison.
+func basisText(basis string) string {
+	switch basis {
+	case schedule.BudgetBasisPredicted:
+		return "predicted (the pinned cost table's prediction — allocation is replayable; the model's error is the calibration residual)"
+	case schedule.BudgetBasisActual:
+		return "actual (each receipt's measured wall_ms — honest, and NOT in the determinism tuple: two replicates can buy different things)"
+	default:
+		return dash(basis)
+	}
+}
+
+// worldOrderText renders the control-plane order this race allocated in.
+//
+// An empty order is "unknown (pre-M2b1 trace)" and never digest order.
+// Reporting a past race's order as digest order would be inventing evidence
+// about the one field that decides, under a binding budget, who was verified
+// at all.
+func worldOrderText(s *explainSchedule) string {
+	if len(s.WorldOrder) == 0 {
+		return "unknown (pre-M2b1 trace); no control-plane world order was recorded"
+	}
+	parts := make([]string, 0, len(s.WorldOrder))
+	for i, w := range s.WorldOrder {
+		parts = append(parts, fmt.Sprintf("#%d %s", i+1, short(w)))
+	}
+	return fmt.Sprintf("%s  (control-plane, candidate ordinal ascending, rotation %d)",
+		strings.Join(parts, ", "), s.Rotation)
+}
+
+// voc renders a VALUE-OF-COMPUTATION cell: the number for a VOC row, and an
+// em dash for a ladder row, which computed no such term at all.
+func voc(ladder bool, v int64) string {
+	if ladder {
+		return "—"
+	}
+	return fmt.Sprintf("%d", v)
+}
+
+// writeBound renders §5's block: the headroom an optimal prefix-respecting
+// allocator had on this instance.
+func writeBound(w io.Writer, b *schedule.BoundReport) {
+	if b == nil {
+		return
+	}
+	fmt.Fprintln(w, "")
+	if !b.Available {
+		// A refusal, not an approximation, and not a zero. No approximation is
+		// reported under the name of an exact bound.
+		fmt.Fprintf(w, "  allocation bound: not computed — %s\n", dash(b.Refused))
+		return
+	}
+	fmt.Fprintf(w, "  allocation bound: minspend %d ms of %d spent (%s headroom) over %d prefix-closed allocations\n",
+		b.MinSpendMS, b.TotalMS, pctText(b.SavingBP), b.Subsets)
+	fmt.Fprintf(w, "    target d* = %s%s; reachable at %s: %v\n",
+		b.Decision, subjectText(b.Subject), budgetText(b.BudgetMS), b.Reachable)
+	for _, p := range b.Prefixes {
+		fmt.Fprintf(w, "    %s  %d of %d rungs, %6d ms  [%s]\n",
+			short(p.World), p.Rungs, p.Bought, p.CostMS, strings.Join(p.Oracles, " "))
+	}
+	if b.AlwaysMS > 0 {
+		fmt.Fprintf(w, "    %d ms held constant (unscheduled in both arms: no allocator can withhold it)\n", b.AlwaysMS)
+	}
+	for _, c := range b.Caveats {
+		fmt.Fprintf(w, "    caveat: %s\n", c)
+	}
+}
+
+func subjectText(subject string) string {
+	if subject == "" {
+		return ""
+	}
+	return " " + short(subject)
 }
 
 // writeWaste renders decision 18's two numbers and the rows behind them.

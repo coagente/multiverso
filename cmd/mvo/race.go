@@ -63,9 +63,13 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	pids := fs.Int64("pids", 0, "per-world pids-limit (T1; 0 = uncapped)")
 	allowNetwork := fs.Bool("allow-network", false, "T1 joins the default bridge instead of --network none (NFR-4 opt-out)")
 	scheduleArm := fs.String("schedule", schedule.ScheduleAdaptive,
-		"phase-B arm: adaptive (the M2b scheduler) or fixed (the exhaustive M1 ladder)")
+		"phase-B arm: adaptive (the M2b scheduler), fixed-budget (the depth-first ladder given the same budget), or fixed (the UNBUDGETED exhaustive M1 ladder)")
 	collectInert := fs.Bool("collect-inert", false,
 		"also buy decision-inert rungs on worlds that passed every gate, labelled basis=research (M2b decision 11)")
+	budgetBasis := fs.String("budget-basis", schedule.BudgetBasisActual,
+		"what the oracle budget is charged per purchase: actual (the receipt's measured wall_ms) or predicted (the pinned cost table's prediction, which makes the allocation replayable)")
+	rotation := fs.Int("world-order-rotation", 0,
+		"rotate the control-plane world order by N (M2b1 decision 6: over N replicates every candidate holds the head position exactly once)")
 	if err := parseFlags(fs, rest); err != nil {
 		return err
 	}
@@ -185,14 +189,40 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	// --- M2b: which phase-B arm, and the one policy shape it refuses -----
 	arm := *scheduleArm
 	switch arm {
-	case schedule.ScheduleAdaptive, schedule.ScheduleFixed:
+	case schedule.ScheduleAdaptive, schedule.ScheduleFixed, schedule.ScheduleFixedBudget:
 	default:
-		return usagef("race: --schedule must be %s or %s (got %q)",
-			schedule.ScheduleAdaptive, schedule.ScheduleFixed, arm)
+		return usagef("race: --schedule must be %s, %s or %s (got %q)",
+			schedule.ScheduleAdaptive, schedule.ScheduleFixedBudget, schedule.ScheduleFixed, arm)
 	}
-	if *collectInert && arm == schedule.ScheduleFixed {
-		return usagef("race: --collect-inert applies only to --schedule=%s: the exhaustive ladder buys every declared rung already, so there is no inert rung left for it to add",
+	if *collectInert && arm != schedule.ScheduleAdaptive {
+		return usagef("race: --collect-inert applies only to --schedule=%s: a ladder arm buys every declared rung in order already, and the mode exists to add the rungs a VALUE-DRIVEN arm would decline",
 			schedule.ScheduleAdaptive)
+	}
+	// M2b1 decision 5b. The basis is a property of BOTH arms of a comparison
+	// or of neither: `actual` charges the receipt's measured wall_ms and is
+	// the honest default, `predicted` charges the pinned cost table and puts
+	// the allocation back inside M2b decision 13's determinism tuple. The
+	// workspace-dependent half of the refusal — "this workspace cannot price
+	// every buyable kind" — is raised by internal/schedule when the cost table
+	// is BUILT, because the table is a function of the race's own evidence
+	// seal and base-tree measurement and neither exists before phase A.
+	// Refusing here on a guess would refuse workspaces that price fine.
+	switch *budgetBasis {
+	case schedule.BudgetBasisActual, schedule.BudgetBasisPredicted:
+	default:
+		return usagef("race: --budget-basis must be %s or %s (got %q)",
+			schedule.BudgetBasisActual, schedule.BudgetBasisPredicted, *budgetBasis)
+	}
+	if *budgetBasis == schedule.BudgetBasisPredicted && arm == schedule.ScheduleFixed {
+		return usagef("race: --budget-basis applies only to a BUDGETED arm; --schedule=%s reads max_oracle_ms never (use --schedule=%s)",
+			schedule.ScheduleFixed, schedule.ScheduleFixedBudget)
+	}
+	if *rotation < 0 {
+		return usagef("race: --world-order-rotation must not be negative")
+	}
+	if *rotation > 0 && arm == schedule.ScheduleFixed {
+		return usagef("race: --world-order-rotation applies only to a scheduled arm; --schedule=%s runs the M1c worker pool and records no world order",
+			schedule.ScheduleFixed)
 	}
 	// VALIDATION RULE 25 (M2b decision 15). Checked at PRE-FLIGHT rather
 	// than at policy load, and the placement is the rule: the same policy is
@@ -220,12 +250,20 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	// and whose one counted selector is its one hard gate: M0's own
 	// quickstart, bricked to protect it from an attack its shape makes
 	// impossible.
-	if arm == schedule.ScheduleAdaptive {
+	//
+	// M2b1 decision 8 widens the ARM TEST and nothing else: the predicate is
+	// unchanged, but it now covers ANY ARM THAT CAN WITHHOLD. `fixed-budget`
+	// withholds exactly as the adaptive arm does — that is what a budget is —
+	// so the same wrong-signed key is the same hazard there, and the library
+	// refuses it rather than falling back, because a silent fallback from a
+	// budgeted arm to an unbudgeted one turns a matched-budget experiment
+	// into an unmatched one and records nothing that says so.
+	if arm == schedule.ScheduleAdaptive || arm == schedule.ScheduleFixedBudget {
 		keys, ungated := pol.AllocationSensitiveKeys(), pol.UngatedEvidence()
 		if len(keys) > 0 && len(ungated) > 0 {
-			return usagef("race: policy %s ranks by %s AND counts evidence no hard gate backs (%s), which cannot be scheduled adaptively (M2b validation rule 25): the key is a function of HOW MUCH EVIDENCE a world bought, and a world may decline that rung, keep its pass, and win the tiebreak by having been verified least.\n"+
+			return usagef("race: policy %s ranks by %s AND counts evidence no hard gate backs (%s), which cannot be scheduled under --schedule=%s (M2b validation rule 25): the key is a function of HOW MUCH EVIDENCE a world bought, and a world may decline that rung, keep its pass, and win the tiebreak by having been verified least.\n"+
 				"  Two outs: remove %s from the policy's ranking, or race the exhaustive M1 ladder with --schedule=%s.",
-				pol.Digest, strings.Join(keys, ","), strings.Join(ungated, ","),
+				pol.Digest, strings.Join(keys, ","), strings.Join(ungated, ","), arm,
 				strings.Join(keys, ","), schedule.ScheduleFixed)
 		}
 	}
@@ -329,6 +367,8 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		LegacyOracle:  legacy,
 		Schedule:      arm,
 		CollectInert:  *collectInert,
+		BudgetBasis:   *budgetBasis,
+		Rotation:      *rotation,
 		ScheduleTrace: trace,
 	})
 	if err != nil {

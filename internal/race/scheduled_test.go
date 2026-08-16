@@ -281,7 +281,10 @@ func TestAllocationSensitiveRankingFallsBackToTheFixedLadder(t *testing.T) {
 	if ung := compiled.UngatedEvidence(); len(ung) != 1 || ung[0] != "guard" {
 		t.Fatalf("ungated evidence = %v, want [guard]", ung)
 	}
-	arm, named := scheduleArm(Config{}, compiled)
+	arm, named, err := scheduleArm(Config{}, compiled)
+	if err != nil {
+		t.Fatalf("the adaptive arm falls back rather than refusing: %v", err)
+	}
 	if arm != schedule.ScheduleFixed {
 		t.Errorf("arm = %q for an allocation-sensitive ranking, want %q", arm, schedule.ScheduleFixed)
 	}
@@ -305,7 +308,7 @@ func TestAllocationSensitiveRankingFallsBackToTheFixedLadder(t *testing.T) {
 	if ung := safe.UngatedEvidence(); len(ung) != 0 {
 		t.Fatalf("ungated evidence = %v on a fully gated policy, want none", ung)
 	}
-	if arm, named := scheduleArm(Config{}, safe); arm != schedule.ScheduleAdaptive || len(named) != 0 {
+	if arm, named, err := scheduleArm(Config{}, safe); err != nil || arm != schedule.ScheduleAdaptive || len(named) != 0 {
 		t.Errorf("a fully gated wall_ms_asc policy runs under %q naming %v, want %q and nothing",
 			arm, named, schedule.ScheduleAdaptive)
 	}
@@ -323,7 +326,7 @@ func TestAllocationSensitiveRankingFallsBackToTheFixedLadder(t *testing.T) {
 	if keys := defPol.AllocationSensitiveKeys(); len(keys) != 0 {
 		t.Errorf("the shipped default declares allocation-sensitive keys %v", keys)
 	}
-	if arm, _ := scheduleArm(Config{}, defPol); arm != schedule.ScheduleAdaptive {
+	if arm, _, _ := scheduleArm(Config{}, defPol); arm != schedule.ScheduleAdaptive {
 		t.Errorf("the shipped default runs under %q, want %q", arm, schedule.ScheduleAdaptive)
 	}
 }
