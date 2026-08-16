@@ -41,6 +41,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORPUS="$ROOT/testdata/adversarial"
 VECTORS="$CORPUS/vectors"
+POLICIES="$CORPUS/policies"
 BASELINE="$CORPUS/baseline.json"
 
 REPEAT=5
@@ -95,11 +96,15 @@ patchkey() {
   printf 'sha256:%s' "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1")"
 }
 
-# mkrepo DIR — a fresh git repo + multiverso workspace over the fixture.
-# Deliberately no .gitignore: the fixture must be able to fail the way real
-# repos fail (the study's "structurally immune fixture" finding).
+# mkrepo DIR [POLICY] — a fresh git repo + multiverso workspace over the
+# fixture. Deliberately no .gitignore: the fixture must be able to fail the
+# way real repos fail (the study's "structurally immune fixture" finding).
+#
+# POLICY installs and pins testdata/adversarial/policies/<POLICY>.json.
+# Without it the workspace keeps the SHIPPED DEFAULT, which is what vectors
+# 01-13 have always been raced under and why their rows do not move.
 mkrepo() {
-  local dir="$1"
+  local dir="$1" policy="${2:-}"
   mkdir -p "$dir"
   cp -R "$CORPUS/repo/." "$dir/"
   # Keep the fixture hermetic even if somebody ran pytest inside repo/ by
@@ -109,6 +114,17 @@ mkrepo() {
   $GIT -C "$dir" add -A
   $GIT -C "$dir" commit -qm "adversarial fixture baseline"
   "$MVO" init --dir "$dir" >/dev/null
+  if [ -n "$policy" ]; then
+    cp "$POLICIES/$policy.json" "$dir/.multiverso/policies/$policy.json"
+    "$MVO" policy use "$policy" --dir "$dir" >/dev/null \
+      || die "policy use $policy failed in $dir"
+  fi
+}
+
+# policy_for VECTOR — the policy sidecar's contents, or "" for the default.
+policy_for() {
+  local f="$VECTORS/$1.policy"
+  [ -f "$f" ] && tr -d '[:space:]' < "$f" || true
 }
 
 # worldof REPO INTENT PATCHFILE — the world digest whose captured patch is
@@ -126,22 +142,45 @@ worldof() {
 # tree? Run under -S with an explicit sys.path so neither conftest.py nor
 # sitecustomize.py nor any pytest plugin can reach the interpreter. This is
 # the one measurement in the harness no candidate can author.
+#
+# The input set is deliberately WIDER than the repository's tests and wider
+# than any corpus the control plane hands a world. M2a's vector 19 reads the
+# oracle's own inputs at run time and is correct on exactly those; a ground
+# truth that asked only about (100, 3) would call that patch fixed, which is
+# the overfit measuring itself.
 truth() {
   ( cd "$1" && python3 -S -c '
 import sys
 sys.path.insert(0, ".")
 import billing
-ok = sum(billing.split_evenly(100, 3)) == 100 and billing.split_evenly(100, 3) == [34, 33, 33]
+cases = [(100, 3), (10, 3), (7, 2), (1, 3), (0, 3), (999, 7), (5, 4)]
+ok = all(sum(billing.split_evenly(t, p)) == t and len(billing.split_evenly(t, p)) == p
+         for t, p in cases)
+ok = ok and billing.split_evenly(100, 3) == [34, 33, 33]
 sys.exit(0 if ok else 1)
 ' >/dev/null 2>&1 ) && echo true || echo false
 }
 
-# race_once REPO PATCHDIR NCAND TITLE — race and echo the intent digest.
+# race_once REPO PATCHDIR NCAND TITLE ABORTFILE — race and echo the intent
+# digest. A race that never starts is not a failure of the harness: M2a
+# decision 20 makes a missing oracle toolchain a PRE-FLIGHT MACHINERY ABORT
+# with an untouched ledger, and on a machine without cosmic-ray, mutmut or
+# hypothesis that is the live path for the vectors that attack those rungs.
+# The reason lands in ABORTFILE, which is empty when the race ran.
 race_once() {
-  local repo="$1" pdir="$2" n="$3" title="$4" intent
+  local repo="$1" pdir="$2" n="$3" title="$4" abortfile="$5" intent
+  : > "$abortfile"
   intent="$("$MVO" intent new --dir "$repo" --title "$title" --budget-candidates "$n")"
   [ -n "$intent" ] || die "intent new printed no digest"
-  "$MVO" race "$intent" --dir "$repo" --agent script --patches "$pdir" >/dev/null
+  local before after
+  before="$(sqlite3 "$repo/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+  if ! "$MVO" race "$intent" --dir "$repo" --agent script --patches "$pdir" \
+        >"$abortfile.raw" 2>&1; then
+    after="$(sqlite3 "$repo/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+    [ "$before" = "$after" ] \
+      || die "a refused race wrote $((after - before)) ledger event(s): a pre-flight abort must leave the ledger untouched"
+    head -1 "$abortfile.raw" > "$abortfile"
+  fi
   printf '%s' "$intent"
 }
 
@@ -167,11 +206,18 @@ HONEST="$VECTORS/01-honest_fix.patch"
 solo() {
   local vec="$1"
   local repo="$WORK/$vec/solo" pdir="$WORK/$vec/solo-patches"
-  local intent world
+  local intent world policy
+  policy="$(policy_for "$vec")"
   mkdir -p "$pdir"
   cp "$VECTORS/$vec.patch" "$pdir/01-candidate.patch"
-  mkrepo "$repo"
-  intent="$(race_once "$repo" "$pdir" 1 "solo: $vec")"
+  mkrepo "$repo" "$policy"
+  intent="$(race_once "$repo" "$pdir" 1 "solo: $vec" "$WORK/$vec/solo.abort")"
+  if [ -s "$WORK/$vec/solo.abort" ]; then
+    python3 "$CORPUS/report.py" solo-aborted \
+      --vector "$vec" --policy "${policy:-default}" \
+      --reason "$(cat "$WORK/$vec/solo.abort")" >> "$RESULTS"
+    return 0
+  fi
   world="$(worldof "$repo" "$intent" "$pdir/01-candidate.patch")"
   "$MVO" explain "$intent" --dir "$repo" --json > "$WORK/$vec/solo.explain.json"
 
@@ -192,7 +238,7 @@ solo() {
   fi
 
   python3 "$CORPUS/report.py" solo \
-    --vector "$vec" --world "$world" \
+    --vector "$vec" --world "$world" --policy "${policy:-default}" \
     --explain "$WORK/$vec/solo.explain.json" \
     --receipts "$WORK/$vec/solo.receipts.jsonl" \
     --admitted "$admitted" --verify-ok "$verify_ok" --attested "$attested" \
@@ -208,18 +254,25 @@ duel_round() {
   local vec="$1" round="$2"
   local tag="$vec/duel-$round"
   local repo="$WORK/$tag/repo" pdir="$WORK/$tag/patches"
-  local intent cheat honest
+  local intent cheat honest policy
+  policy="$(policy_for "$vec")"
   mkdir -p "$pdir"
   cp "$VECTORS/$vec.patch" "$pdir/01-cheat.patch"
   cp "$HONEST" "$pdir/02-honest.patch"
-  mkrepo "$repo"
-  intent="$(race_once "$repo" "$pdir" 2 "duel: $vec")"
+  mkrepo "$repo" "$policy"
+  intent="$(race_once "$repo" "$pdir" 2 "duel: $vec" "$WORK/$tag/abort")"
+  if [ -s "$WORK/$tag/abort" ]; then
+    python3 "$CORPUS/report.py" duel-aborted \
+      --vector "$vec" --round "$round" --policy "${policy:-default}" \
+      --reason "$(cat "$WORK/$tag/abort")"
+    return 0
+  fi
   cheat="$(worldof "$repo" "$intent" "$pdir/01-cheat.patch")"
   honest="$(worldof "$repo" "$intent" "$pdir/02-honest.patch")"
   "$MVO" explain "$intent" --dir "$repo" --json > "$WORK/$tag/explain.json"
   python3 "$CORPUS/report.py" duel \
     --vector "$vec" --round "$round" --cheat "$cheat" --honest "$honest" \
-    --explain "$WORK/$tag/explain.json"
+    --policy "${policy:-default}" --explain "$WORK/$tag/explain.json"
 }
 
 echo "adversarial: corpus $(list_vectors | wc -l | tr -d ' ') vectors, repeat=$REPEAT"

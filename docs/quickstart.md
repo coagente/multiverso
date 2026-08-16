@@ -755,7 +755,7 @@ A typo is caught at load, not at 3 a.m.:
 
 ```console
 $ mvo policy validate testdata/toyrepo/policies/bad-gate.json
-mvo: policy validate: testdata/toyrepo/policies/bad-gate.json: hard_gates[1].gate: unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)
+mvo: policy validate: testdata/toyrepo/policies/bad-gate.json: hard_gates[1].gate: unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, corpus-complete, coverage-at-least, differential-cohort-at-least, mutation-survivors-not-above, no-failed-tests, paths-unmodified, properties-pass, property-cases-at-least, skips-not-above, status-pass)
 ```
 
 Install it as the workspace default (or skip this and pin it per intent with `mvo intent new --policy strict`):
@@ -1240,6 +1240,7 @@ Two things that snippet does deliberately. It passes **`--key`** with a public k
 | `mvo verify <commit> [--key PUB] [--json]` | seven offline checks. **`--key` is the trust anchor** — without it the default key makes verification a tautology inside the workspace that produced the attestation |
 | `mvo audit [--json] [--key PUB] [--require-decisions N] [--cas-sweep=BOOL]` | hash chain + byte-exact replay of every decision **in this workspace's ledger**, plus a re-hash of every CAS object the ledger references. Takes no commit and exits 0 on an empty workspace — [never a merge-queue check](#what-mvo-audit-actually-checks). Without `--key` the signature check is a **self-check** against the workspace's own key, and the output says so |
 | `mvo guard --base <rev> [--tree <rev>] [--policy P] [--json]` | the adoption wedge: compare two trees under a policy's path sets, exit 0 clean / 1 violating. No ledger writes, no race. `mvo guard --base HEAD~50` answers "would this gate have blocked my last fifty commits" |
+| `mvo oracles [--json] [--policy P]` | the oracle menu: every kind's declared cost shape, what it scales by, what bounds it, what it discriminates and how correlated its evidence is — plus coefficients **fitted from this workspace's own receipts**. A kind with fewer than three receipts, or three that all scaled by the same unit count, prints `no local measurement (n=…)` and returns `null` in `--json`. Costs are per repository, and a two-point fit rendered as a fact is the over-claim this tool exists to remove |
 | `mvo version` | build revision of this binary |
 | `mvo publish <intent> [--remote R]` | push the signed closure to a remote namespace |
 | `mvo fetch-race <short> [--key PUB]` | verify a published race in any clone |

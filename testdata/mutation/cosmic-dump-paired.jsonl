@@ -1,0 +1,2 @@
+[{"job_id":"stats.py:core/NumberReplacer:0","module_path":"stats.py","operator_name":"core/NumberReplacer","occurrence":0,"start_pos":[12,11],"end_pos":[12,12]},null]
+[{"job_id":"stats.py:core/ReplaceTrueWithFalse:0","module_path":"stats.py","operator_name":"core/ReplaceTrueWithFalse","occurrence":0,"start_pos":[14,7],"end_pos":[14,11]},{"worker_outcome":"normal","test_outcome":"killed"}]

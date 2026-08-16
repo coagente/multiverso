@@ -86,6 +86,9 @@ type Gate struct {
 	Threshold int64
 	Label     string // rendered gate name: "suite-pass" (v0) | "status-pass@suite" (v1)
 	Sel       Selector
+	// Scope is the RESOLVED gate scope: ScopeBoth (the "" default, and
+	// what every M1 gate meant), ScopeRace or ScopeLanding.
+	Scope string
 	// AlwaysFails carries M0's fail-closed unknown-gate rule into the v0
 	// dialect: what M0 could not attest, it did not admit, and replay must
 	// reproduce that (M1e decision 7).
@@ -144,6 +147,13 @@ type Escalation struct {
 	RequireEvidence            []Requirement // name-sorted
 	OnAllWorldsFailedMachinery bool
 	OnInvariantViolation       bool // M1f rule 0 — highest precedence
+	// OnBehavioralSplit is M2a rule 1b, between machinery failure and
+	// require_evidence: 0 = off, N = escalate at >= N behaviour classes.
+	// It sits BELOW machinery failure (if nothing produced evidence, "they
+	// disagree" is a false statement about a race that never ran) and
+	// ABOVE require_evidence (a detected behavioural ambiguity is a
+	// stronger reason to stop than a missing optional source).
+	OnBehavioralSplit int
 }
 
 // Requirement names an oracle whose evidence the winner must carry.
@@ -166,6 +176,93 @@ type Oracle struct {
 	TimeoutMS int64
 	Coverage  bool
 	Reruns    int
+	// Corpus is the resolved corpus declaration (M2a): CasesMax already
+	// defaulted, so the ceiling a run enforces is a value, not a sentinel.
+	Corpus object.CorpusSpec
+	// Mutation is the resolved mutation budget (M2a decision 11), zero for
+	// every kind but mutation-diff. Like Corpus it is RESOLVED: the oracle
+	// reads a ceiling, never a sentinel that a second reader might
+	// interpret as "unbounded".
+	Mutation object.MutationSpec
+}
+
+// AppliesAt reports whether a gate is evaluated at the given scope.
+// ScopeBoth gates apply everywhere, which is what every pre-M2a gate meant
+// and what "" compiles to.
+func (g Gate) AppliesAt(scope string) bool {
+	switch g.Scope {
+	case "", ScopeBoth:
+		return true
+	default:
+		return g.Scope == scope
+	}
+}
+
+// CorpusOracle returns the single declared instance that consumes a corpus
+// — the one phase 0 must materialize for. Validation rule 18 makes "single"
+// true whenever a differential is declared: two observers would make "the
+// cohort" ambiguous and zero would make the reducer a function of nothing.
+func (p Policy) CorpusOracle() (Oracle, bool) {
+	for _, o := range p.Oracles {
+		if o.Kind == KindCorpusObserve && o.Corpus.Provider != ProviderNone {
+			return o, true
+		}
+	}
+	return Oracle{}, false
+}
+
+// DifferentialOracle returns the declared cohort-stage reducer instance.
+// Absent means the race runs no cohort barrier at all.
+func (p Policy) DifferentialOracle() (Oracle, bool) {
+	for _, o := range p.Oracles {
+		if o.Kind == KindCorpusDifferential {
+			return o, true
+		}
+	}
+	return Oracle{}, false
+}
+
+// GatesAt returns the compiled gates that apply at one scope, in ladder
+// order. `mvo admit` uses it to drop race-scope gates from the landing
+// evaluation — and then NAMES them on its own output line, because a
+// landing gate set weaker than the race's is a legitimate policy choice and
+// must never be an invisible one (M2a decision 21).
+func (p Policy) GatesAt(scope string) []Gate {
+	out := make([]Gate, 0, len(p.Gates))
+	for _, g := range p.Gates {
+		if g.AppliesAt(scope) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// EnforcesPaths reports whether any compiled gate actually READS the
+// compiled path set. A freeze nothing checks is not a freeze, and a
+// renderer that says "frozen against the candidate" over an unread path set
+// is making a claim the policy cannot keep. Validation rule 24 forbids the
+// corpus-derived case outright; this is what keeps the rendering honest for
+// the hand-authored one.
+func (p Policy) EnforcesPaths() bool {
+	for _, g := range p.Gates {
+		if g.Predicate == GatePathsUnmodified {
+			return true
+		}
+	}
+	return false
+}
+
+// GatesNotAt returns the compiled gates EXCLUDED at one scope, in ladder
+// order: exactly the list `mvo admit` prints as "not evaluated at
+// admission".
+func (p Policy) GatesNotAt(scope string) []Gate {
+	out := make([]Gate, 0, len(p.Gates))
+	for _, g := range p.Gates {
+		if !g.AppliesAt(scope) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // Problem is one validation failure, located by its JSON field path.
@@ -305,6 +402,20 @@ func (p Policy) GateLabels() []string {
 	return out
 }
 
+// GateLabelsAt returns the labels of the gates that apply at one scope, in
+// ladder order. A policy with no scoped gates returns exactly GateLabels(),
+// which is what keeps every M1a/M1e/M1f admission sentence byte-for-byte
+// unchanged (M2a decision 21 under M1f decision 3's compatibility rule).
+func (p Policy) GateLabelsAt(scope string) []string {
+	out := make([]string, 0, len(p.Gates))
+	for _, g := range p.Gates {
+		if g.AppliesAt(scope) {
+			out = append(out, g.Label)
+		}
+	}
+	return out
+}
+
 // KeyNames returns the EFFECTIVE ranking key names in order.
 func (p Policy) KeyNames() []string {
 	out := make([]string, 0, len(p.Keys))
@@ -344,10 +455,24 @@ func (p Policy) CollectOracle() (Oracle, bool) {
 // GateOracles returns the declared instances the hard gates name, in gate
 // order, deduplicated: exactly the oracles an admission must recompute on
 // the landing tree (M1e decision 20).
-func (p Policy) GateOracles() []Oracle {
+func (p Policy) GateOracles() []Oracle { return p.GateOraclesAt(ScopeBoth) }
+
+// GateOraclesAt is GateOracles restricted to the gates that apply at one
+// scope. `mvo admit` passes ScopeLanding, so a race-scope oracle is never
+// recomputed on the landing tree — running a cohort-stage oracle over one
+// subject would produce a receipt whose every comparison metric is absent
+// and a gate that can never succeed.
+//
+// ScopeBoth means "every gate", because a both-scope gate applies
+// everywhere: that is the identity case and it is what every pre-M2a
+// caller gets.
+func (p Policy) GateOraclesAt(scope string) []Oracle {
 	seen := make(map[string]bool, len(p.Gates))
 	out := make([]Oracle, 0, len(p.Gates))
 	for _, g := range p.Gates {
+		if scope != ScopeBoth && !g.AppliesAt(scope) {
+			continue
+		}
 		if seen[g.Oracle] {
 			continue
 		}
@@ -461,6 +586,92 @@ func (g Gate) Eval(rec *object.Receipt) (bool, string) {
 			return true, ""
 		}
 		return false, fmt.Sprintf("tests_skipped=%d (want <= %d)", skipped, g.Threshold)
+	case GateCorpusComplete:
+		// A world that observed fewer cases than the pinned corpus
+		// declares did not run our corpus, whatever else it did. The
+		// metrics are absent rather than partial when the observation is
+		// unusable (cohort starvation, corpus vector 18), and an absent
+		// metric FAILS the gate — which is how a world that silenced the
+		// runner to shrink the cohort eliminates itself.
+		observed, ok := metric(MetricCorpusCasesObserved)
+		if !ok {
+			return false, absent(MetricCorpusCasesObserved)
+		}
+		total, ok := metric(MetricCorpusCasesTotal)
+		if !ok {
+			return false, absent(MetricCorpusCasesTotal)
+		}
+		if observed == total {
+			return true, ""
+		}
+		return false, fmt.Sprintf("corpus_cases_observed=%d of %d", observed, total)
+	case GatePropertiesPass:
+		failed, okF := metric(MetricPropertiesFailed)
+		if !okF {
+			return false, absent(MetricPropertiesFailed)
+		}
+		errored, okE := metric(MetricPropertiesErrored)
+		if !okE {
+			return false, absent(MetricPropertiesErrored)
+		}
+		if failed == 0 && errored == 0 {
+			return true, ""
+		}
+		return false, fmt.Sprintf("properties_failed=%d properties_errored=%d", failed, errored)
+	case GatePropertyCasesAtLeast:
+		// The metric is ABSENT under the JSONL fallback (M2a decision 15),
+		// and absence fails the gate. That is the intended shape: a policy
+		// that demands a searched case budget and gets records it cannot
+		// trust has not had its demand met, and saying so is the whole
+		// point of one metric name with one provenance.
+		total, ok := metric(MetricPropertyCasesTotal)
+		if !ok {
+			return false, absent(MetricPropertyCasesTotal)
+		}
+		if total >= g.Threshold {
+			return true, ""
+		}
+		return false, fmt.Sprintf("property_cases_total=%d (want >= %d)", total, g.Threshold)
+	case GateMutationSurvivorsNotAbove:
+		// The ABSOLUTE count of mutants the tests did not kill, never the
+		// score. Under diff-scoping a larger diff makes this gate strictly
+		// harder, which is the direction we want, and padding the diff with
+		// trivially-killed lines cannot reduce it (corpus vector 14) —
+		// padding adds mutants that may themselves survive.
+		//
+		// TIMEOUTS COUNT. A mutant that hung is the strongest available
+		// evidence that the suite did not discriminate against it, and it is
+		// emphatically not "the tests caught it". Reading `mutants_survived`
+		// alone made a hang the cheapest possible escape: the only mutation
+		// gate M2a ships cost the candidate nothing for a mutant nobody
+		// killed, while the receipt asserted a 100 % score beside it. A red
+		// team ran it end to end against a stand-in tool — three mutants, two
+		// killed, one 90-second sleep — and the gate passed with
+		// `mutants_survived=0`. Decision 17 still governs the SCORE's
+		// denominator, which is a different question from what the gate
+		// reads; the score is gated by nothing and says so.
+		survived, ok := metric(MetricMutantsSurvived)
+		if !ok {
+			return false, absent(MetricMutantsSurvived)
+		}
+		timeout, ok := metric(MetricMutantsTimeout)
+		if !ok {
+			return false, absent(MetricMutantsTimeout)
+		}
+		if survived+timeout <= g.Threshold {
+			return true, ""
+		}
+		return false, fmt.Sprintf("mutants_survived=%d mutants_timeout=%d (want survived+timeout <= %d)",
+			survived, timeout, g.Threshold)
+	case GateDifferentialCohortAtLeast:
+		n, ok := metric(MetricDiffCohortN)
+		if !ok {
+			return false, absent(MetricDiffCohortN)
+		}
+		if n >= g.Threshold {
+			return true, ""
+		}
+		return false, fmt.Sprintf("diff_cohort_n=%d (want >= %d)", n, g.Threshold)
 	case GatePathsUnmodified:
 		// The gate passes iff every VIOLATING count is 0 and
 		// paths_examined is present. protected_added is a violation only

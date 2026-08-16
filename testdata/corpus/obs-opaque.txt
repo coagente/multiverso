@@ -1,0 +1,7 @@
+mvo-evidence/v0	0123456789abcdef0123456789abcdef
+1	session_start	{"argv_digest":"sha256:00","corpus":"mv0:fixture","pid":41,"runner":"mvo_corpus/v0"}
+2	case	{"fp":"sha256:ccfb0404d7d4f199fa75d38ad488dc9c6a4ac77d2f60ac52bbe22283e725bfff","id":"c0001","outcome":"value","v":{"f":"7ff8000000000000"}}
+3	case	{"id":"c0002","outcome":"opaque","t":"Decimal"}
+4	case	{"fp":"sha256:c4077495b48ed20dccc6134bb00bae38538c7b01549c92876eb71c1edfb178e5","id":"c0003","outcome":"value","v":{"f":"4000000000000000"}}
+5	case	{"fp":"sha256:b91ed8e56b0bf6e33232904af97f2268230c34cf15e85faaef25e62b8797672a","id":"c0004","outcome":"value","v":0}
+6	session_finish	{"cases":4,"duration_ms":31,"errored":0,"exitstatus":0,"opaque":1}

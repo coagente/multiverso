@@ -79,9 +79,14 @@ type explainReport struct {
 	// UNCONDITIONAL because a reader must not have to know that T0 means
 	// `streamed` — the whole failure the study found was a guarantee
 	// nobody could see the absence of.
-	EvidenceRegime  string `json:"evidence_regime"`
-	EvidencePlugin  string `json:"evidence_plugin"`
-	EvidenceTier    string `json:"evidence_tier"`
+	EvidenceRegime string `json:"evidence_regime"`
+	EvidencePlugin string `json:"evidence_plugin"`
+	EvidenceTier   string `json:"evidence_tier"`
+	// Behavior is M2a's block: the cohort's partition and the
+	// distinguishing cases with their VALUES. It is nil — and the JSON key
+	// absent — under every policy that declares no differential, which is
+	// every policy predating M2a, so an M1-era report is unchanged.
+	Behavior        *explainBehavior `json:"behavior,omitempty"`
 	receiptByDigest map[string]object.Receipt
 }
 
@@ -181,6 +186,7 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 		rep.Evidence = append(rep.Evidence, evidenceRow(rep.receiptByDigest, e))
 	}
 	rep.EvidenceRegime, rep.EvidencePlugin, rep.EvidenceTier = observedRegime(rep.receiptByDigest, dec.Evidence)
+	rep.Behavior = behaviorBlock(ws, rep.receiptByDigest, dec.Evidence)
 	if *diffs > 0 {
 		rep.Diffs = candidateDiffs(ws, rep.Candidates, *diffs)
 	}
@@ -487,6 +493,7 @@ func writeExplain(w io.Writer, rep explainReport) {
 		}
 	}
 
+	writeBehavior(w, rep.Behavior)
 	if rep.Escalation.Rule != "" {
 		fmt.Fprintln(w, "")
 		fmt.Fprintf(w, "escalation: %s\n", rep.Escalation.Rule)

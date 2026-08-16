@@ -1,0 +1,5 @@
+{"type":"info","title":"Hypothesis Statistics","content":"seed=0","run_start":1.0,"property":"tests/test_props.py::test_clamp_is_bounded"}
+{"type":"test_case","status":"passed","status_reason":"","representation":"clamp(v=0, lo=0, hi=10)","property":"tests/test_props.py::test_clamp_is_bounded","run_start":1.0}
+{"type":"test_case","status":"passed","status_reason":"","representation":"clamp(v=5, lo=0, hi=10)","property":"tests/test_props.py::test_clamp_is_bounded","run_start":1.0}
+{"type":"test_case","status":"invalid","status_reason":"failed to satisfy assume()","representation":"clamp(v=nan, lo=0, hi=10)","property":"tests/test_props.py::test_clamp_is_bounded","run_start":1.0}
+{"type":"test_case","status":"gave_up","status_reason":"filtered too much","representation":"clamp(v=1, lo=9, hi=0)","property":"tests/test_props.py::test_clamp_is_bounded","run_start":1.0}

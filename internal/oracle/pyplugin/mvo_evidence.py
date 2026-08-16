@@ -203,6 +203,66 @@ def _classify(report):
     return None
 
 
+def _observation_status(record):
+    """One Hypothesis observation -> its status, or None to ignore it.
+
+    Both shapes are accepted because the API is explicitly experimental:
+    older versions hand the callback a plain dict, newer ones a
+    TestCaseObservation object. A shape we do not recognize yields None and
+    NO record — the metrics are then absent, which is the whole of decision
+    15's rule that one metric name has one provenance forever.
+    """
+    if isinstance(record, dict):
+        kind = record.get("type", "test_case")
+        status = record.get("status", "")
+        prop = record.get("property", "")
+    else:
+        kind = getattr(record, "type", "test_case")
+        status = getattr(record, "status", "")
+        prop = getattr(record, "property", "")
+    if kind != "test_case" or not status:
+        return None
+    return (str(prop)[:200], str(status))
+
+
+def _register_hypothesis(writer):
+    """Forward Hypothesis's per-example observations onto OUR stream.
+
+    Hypothesis's own observability mode writes JSONL into a directory the
+    test process can write, which makes those records candidate-authorable
+    AFTER EXIT — coverage_bp's status, and unacceptable for a number a gate
+    reads. Records forwarded here instead ride the framed stream the control
+    plane reads live, so they carry its S1/S2/S3 protections.
+
+    Every failure mode is silent and total: no hypothesis, no callback list,
+    a renamed API, a raising callback — all of them end with no
+    property_case records, which the control plane reads as ABSENT metrics
+    and labels `hypothesis-observability: jsonl`. It never turns an
+    observability problem into a test failure, because that would let a
+    candidate manufacture a failing property run for a competitor.
+    """
+    try:
+        from hypothesis.internal.observability import TESTCASE_CALLBACKS
+    except Exception:
+        return False
+
+    def _forward(record):
+        try:
+            parsed = _observation_status(record)
+            if parsed is None:
+                return
+            prop, status = parsed
+            writer.record("property_case", {"property": prop, "status": status})
+        except Exception:
+            pass
+
+    try:
+        TESTCASE_CALLBACKS.append(_forward)
+    except Exception:
+        return False
+    return True
+
+
 def pytest_configure(config):
     path = os.environ.get(_ENV_STREAM, "")
     nonce = os.environ.get(_ENV_NONCE, "")
@@ -213,4 +273,5 @@ def pytest_configure(config):
     writer = _Writer(path, nonce)
     if not writer.ok():
         return
+    _register_hypothesis(writer)
     config.pluginmanager.register(MvoEvidence(writer), "mvo-evidence-session")

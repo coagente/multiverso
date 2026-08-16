@@ -61,6 +61,13 @@ type Result struct {
 	// SyncError is why an attempted fast-forward failed; "" when none was
 	// attempted or it succeeded.
 	SyncError string
+	// RaceScopeGates names the gates the pinned policy declares at RACE
+	// scope, which admission does not evaluate (M2a decision 21). It is
+	// reported rather than dropped because a landing gate set weaker than
+	// the race's is a legitimate policy choice and must never be an
+	// invisible one — an operator who cannot see what was skipped cannot
+	// tell a deliberate policy from a hole.
+	RaceScopeGates []string
 }
 
 // Run executes one admission: apply the SELECT winner's patch onto the
@@ -219,6 +226,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		RecheckTier: "V1-replayable",
 		Family:      FamilyLandingApply,
 		Cost:        object.Cost{WallMS: applyMS},
+		// The landing apply is one git invocation, so it scales by nothing
+		// this system knows how to count and is supplied no control-plane
+		// inputs: {0, ""} and {} are the honest records, not placeholders
+		// (M2a decisions 22 and 24).
+		Inputs:      object.NoInputs(),
+		Correlation: object.Correlation{Generator: "control-plane", Executor: "control-plane"},
 		CreatedAt:   nowRFC3339(),
 	}
 	applyDig, err := recordObject(cfg, "receipt.recorded", applyRec)
@@ -226,7 +239,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Branch: branch, ApplyReceipt: applyDig}
+	res := &Result{Branch: branch, ApplyReceipt: applyDig, RaceScopeGates: raceScopeLabels(pol)}
 
 	applyRecorded := object.RecordedReceipt{Digest: applyDig, Receipt: applyRec}
 
@@ -272,7 +285,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	var gateReceipts []object.RecordedReceipt
 	for _, spec := range specs {
 		o, err := newLandingOracle(cfg, pol, spec, oracleTimeout, baseline,
-			landingEv, trunkTree, landingTree)
+			landingEv, trunkTree, landingTree, patch)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +454,13 @@ func landingSpecs(store *cas.Store, pol policy.Policy, sel object.Decision) ([]p
 		return nil, fmt.Errorf("admit: policy %s declares no hard gate: an unattested landing is not an admission", pol.Digest)
 	}
 	if pol.Dialect != policy.DialectV0 {
-		specs := pol.GateOracles()
+		// RACE-SCOPE gates are excluded here (M2a decision 21). Admission
+		// has one subject, so a cohort-stage gate could only ever fail on
+		// absent comparison metrics — an admission that can never succeed.
+		// They are named on their own output line rather than dropped
+		// silently: a landing gate set weaker than the race's is a
+		// legitimate policy choice and must never be an invisible one.
+		specs := pol.GateOraclesAt(policy.ScopeLanding)
 		if len(specs) == 0 {
 			return nil, fmt.Errorf("admit: policy %s declares no hard-gate oracle", pol.Digest)
 		}
@@ -532,8 +551,13 @@ func openLandingEvidence(cfg Config) (landingEvidence, func(), error) {
 // decision 19), the same denominator logic as the collect baseline: "did
 // this patch touch the harness" is a question about what the patch does to
 // what is landing, and at admission that is trunk.
+// patch is the winner's captured diff — the SAME bytes the admission
+// applied, from CAS under the digest the world object records. The
+// mutation rung derives its target set from it, and supplying it here is
+// what lets a landing-scope mutation gate mean the same thing it meant in
+// the race.
 func newLandingOracle(cfg Config, pol policy.Policy, spec policy.Oracle, timeout time.Duration,
-	baseline int64, ev landingEvidence, trunkTree, landingTree string) (oracle.Oracle, error) {
+	baseline int64, ev landingEvidence, trunkTree, landingTree string, patch []byte) (oracle.Oracle, error) {
 	if spec.Config == "" {
 		return &oracle.CommandOracle{
 			Argv:    append([]string(nil), spec.Argv...),
@@ -541,9 +565,12 @@ func newLandingOracle(cfg Config, pol policy.Policy, spec policy.Oracle, timeout
 			CAS:     cfg.CAS,
 		}, nil
 	}
+	if patch == nil {
+		patch = []byte{}
+	}
 	p := oracle.Params{
 		Spec: spec, CAS: cfg.CAS, Timeout: timeout, Baseline: baseline,
-		Paths: pol.Paths, Repo: cfg.Repo,
+		Paths: pol.Paths, Repo: cfg.Repo, Patch: patch,
 		BaseTree: trunkTree, CandidateTree: landingTree,
 		Regime: object.RegimeStreamed, Crosscheck: pol.Evidence.Crosscheck,
 		PluginAutoload: pol.Evidence.PluginAutoload,
@@ -724,4 +751,13 @@ func loadObject(store *cas.Store, dig string, v any) error {
 
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// raceScopeLabels names the gates admission will not evaluate.
+func raceScopeLabels(pol policy.Policy) []string {
+	out := []string{}
+	for _, g := range pol.GatesNotAt(policy.ScopeLanding) {
+		out = append(out, g.Label)
+	}
+	return out
 }

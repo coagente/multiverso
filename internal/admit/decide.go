@@ -82,7 +82,22 @@ func Decide(pol policy.Policy, intent, world string,
 	sort.Strings(evidence)
 	d.Evidence = evidence
 
-	labels := strings.Join(pol.GateLabels(), ",")
+	// Only the gates that apply at ADMISSION are evaluated or named. A
+	// policy with no scoped gates renders exactly the M1a/M1e/M1f sentence,
+	// byte for byte, because every unscoped gate applies everywhere.
+	landing := pol.GatesAt(policy.ScopeLanding)
+	labels := strings.Join(pol.GateLabelsAt(policy.ScopeLanding), ",")
+	// Fail closed on a policy whose every gate is race-scope. An empty
+	// landing gate list makes the predicate loop below vacuously true, so
+	// the landing would be ADMITTED — and signed, and attested — on the
+	// strength of no gate at all. This is the same door the empty-policy
+	// check above locks, in the shape M2a's gate scope can open it.
+	if len(landing) == 0 {
+		d.Type = TypeReject
+		d.Rationale = fmt.Sprintf("landing gates [] failed on tree %s; policy %s declares only race-scope gates: an unattested landing is not an admission",
+			apply.Receipt.Freshness.ValidFor.Tree, pol.Digest)
+		return d
+	}
 
 	// One admission lands ONE tree: gate receipts that disagree about which
 	// tree they judged are not evidence about a landing, they are noise.
@@ -132,7 +147,7 @@ func Decide(pol policy.Policy, intent, world string,
 	// Gate evaluation over the landing receipts. No short-circuit: there is
 	// one candidate and the operator deserves the full gate picture.
 	var details []string
-	for _, g := range pol.Gates {
+	for _, g := range landing {
 		rec := counted(g.Sel, gates)
 		ok, reason := g.Eval(rec)
 		if ok {

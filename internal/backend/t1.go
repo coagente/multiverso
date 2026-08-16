@@ -118,6 +118,13 @@ func t1Mounts(dir string, opts OpenOpts) []dockerx.Mount {
 		{opts.EvidenceDir, InWorldEvidence, false},
 		{opts.ScratchDir, InWorldScratch, false},
 		{opts.PluginDir, InWorldPlugin, true},
+		// The corpus is delivered READ-ONLY and never written into the
+		// worktree, never staged, and never present during phase A: a
+		// generator that can read the corpus can special-case it (M2a
+		// decision 13). It is appended LAST so every pre-M2a keeper argv
+		// golden is unchanged — a race that declares no corpus mounts no
+		// corpus directory, exactly as before.
+		{opts.CorpusDir, InWorldCorpus, true},
 	} {
 		if m.host == "" {
 			continue

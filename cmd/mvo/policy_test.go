@@ -161,7 +161,7 @@ func TestPolicyValidate(t *testing.T) {
 		t.Fatalf("exit = %d, want %d\nstdout: %s\nstderr: %s", code, exitFail, stdout, stderr)
 	}
 	wantLine := "mvo: policy validate: " + badPath + `: hard_gates[1].gate: unknown gate "suite-passes" ` +
-		`(known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)`
+		`(known: collect-nonempty, collected-not-below, corpus-complete, coverage-at-least, differential-cohort-at-least, mutation-survivors-not-above, no-failed-tests, paths-unmodified, properties-pass, property-cases-at-least, skips-not-above, status-pass)`
 	if strings.TrimRight(stderr, "\n") != wantLine {
 		t.Errorf("stderr =\n %q\nwant\n %q", strings.TrimRight(stderr, "\n"), wantLine)
 	}
@@ -498,5 +498,35 @@ func TestZeroGatePolicyIsRefusedAtIngest(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "at least one hard gate") {
 		t.Errorf("intent new does not say why:\n%s", errOut)
+	}
+}
+
+// AN ESCALATION RULE THAT IS ON MUST BE VISIBLE. `mvo policy show` is where
+// an operator reads what they installed, and M2a's rule 1b arrived with a
+// PARAMETER — "escalate at 2 behaviour classes" and "escalate at 6" are
+// different products. A summary that omitted the rule, or printed its name
+// without its parameter, would make the shipped-OFF default (decision 9)
+// indistinguishable from a policy that turned it on.
+func TestEscalationSummaryNamesTheBehavioralSplitRule(t *testing.T) {
+	rules := escalationRules(policy.Escalation{
+		OnAllWorldsFailedMachinery: true,
+		OnBehavioralSplit:          2,
+		OnRankingTie:               true,
+	})
+	want := []string{"on_all_worlds_failed_machinery", "on_behavioral_split=2", "on_ranking_tie"}
+	if len(rules) != len(want) {
+		t.Fatalf("rules = %v, want %v", rules, want)
+	}
+	for i := range want {
+		if rules[i] != want[i] {
+			t.Errorf("rules[%d] = %q, want %q (M2a rule 1b sits between machinery failure and require_evidence)",
+				i, rules[i], want[i])
+		}
+	}
+	// OFF is the shipped default and must print nothing at all.
+	for _, r := range escalationRules(policy.Escalation{OnAllWorldsFailedMachinery: true}) {
+		if strings.Contains(r, "behavioral") {
+			t.Errorf("a policy with on_behavioral_split=0 rendered %q", r)
+		}
 	}
 }

@@ -1,0 +1,5 @@
+{"job_id":"stats.py:core/NumberReplacer:0","module_path":"stats.py","operator_name":"core/NumberReplacer","occurrence":0,"start_pos":[12,11],"end_pos":[12,12]}
+{"job_id":"stats.py:core/NumberReplacer:1","module_path":"stats.py","operator_name":"core/NumberReplacer","occurrence":1,"start_pos":[12,15],"end_pos":[12,16]}
+{"job_id":"stats.py:core/ReplaceComparisonOperator_Lt_LtE:0","module_path":"stats.py","operator_name":"core/ReplaceComparisonOperator_Lt_LtE","occurrence":0,"start_pos":[12,4],"end_pos":[12,6]}
+{"job_id":"stats.py:core/ReplaceBinaryOperator_Add_Sub:0","module_path":"stats.py","operator_name":"core/ReplaceBinaryOperator_Add_Sub","occurrence":0,"start_pos":[9,20],"end_pos":[9,21]}
+{"job_id":"util.py:core/ReplaceTrueWithFalse:0","module_path":"util.py","operator_name":"core/ReplaceTrueWithFalse","occurrence":0,"start_pos":[3,11],"end_pos":[3,15]}

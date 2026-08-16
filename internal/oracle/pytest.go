@@ -52,7 +52,7 @@ const (
 // never zero, never "assumed 100 %".
 const probeScript = `import json,importlib.metadata as m
 o={}
-for n in ("pytest","coverage","pytest-reportlog","pytest-rerunfailures"):
+for n in ("pytest","coverage","pytest-reportlog","pytest-rerunfailures","hypothesis","mutmut","cosmic-ray"):
     try: o[n]=m.version(n)
     except Exception: pass
 print(json.dumps(o,sort_keys=True))
@@ -61,7 +61,15 @@ print(json.dumps(o,sort_keys=True))
 // probeTools is the ordered list of sources the probe may report; anything
 // else in its output is ignored (the probe runs in a world an agent wrote
 // to, so its output is input, not truth).
-var probeTools = []string{ToolCoverage, ToolPytest, ToolReportlog, ToolRerunfailures}
+//
+// M2a extends it with the three distributions the new rungs need
+// (decision 20). None of them is installed on the machine this was written
+// on, so every degradation path they feed is the path this tree actually
+// takes today rather than a hypothetical: a policy that requires one of
+// them is refused at pre-flight, and an oracle run anyway records absent
+// metrics with a named reason.
+var probeTools = []string{ToolCosmicRay, ToolCoverage, ToolHypothesis, ToolMutmut,
+	ToolPytest, ToolReportlog, ToolRerunfailures}
 
 // Evidence-channel environment. The plugin reads exactly these two names
 // and is inert without them.
@@ -73,6 +81,28 @@ const (
 	// plugin discovery. Set to 1, the ONLY plugins that load are the ones
 	// named on argv — which is the whole seal (M1f-a decision 24).
 	envNoAutoload = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
+	// envSafePath is CPython's own switch for the sys.path[0] that `-m`
+	// prepends: with it set, the working directory is NOT put on the import
+	// path. It is applied to the mutation adapter's ENUMERATION steps and
+	// to nothing else.
+	//
+	// The reason is a red-team finding. `python -m cosmic_ray.cli` runs with
+	// cwd = the candidate's worktree, so a directory named `cosmic_ray/` in
+	// the tree root shadows the installed distribution outright — and a
+	// six-line `cosmic_ray/cli.py` whose `init` exits 0 and whose `dump`
+	// prints nothing yields `mutants_candidates=0` and a vacuously passing
+	// gate. No harness pattern was ever going to close that: the shadow is
+	// an ordinary package directory named after a tool, matching no glob any
+	// policy would think to write. Removing the capability beats naming the
+	// file, which is the M1f lesson about entry-point plugins, restated one
+	// rung along.
+	//
+	// It is deliberately NOT set on the mutant execution steps: cosmic-ray's
+	// worker spawns the repository's own suite, which must import the
+	// candidate's modules from the worktree. Interpreters older than 3.11
+	// ignore the variable, so the enumeration contradiction check below is
+	// the backstop that does not depend on the interpreter's version.
+	envSafePath = "PYTHONSAFEPATH"
 )
 
 // Entry-point module names for the two optional plugins mvo itself
@@ -465,9 +495,54 @@ func (o *pytestOracle) Run(ctx context.Context, w backend.World) (object.Receipt
 		// The receipt's cost is the WHOLE oracle: probe, run and report
 		// extraction. execution.duration_ms is the verdict-producing
 		// process alone.
-		Cost:      object.Cost{WallMS: time.Since(start).Milliseconds()},
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		//
+		// Units is the scaling denominator that makes wall_ms learnable
+		// (M2a decision 22): the fixed cost of anything that imports
+		// pytest is ~400 ms on this tree and it DWARFS the tests, so a
+		// scheduler modelling oracle cost as "test time" is wrong by an
+		// order of magnitude on small repositories and right on large
+		// ones. Recording the count is what lets M2b fit
+		// wall_ms ≈ fixed + per_unit × units per repository instead.
+		// Absent (0, "") when the run produced no count at all — the same
+		// honest absence the metrics carry.
+		Cost:        o.cost(time.Since(start).Milliseconds(), r.metrics),
+		Inputs:      object.NoInputs(),
+		Correlation: policy.KindCorrelation(o.kind),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// cost pairs a run's wall time with the count its kind scales by:
+// collected tests for O0, executed tests for O1, and PROPERTY CASES for
+// O2p.
+//
+// The per-kind denominator is a switch rather than a default because the
+// default was wrong for one kind and silently so. O2p's vocabulary is
+// `properties_*`, `property_cases_*`, `duration_ms` and `coverage_bp` — it
+// never emits `tests_total`, so a lookup of `tests_total` always missed and
+// every property receipt recorded `{0, ""}`. That sentinel means "unknown",
+// which made `mvo oracles` unable to fit the kind forever ("units do not
+// vary: every receipt scaled 0") and left M2b without a denominator for one
+// of the four new rungs, while `internal/policy/profile.go` declared the
+// kind's unit as `cases` and the menu declared its marginal cost as
+// "cases × per-case".
+//
+// `property_cases_total` is itself honestly ABSENT under the JSONL fallback
+// (decision 15), so `{0, ""}` still happens — for the right reason, and one
+// a reader can check against `result.tools["hypothesis-observability"]`.
+func (o *pytestOracle) cost(wallMS int64, metrics map[string]int64) object.Cost {
+	name := MetricTestsTotal
+	switch o.kind {
+	case KindPytestCollect:
+		name = MetricCollectedTotal
+	case KindProperties:
+		name = policy.MetricPropertyCasesTotal
+	}
+	units, ok := metrics[name]
+	if !ok {
+		return object.Cost{WallMS: wallMS}
+	}
+	return sizedCost(wallMS, units, policy.KindUnit(o.kind))
 }
 
 // runKind opens the evidence channel around the kind's own run. The
@@ -475,7 +550,9 @@ func (o *pytestOracle) Run(ctx context.Context, w backend.World) (object.Receipt
 // exits; whatever arrived is what there is.
 func (o *pytestOracle) runKind(ctx context.Context, w backend.World,
 	tools map[string]string, probeKey string) (runOutcome, error) {
-	if o.kind != KindPytestCollect && o.kind != KindPytestSuite {
+	switch o.kind {
+	case KindPytestCollect, KindPytestSuite, KindProperties:
+	default:
 		// Unreachable: New refused every other kind.
 		return runOutcome{}, fmt.Errorf("oracle: unknown kind %q", o.kind)
 	}
@@ -502,8 +579,11 @@ func (o *pytestOracle) runKind(ctx context.Context, w backend.World,
 		// into reading.
 		defer ch.Close()
 	}
-	if o.kind == KindPytestSuite {
+	switch o.kind {
+	case KindPytestSuite:
 		return o.finishSuite(ctx, w, tools, probeKey, o.planSuite(tools), ch, nonce)
+	case KindProperties:
+		return o.finishProperties(ctx, w, tools, probeKey, o.propertiesPlan(tools), ch, nonce)
 	}
 	return o.finishCollect(ctx, w, tools, probeKey, o.collectArgv(), ch, nonce)
 }
@@ -524,24 +604,7 @@ func (o *pytestOracle) runKind(ctx context.Context, w backend.World,
 // runs. os/exec keeps the LAST occurrence of a duplicated key, so the
 // assignment silently won.
 func (o *pytestOracle) streamEnv(streamPath, nonce string) []string {
-	env := []string{}
-	if o.ev.autoload != policy.AutoloadOn {
-		// pytest imports pytest11 entry points from any *.egg-info /
-		// *.dist-info on sys.path, and the candidate tree root IS on
-		// sys.path. The module they name may be called anything, so no
-		// harness glob closes the surface — only this does. It loads
-		// AFTER `-p mvo_evidence`, in the same interpreter, which is
-		// enough to take the channel over before the observer configures.
-		env = append(env, envNoAutoload+"=1")
-	}
-	if nonce == "" {
-		return env
-	}
-	return append(env,
-		envPyPath+"="+o.ev.inWorldPlugin,
-		envStream+"="+streamPath,
-		envNonce+"="+nonce,
-	)
+	return evidenceEnv(o.ev, streamPath, nonce)
 }
 
 // prependPath puts dir at the head of a PATH-list value, dropping empties
@@ -920,20 +983,7 @@ func (o *pytestOracle) closeStream(ch *evidenceChannel, nonce string) Stream {
 // inherited by construction (the image owns its environment exactly as it
 // owns PATH), which is stated in the contract rather than papered over.
 func (o *pytestOracle) worldEnv(w backend.World, extra []string) []string {
-	if len(extra) == 0 {
-		return nil
-	}
-	if w.Tier() != object.TierT0Worktree {
-		return extra
-	}
-	merged := make([]string, 0, len(extra))
-	for _, kv := range extra {
-		if name, val, ok := strings.Cut(kv, "="); ok && name == envPyPath {
-			kv = envPyPath + "=" + prependPath(val, os.Getenv(envPyPath))
-		}
-		merged = append(merged, kv)
-	}
-	return append(os.Environ(), merged...)
+	return mergeWorldEnv(w, extra)
 }
 
 // newNonce is the 32-hex identity tag in the stream header (M1f decision

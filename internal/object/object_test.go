@@ -89,11 +89,15 @@ func TestDigestGolden(t *testing.T) {
 				Freshness:   Freshness{Basis: BasisConstruction, ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
 				RecheckTier: "V1-replayable",
 				Family:      "suite",
-				Cost:        Cost{WallMS: 1234},
-				CreatedAt:   "2026-01-02T03:04:05Z",
+				// M2a decision 22: {0, ""} is the honest "unknown scaling
+				// unit" a command oracle has — it parses nothing, so it
+				// counts nothing. Inputs is {} and never null (decision 24).
+				Cost:      Cost{WallMS: 1234},
+				Inputs:    NoInputs(),
+				CreatedAt: "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"cost":{"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"evidence_plugin":"","evidence_regime":"","exit_code":1,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"detail":"","metrics":{},"status":"fail","tools":{}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
-			wantDig:   "mv0:461dc888848732083264679c071c43151216fdedecb95485559156e16aad2026",
+			wantCanon: `{"correlation":{"corpus":"","executor":"","generator":"","signal":""},"cost":{"unit":"","units":0,"wall_ms":1234},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","-q"],"duration_ms":1234,"evidence_plugin":"","evidence_regime":"","exit_code":1,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"inputs":{},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"command","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22"],"detail":"","metrics":{},"status":"fail","tools":{}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
+			wantDig:   "mv0:aafe85b2fc95c16ccfe726f0c0159a77cc3dc7ab841da602be098aea854c9672",
 		},
 		{
 			// M1e/EP-2: a pytest-suite receipt carrying metrics and tools.
@@ -120,11 +124,17 @@ func TestDigestGolden(t *testing.T) {
 				Freshness:   Freshness{Basis: BasisConstruction, ValidFor: ValidFor{Tree: "git:89e6c98d92887913cadf06b2adb97f26cde4849b", Env: "mv0:" + strings.Repeat("3", 64)}},
 				RecheckTier: "V1-replayable",
 				Family:      "suite",
-				Cost:        Cost{WallMS: 1300},
+				// The scaling denominator that makes wall_ms learnable: 1300 ms
+				// for 8 tests and 1300 ms for 800 are the same number and mean
+				// opposite things (M2a decision 22). Correlation is declared
+				// per KIND and recorded per receipt, and Decide never reads it.
+				Cost:        Cost{WallMS: 1300, Units: 8, Unit: "tests"},
+				Inputs:      NoInputs(),
+				Correlation: Correlation{Signal: "test-outcomes", Generator: "repo", Executor: "candidate-process"},
 				CreatedAt:   "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"cost":{"wall_ms":1300},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","--junit-xml=.mvo-oracle/pytest-suite/junit.xml","-p","no:cacheprovider"],"duration_ms":1234,"evidence_plugin":"","evidence_regime":"","exit_code":0,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"pytest-suite","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22","sha256:cc33","sha256:dd44"],"detail":"","metrics":{"duration_ms":132,"tests_errored":0,"tests_failed":0,"tests_passed":8,"tests_skipped":0,"tests_total":8},"status":"pass","tools":{"pytest":"9.1.1"}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
-			wantDig:   "mv0:23f677c4d14e70fd87e34360848ec5e9cc1e507353f3a0caaa291802e84a3ec4",
+			wantCanon: `{"correlation":{"corpus":"","executor":"candidate-process","generator":"repo","signal":"test-outcomes"},"cost":{"unit":"tests","units":8,"wall_ms":1300},"created_at":"2026-01-02T03:04:05Z","execution":{"argv":["python3","-m","pytest","--junit-xml=.mvo-oracle/pytest-suite/junit.xml","-p","no:cacheprovider"],"duration_ms":1234,"evidence_plugin":"","evidence_regime":"","exit_code":0,"isolation_caps":{"cap_drop":"","cpu_milli":0,"memory_bytes":0,"network":"host","pids_limit":0,"read_only_root":false,"user":""},"isolation_tier":"T0-worktree"},"family":"suite","freshness":{"basis":"construction","valid_for":{"env":"mv0:` + strings.Repeat("3", 64) + `","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"}},"inputs":{},"oracle":{"config":"mv0:` + strings.Repeat("2", 64) + `","id":"pytest-suite","version":"v0"},"recheck_tier":"V1-replayable","result":{"artifacts":["sha256:aa11","sha256:bb22","sha256:cc33","sha256:dd44"],"detail":"","metrics":{"duration_ms":132,"tests_errored":0,"tests_failed":0,"tests_passed":8,"tests_skipped":0,"tests_total":8},"status":"pass","tools":{"pytest":"9.1.1"}},"schema":"multiverso.dev/receipt/v0","world":"mv0:` + strings.Repeat("1", 64) + `"}`,
+			wantDig:   "mv0:c56ced3198de52e87b2c5f02597882da20db3007d6d921c3c417581c9dbf8b47",
 		},
 		{
 			// M1c: full T1 caps — every field, canonical key order pinned.
@@ -327,5 +337,42 @@ func TestCASKey(t *testing.T) {
 				t.Errorf("CASKey(%q) = %q, want %q", tt.dig, got, tt.want)
 			}
 		})
+	}
+}
+
+// `Unit == "" iff Units == 0` is the invariant Cost documents, and it is the
+// difference between "this rung scaled by nothing" and "we do not know what
+// this rung scaled by" — decision 22's {0, ""} sentinel for UNKNOWN.
+//
+// It was violated on every machinery path in the mutation rung, which reads
+// its unit count out of a metrics map it had just deleted the key from, and
+// in the reducer when a cohort of two or more compared zero cases. A
+// zero-unit sample with a named unit is not merely untidy: it enters M2b's
+// least-squares fit at x = 0, which is exactly the intercept a scheduler
+// reads as the kind's FIXED cost, and an errored receipt's wall time can be
+// a whole baseline suite run.
+func TestCostUnitIsEmptyIffUnitsIsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cost Cost
+		ok   bool
+	}{
+		{"a measured purchase", Cost{WallMS: 400, Units: 8, Unit: "tests"}, true},
+		{"honest unknown", Cost{WallMS: 400}, true},
+		{"a named unit with no count", Cost{WallMS: 400, Unit: "mutants"}, false},
+		{"a count with no unit", Cost{WallMS: 400, Units: 8}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			holds := (tc.cost.Unit == "") == (tc.cost.Units == 0)
+			if holds != tc.ok {
+				t.Errorf("Cost%+v: invariant holds = %v, want %v", tc.cost, holds, tc.ok)
+			}
+		})
+	}
+	// And the receipt golden above carries the legal shape, so the canonical
+	// bytes this package pins can never be a counterexample.
+	c := Cost{WallMS: 1300, Units: 8, Unit: "tests"}
+	if (c.Unit == "") != (c.Units == 0) {
+		t.Fatalf("the pinned receipt golden's cost %+v violates its own invariant", c)
 	}
 }

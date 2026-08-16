@@ -210,16 +210,29 @@ collected count with O1's test total. A three-test repository reporting a
 detected forgery reaches a human instead of being filed under "the tests
 didn't pass".
 
-The measured result, on the adversarial corpus built *before* the fix
-([`testdata/adversarial/`](../testdata/adversarial/README.md)): **twelve of
-twelve laundering vectors stopped, eleven of them at rung O-1 with exactly one
-receipt each (the twelfth, a pre-planted artifact, at `status-pass@suite`).
-Before M1f, eight of them landed on trunk with a signed attestation
-`mvo verify HEAD` accepted.** The corpus evidences the **STOPPED** rows below
-and only those: no vector in it ever reaches the evidence stream, so the
-DETECTED row is carried by `internal/oracle/evidence_test.go` and by
-acceptance step 3k, which races a forgery under a policy with the guard gate,
-the guard oracle and the invariant all removed.
+The measured result, on the adversarial corpus
+([`testdata/adversarial/`](../testdata/adversarial/README.md)) as of M2a —
+**19 vectors, and the honest number is not 19 of 19**:
+
+> Eighteen of nineteen are stopped or escalated. **One lands.** Vector
+> `19-differential_conformity` passes every gate in a solo race, is SELECTed,
+> admitted, and `mvo verify` accepts it — with the bug fully intact. It reads
+> the input corpus off the filesystem at oracle time and special-cases exactly
+> those inputs, leaving every other input wrong. Raced against an honest fix it
+> escalates (the two land in different behaviour classes), but alone it wins.
+> This is the classic overfit-to-the-oracle, and it is **open at T0 by
+> construction**: the world must execute the corpus, so the world can read it.
+> T1 closes the sibling half but not this one.
+
+Thirteen of the stopped vectors die at rung O-1 with exactly one receipt each;
+before M1f, eight of them landed on trunk with a signed attestation `mvo verify`
+accepted. The corpus evidences the **STOPPED** rows below and only those: the
+guard-caught vectors never reach the evidence stream, so the DETECTED row is
+carried by `internal/oracle/evidence_test.go` and by acceptance step 3k, which
+races a forgery under a policy with the guard gate, the guard oracle and the
+invariant all removed. Three vectors (14–16) require `hypothesis` and `mutmut`
+to be importable; without them the race aborts as *machinery* and those rows go
+unevidenced rather than silently passing.
 
 What is still open, stated as plainly as the rest:
 
@@ -230,7 +243,12 @@ What is still open, stated as plainly as the rest:
 | An `*.egg-info` / `*.dist-info` declaring a `pytest11` **entry-point plugin** | **STOPPED** | A red team landed this on trunk under the first cut of M1f: pytest imports entry-point plugins from any distribution metadata on `sys.path`, the candidate's tree root is on `sys.path`, and the module can be named anything — so no path glob was ever going to close it. Oracle runs now carry `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` (`evidence.plugin_autoload`), which removes the capability rather than naming the file; the metadata directory is in the harness set as well. Corpus vector `13-entrypoint_plugin` |
 | The same forgeries moved into **application** code | **DETECTED** | S1/S2/S3: an absent stream, a lying exit code, or a disagreeing file is `status = error`, and every gate fails. Evidenced by unit tests and acceptance step 3k, not by the corpus |
 | A 3-test repo reporting a 500-test suite, forged **coherently** across both oracles | **OPEN** | `collect-equals-suite-total` compares two numbers that are BOTH authored inside the test process. It catches the adversary who forged one and forgot the other — which is most hand-written cheats — and not the one who forged both to agree. A red team reproduced the coherent version end to end. Closing it needs a count derived outside the test process (control-plane static AST collection); that is not in M1 |
-| Weakened or rewritten assertions, with the guard relaxed | **OPEN** | Not detectable from test outcomes at all. This is what O3 mutation testing (M2) is for: a suite that cannot kill mutants is a suite that stopped asserting |
+| Weakened or rewritten assertions, with the guard relaxed | **DETECTED as ambiguity** | Not detectable from test outcomes at all, and *not* by mutation either: diff-scoped mutation over a patch whose entire content is a test-file edit has an empty target set. What catches it is the M2a cross-candidate differential — the cheat and the honest fix land in different behaviour classes on a control-plane-authored corpus, and `on_behavioral_split` escalates with the input and both answers. That is ambiguity, not conviction: the differential does not say which class is right |
+| A mutant of the candidate's own diff that **hangs** instead of failing | **DETECTED** | A red team ran it: a per-mutant timeout was its own bucket, excluded from `mutation_score_bp`'s denominator *and* from the only mutation gate, so a mutant nothing killed cost the candidate nothing while the receipt read 100 %. `mutation-survivors-not-above` now reads `mutants_survived + mutants_timeout`, and the report lists the timed-out mutants with their diffs |
+| A `cosmic_ray/` directory in the tree root that **shadows the mutation tool** | **DETECTED** | A red team ran it: `python -m cosmic_ray.cli` resolves through the candidate's own tree, and a tool that enumerates nothing passed the survivor gate vacuously. The enumeration now runs under `PYTHONSAFEPATH=1`, and zero mutants over a non-empty diff target set is a machinery error with a named reason, not a pass. On CPython below 3.11 the environment switch is ignored and only the second layer applies |
+| One world **rewriting the corpus another world will replay**, at T0 | **OPEN at T0, STOPPED at T1** | A red team ran both payoffs — eliminating an honest sibling by making it report an undeclared case, and suppressing a behavioural split by making two worlds agree. The corpus is now delivered per world, re-digested by the control plane either side of every replay, and each observation is bound to the bytes it loaded, so the attack is detected and attributed. It is not *prevented* at T0: the oracle and the candidate run as the same uid on the same filesystem. Under T1 the per-world corpus is a read-only bind into one container and no sibling can reach it |
+| A cohort member that **shrinks the comparison** without emptying it | **OPEN** | The differential's denominator is the set of cases every member observed comparably, so a member that answers "opaque" on some cases removes exactly those from everyone's comparison. Members that contribute *nothing* are excluded and every member's contribution is recorded in the report; a partial shrink is visible and not refused |
+| A candidate that **reads the corpus off the filesystem** at oracle time, at T0 | **OPEN at T0, STOPPED at T1** | The corpus lives outside the worlds tree at mode 0700 and is absent from every world-visible path while the generating agent runs, so the agent is never *delivered* the inputs its output will be compared on. At T0 a process running as the invoking uid can still find them by absolute path. The honest guarantee at T0 is delivery, not unreachability |
 | Skips, with neither `paths-unmodified` nor `skips-not-above` declared | **OPEN** | A skipped test is still collected and still counted, so both sides of the invariant agree |
 | An adversary who patches the plugin from an imported module before the first failing test reports | **OPEN** | Stated in M1f's threat model in as many words. Nothing in-process defeats in-process code, and no cryptography here pretends otherwise |
 | A backdoor in application code that passes every honest test | **OPEN** | Research ch. 13's actual problem. Nothing in M1 addresses it |

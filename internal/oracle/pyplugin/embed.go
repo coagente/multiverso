@@ -28,3 +28,22 @@ var Source []byte
 // materialized under, so two binaries with different plugins never share a
 // materialized copy.
 var Digest = object.CASKeyBytes(Source)
+
+// CorpusFilename is the corpus runner's module name. It is executed BY PATH
+// (`python3 <plugin dir>/mvo_corpus.py`), never imported as a pytest
+// plugin: the corpus rung does not go through pytest at all, which is what
+// removes conftest.py collection, pytest.ini addopts, `-p` arguments and
+// pytest11 entry-point autoloading from its attack surface in one step
+// (M2a decision 12).
+const CorpusFilename = "mvo_corpus.py"
+
+// CorpusSource is the corpus runner's exact bytes.
+//
+//go:embed mvo_corpus.py
+var CorpusSource []byte
+
+// CorpusDigest is CorpusSource's content address. It is recorded in every
+// corpus-observe receipt's execution.evidence_plugin, for the same reason
+// the pytest observer's is: "which observer saw this run" must be an
+// auditable fact, not a version guess.
+var CorpusDigest = object.CASKeyBytes(CorpusSource)

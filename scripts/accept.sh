@@ -602,7 +602,7 @@ fi
 echo "$VALIDATE_OUT" | grep -q 'hard_gates\[1\].gate: unknown gate "suite-passes"' \
   || fail "policy validate does not locate the unknown gate:
 $VALIDATE_OUT"
-echo "$VALIDATE_OUT" | grep -q 'known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass' \
+echo "$VALIDATE_OUT" | grep -q 'known: collect-nonempty, collected-not-below, corpus-complete, coverage-at-least, differential-cohort-at-least, mutation-survivors-not-above, no-failed-tests, paths-unmodified, properties-pass, property-cases-at-least, skips-not-above, status-pass' \
   || fail "policy validate does not print the known gate vocabulary:
 $VALIDATE_OUT"
 "$MVO" policy validate "$REPO/.multiverso/policies/default.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
@@ -617,6 +617,483 @@ SHOWN_DIG="mv0:$(printf '%s' "$SHOWN" | python3 -c 'import hashlib,sys; print(ha
 [ "$SHOWN_DIG" = "$DEFAULT_DIG" ] \
   || fail "policy show --json is not byte-stable: re-digests to $SHOWN_DIG, want $DEFAULT_DIG"
 
+# --- 3r/3s. THE CROSS-CANDIDATE DIFFERENTIAL (EP-4). Two candidates that
+# implement clamp correctly for every input the eight-test suite exercises,
+# tie on every ranking key that measures anything, and DIVERGE on
+# clamp(nan, 0, 10): nan versus 0.
+#
+# Under M1f this race ESCALATEs on on_ranking_tie and tells the maintainer
+# nothing except that two digests tied. Under M2a it ESCALATEs on
+# on_behavioral_split and hands them the input and both answers. That
+# difference is the block. ---
+cp "$ROOT/testdata/toyrepo/policies/differential.json" "$REPO/.multiverso/policies/differential.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/differential.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "the shipped differential policy does not validate"
+"$MVO" policy use differential --dir "$REPO" >/dev/null || fail "policy use differential failed"
+INTENT_DIFF="$("$MVO" intent new --dir "$REPO" --title "behavioural split")"
+[ -n "$INTENT_DIFF" ] || fail "mvo intent new (differential intent) printed no digest"
+"$MVO" race "$INTENT_DIFF" --dir "$REPO" --agent script --patches "$REPO/patches-behave" \
+  || fail "the differential race exited non-zero"
+
+# 3r — the corpus is materialized ON THE BASE TREE and never reaches a
+# generator (M2a decision 13, AG-7): one corpus.recorded event, before every
+# world.created, and no world's captured patch, agent context or transcript
+# contains the corpus digest or a case id.
+CORPUS_EVENTS="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT count(*) FROM events WHERE type='corpus.recorded';")"
+[ "$CORPUS_EVENTS" -ge 1 ] || fail "no corpus.recorded event was appended"
+CORPUS_SEQ="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT min(seq) FROM events WHERE type='corpus.recorded';")"
+WORLD_SEQ="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT min(seq) FROM events WHERE type='world.created' AND seq > $CORPUS_SEQ;")"
+[ -n "$WORLD_SEQ" ] && [ "$CORPUS_SEQ" -lt "$WORLD_SEQ" ] \
+  || fail "corpus.recorded (seq $CORPUS_SEQ) does not precede the worlds it will be compared over"
+CORPUS_DIG="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT json_extract(cast(payload AS text), '\$.corpus') FROM events WHERE type='corpus.recorded' ORDER BY seq LIMIT 1;")"
+[ -n "$CORPUS_DIG" ] || fail "corpus.recorded names no corpus digest"
+# The negative half: the corpus exists on disk while agents run, and no
+# agent ever saw it. A generator that can read the corpus can special-case
+# it, which is corpus vector 19 and is the reason phase A mounts nothing.
+LEAK="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT count(*) FROM events WHERE type IN ('world.created','agent.started','agent.finished') AND (cast(payload AS text) LIKE '%$CORPUS_DIG%' OR cast(payload AS text) LIKE '%c0001%');")"
+[ "$LEAK" = "0" ] || fail "the corpus digest or a case id reached a generator ($LEAK events)"
+
+# 3r2 — and the corpus is not REACHABLE either, which is a different claim
+# and the one that was false. Decision 13's "never inside a world's tree"
+# was literally true while <raceDir>/corpus sat as the parent-SIBLING of
+# every world's worktree, so `../corpus/corpus.json` from an ordinary pytest
+# collection walked out with every case, target, argument and id. This step
+# is the assertion whose absence let that stand: a world whose
+# sitecustomize.py goes looking by every relative path a candidate would try
+# must find NOTHING, and it fails itself loudly if it does.
+#
+# The honest scope, stated because the test cannot enforce more than it
+# checks: at T0 the oracle and the candidate run as the same uid on the same
+# filesystem, so an adversary who knows the workspace layout still finds the
+# file by absolute path. What decision 13 delivers at T0 is "not DELIVERED to
+# the generating agent", not "not REACHABLE by it".
+INTENT_REACH="$("$MVO" intent new --dir "$REPO" --title "corpus reachability")"
+"$MVO" race "$INTENT_REACH" --dir "$REPO" --agent script --patches "$REPO/patches-reach" \
+  || fail "the corpus-reachability race exited non-zero"
+"$MVO" explain "$INTENT_REACH" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+probes = [c for c in r["candidates"] if not c["pass"]]
+assert not probes, (
+    "a world reached the pinned corpus by a relative path from its own cwd: "
+    + json.dumps(probes))
+' || fail "the corpus is reachable from a candidate world by a relative path; decision 13's
+     guarantee is delivery, not unreachability, and the layout must not make the walk trivial"
+
+# 3s — the differential escalates on a real split.
+EXPLAIN_DIFF="$("$MVO" explain "$INTENT_DIFF" --dir "$REPO")"
+echo "$EXPLAIN_DIFF" | grep -q '^type: *ESCALATE$' \
+  || fail "the differential race did not ESCALATE:
+$EXPLAIN_DIFF"
+echo "$EXPLAIN_DIFF" | grep -q 'escalated by policy rule on_behavioral_split' \
+  || fail "the rationale does not name on_behavioral_split:
+$EXPLAIN_DIFF"
+# The human rendering hands the maintainer the INPUT and both answers.
+echo "$EXPLAIN_DIFF" | grep -q 'stats:clamp(nan, 0, 10)' \
+  || fail "explain does not print the distinguishing call:
+$EXPLAIN_DIFF"
+# NEITHER world is rendered as a winner: a correct refusal is not a win.
+echo "$EXPLAIN_DIFF" | grep -q 'WINNER' && fail "an ESCALATE rendered a WINNER:
+$EXPLAIN_DIFF"
+echo "$EXPLAIN_DIFF" | grep -q ' won ' && fail "an ESCALATE rationale says a world won:
+$EXPLAIN_DIFF"
+"$MVO" explain "$INTENT_DIFF" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "ESCALATE", r["type"]
+assert r["escalation"]["rule"] == "on_behavioral_split", r["escalation"]
+# Both candidates passed every hard gate: the ladder had nothing left to
+# say and the difference is real.
+assert len(r["candidates"]) == 2, r["candidates"]
+for c in r["candidates"]:
+    assert c["pass"] is True, c
+b = r["behavior"]
+assert len(b["classes"]) == 2, b["classes"]
+assert b["cases_compared"] == 4, b
+d = b["distinguishing"]
+assert len(d) == 1 and d[0]["case"] == "c0001", d
+answers = sorted(o["value"] for o in d[0]["observations"])
+assert answers == ["0", "nan"], answers
+' || fail "explain --json does not carry the behavioural split with its distinguishing case"
+
+# The control assertion: the mechanism has TEETH rather than firing on
+# everything. Two behaviourally identical candidates produce ONE class and
+# no split.
+INTENT_SAME="$("$MVO" intent new --dir "$REPO" --title "no split")"
+"$MVO" race "$INTENT_SAME" --dir "$REPO" --agent script --patches "$REPO/patches-agree" \
+  || fail "the control differential race exited non-zero"
+"$MVO" explain "$INTENT_SAME" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["escalation"].get("rule") != "on_behavioral_split", r["escalation"]
+b = r.get("behavior")
+assert b is not None, "no behaviour block on a differential race"
+assert len(b["classes"]) == 1, b["classes"]
+' || fail "the differential fired on two candidates that behave identically"
+
+# 3t — a comparison of one is not a comparison: diff_cohort_n is present and
+# every other diff_* metric is ABSENT, never a fabricated zero.
+INTENT_ONE="$("$MVO" intent new --dir "$REPO" --budget-candidates 1 --title "cohort of one")"
+mkdir -p "$WORK/one" && cp "$REPO/patches-behave/patch-p.patch" "$WORK/one/"
+"$MVO" race "$INTENT_ONE" --dir "$REPO" --agent script --patches "$WORK/one" \
+  || fail "the one-candidate differential race exited non-zero"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded' AND cast(payload AS text) LIKE '%corpus-differential%' ORDER BY seq DESC LIMIT 1;" \
+  | python3 -c '
+import json, sys
+rec = json.loads(sys.stdin.read())
+m = rec["result"]["metrics"]
+assert m.get("diff_cohort_n") == 1, m
+assert list(m) == ["diff_cohort_n"], m
+assert rec["execution"]["evidence_regime"] == "derived", rec["execution"]
+assert rec["inputs"]["evidence_floor"] == "streamed", rec["inputs"]
+' || fail "a cohort of one did not record absence: every diff_* but diff_cohort_n must be missing"
+
+# 3u — cohort starvation is SELF-elimination (corpus vector 18). A candidate
+# that silences the corpus runner to shrink the cohort fails its OWN
+# corpus-complete gate, and the honest world is not convicted of it.
+INTENT_STARVE="$("$MVO" intent new --dir "$REPO" --title "cohort starvation")"
+"$MVO" race "$INTENT_STARVE" --dir "$REPO" --agent script --patches "$REPO/patches-starve" \
+  || fail "the starvation race exited non-zero"
+"$MVO" explain "$INTENT_STARVE" --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+cands = r["candidates"]
+assert len(cands) == 2, cands
+starved = [c for c in cands if not c["pass"]]
+honest = [c for c in cands if c["pass"]]
+assert len(starved) == 1 and len(honest) == 1, cands
+# The starving world stops at its OWN gate.
+failed = [g["label"] for g in starved[0]["gates"] if g["result"] == "fail"]
+assert failed == ["corpus-complete@observe"], failed
+# And the surviving comparison declines to be a comparison rather than
+# quietly comparing against a smaller denominator.
+b = r.get("behavior")
+assert b is not None and b["cohort_n"] == 1, b
+' || fail "cohort starvation was not self-elimination"
+
+# 3u2 — A CORPUS POLICY MUST STILL BE ABLE TO LAND SOMETHING. Validation
+# rule 23 is decision 21's argument one rung below the cohort stage: the
+# corpus a `corpus-complete` gate reads is materialized by the race's phase
+# 0, and `mvo admit` has no phase 0, so a landing-scope corpus gate is not a
+# gate that fails — it is a gate that cannot be evaluated, and an
+# admission that aborts as machinery forever. The gate declares scope
+# "race", `mvo admit` NAMES it as unevaluated, and the landing succeeds.
+#
+# Raced in a throwaway clone of the fixture so the main repo's trunk, its
+# ledger and steps 4-9's admission are untouched.
+REPO_ADM="$WORK/toyrepo-admit"
+mkdir -p "$REPO_ADM"
+cp -R "$ROOT/testdata/toyrepo/." "$REPO_ADM/"
+rm -rf "$REPO_ADM/__pycache__" "$REPO_ADM/.pytest_cache"
+$GIT -C "$REPO_ADM" init -q -b main
+$GIT -C "$REPO_ADM" add -A
+$GIT -C "$REPO_ADM" commit -qm "toyrepo baseline (admission under a corpus policy)"
+"$MVO" init --dir "$REPO_ADM" >/dev/null
+cp "$ROOT/testdata/toyrepo/policies/differential.json" "$REPO_ADM/.multiverso/policies/differential.json"
+"$MVO" policy use differential --dir "$REPO_ADM" >/dev/null || fail "policy use differential (admission repo) failed"
+INTENT_ADM="$("$MVO" intent new --dir "$REPO_ADM" --title "land under a corpus policy" --budget-candidates 1)"
+mkdir -p "$WORK/adm-patches" && cp "$REPO_ADM/patches-behave/patch-p.patch" "$WORK/adm-patches/"
+"$MVO" race "$INTENT_ADM" --dir "$REPO_ADM" --agent script --patches "$WORK/adm-patches" \
+  || fail "the admission-under-a-corpus-policy race exited non-zero"
+ADMIT_OUT="$("$MVO" admit "$INTENT_ADM" --dir "$REPO_ADM" 2>&1)" \
+  || fail "mvo admit could not land under a policy with a corpus gate — a corpus policy that can
+     never admit anything is the sealed.json failure rebuilt one rung lower:
+$ADMIT_OUT"
+printf '%s' "$ADMIT_OUT" | grep -q 'race-scope gates not evaluated at admission: corpus-complete@observe' \
+  || fail "admission did not NAME the corpus gate it could not evaluate; a landing gate set weaker
+     than the race's is a legitimate choice and must never be an invisible one:
+$ADMIT_OUT"
+"$MVO" verify HEAD --dir "$REPO_ADM" >/dev/null \
+  || fail "the commit landed under a corpus policy does not verify"
+
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default (after differential) failed"
+
+# --- 3v. mutation (O3), or a NAMED SKIP. Neither cosmic-ray nor mutmut is
+# installed on the machine M2a was written on, so the skip is the live path
+# — and a skip that renders like a measurement is exactly the over-claim
+# this project exists to remove. The absent-toolchain half is therefore
+# ASSERTED rather than skipped: the race must abort at pre-flight, with the
+# decision-20 sentence and an UNTOUCHED ledger. ---
+cp "$ROOT/testdata/toyrepo/policies/mutation.json" "$REPO/.multiverso/policies/mutation.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/mutation.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "policy validate rejected the mutation fixture policy"
+MUT_TOOL="$(python3 -c '
+import importlib.metadata as m
+for name in ("cosmic-ray", "mutmut"):
+    try:
+        m.version(name)
+        print(name)
+        break
+    except Exception:
+        pass
+')"
+"$MVO" policy use mutation --dir "$REPO" >/dev/null || fail "policy use mutation failed"
+INTENT_MUT="$("$MVO" intent new --dir "$REPO" --title "mutation" --budget-candidates 2)"
+[ -n "$INTENT_MUT" ] || fail "mvo intent new (mutation) printed no digest"
+EVENTS_BEFORE="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+if [ -z "$MUT_TOOL" ]; then
+  echo "SKIP 3v (measured half): neither cosmic-ray nor mutmut is importable in this environment; asserting the pre-flight abort instead"
+  if MUT_OUT="$("$MVO" race "$INTENT_MUT" --dir "$REPO" --agent script --patches "$REPO/patches" 2>&1)"; then
+    fail "mvo race succeeded with no mutation toolchain installed:
+$MUT_OUT"
+  fi
+  printf '%s' "$MUT_OUT" | grep -q 'cosmic-ray or mutmut' \
+    || fail "the pre-flight abort does not name the missing toolchain:
+$MUT_OUT"
+  printf '%s' "$MUT_OUT" | grep -q 'machinery, never a failing candidate' \
+    || fail "the pre-flight abort does not say a missing toolchain is machinery:
+$MUT_OUT"
+  EVENTS_AFTER="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+  [ "$EVENTS_BEFORE" = "$EVENTS_AFTER" ] \
+    || fail "a pre-flight abort wrote $((EVENTS_AFTER - EVENTS_BEFORE)) ledger event(s); the ledger must be untouched"
+else
+  "$MVO" race "$INTENT_MUT" --dir "$REPO" --agent script --patches "$REPO/patches" \
+    || fail "the mutation race failed with $MUT_TOOL installed"
+  sqlite3 "$REPO/.multiverso/ledger.db" \
+    "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+    | python3 -c '
+import json, sys
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+muts = [r for r in recs if r["oracle"]["id"] == "mutation-diff"]
+assert muts, "no mutation-diff receipt was recorded"
+for r in muts:
+    m = r["result"]["metrics"]
+    if r["result"]["status"] != "pass":
+        continue
+    assert m["mutants_tested"] <= m["mutants_budget"], m
+    assert r["inputs"]["diff_target"].startswith("mv0:"), r["inputs"]
+    assert r["inputs"]["mutant_selection"] in ("control-plane", "tool"), r["inputs"]
+    assert r["cost"]["unit"] == "mutants", r["cost"]
+    # A ratio over an empty denominator is ABSENT, never a zero score.
+    if m.get("mutants_killed", 0) + m.get("mutants_survived", 0) == 0:
+        assert "mutation_score_bp" not in m, m
+print("mutation receipts ok")
+' || fail "the mutation receipts do not honour the pinned ceiling and its provenance"
+fi
+
+# --- 3w. properties (O2p), or a NAMED SKIP. Same shape, and the same live
+# path: hypothesis is absent here. When it IS present, the decision-15 rule
+# is what is asserted — property_cases_* are either PRESENT with
+# result.tools["hypothesis-observability"] == "stream", or ABSENT with
+# "jsonl". Never present with jsonl. ---
+cp "$ROOT/testdata/toyrepo/policies/properties.json" "$REPO/.multiverso/policies/properties.json"
+mkdir -p "$REPO/props" && cp "$ROOT/testdata/toyrepo/props/mvo_props.py" "$REPO/props/mvo_props.py"
+"$MVO" policy validate "$REPO/.multiverso/policies/properties.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "policy validate rejected the properties fixture policy"
+# The declared property module is HARNESS-frozen (decision 14, corpus
+# vector 16): a candidate that rewrites it dies at rung O-1.
+"$MVO" policy show properties --dir "$REPO" | grep -q 'props/mvo_props.py' \
+  || fail "the declared property module is not in the compiled harness set:
+$("$MVO" policy show properties --dir "$REPO")"
+HAS_HYP="$(python3 -c '
+import importlib.metadata as m
+try:
+    print(m.version("hypothesis"))
+except Exception:
+    print("")
+')"
+"$MVO" policy use properties --dir "$REPO" >/dev/null || fail "policy use properties failed"
+INTENT_PROP="$("$MVO" intent new --dir "$REPO" --title "properties" --budget-candidates 2)"
+EVENTS_BEFORE="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+if [ -z "$HAS_HYP" ]; then
+  echo "SKIP 3w (measured half): hypothesis is not importable in this environment; asserting the pre-flight abort instead"
+  if PROP_OUT="$("$MVO" race "$INTENT_PROP" --dir "$REPO" --agent script --patches "$REPO/patches" 2>&1)"; then
+    fail "mvo race succeeded with no hypothesis installed:
+$PROP_OUT"
+  fi
+  printf '%s' "$PROP_OUT" | grep -q 'hypothesis is not importable' \
+    || fail "the pre-flight abort does not name hypothesis:
+$PROP_OUT"
+  EVENTS_AFTER="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+  [ "$EVENTS_BEFORE" = "$EVENTS_AFTER" ] \
+    || fail "a pre-flight abort wrote $((EVENTS_AFTER - EVENTS_BEFORE)) ledger event(s); the ledger must be untouched"
+else
+  "$MVO" race "$INTENT_PROP" --dir "$REPO" --agent script --patches "$REPO/patches" \
+    || fail "the properties race failed with hypothesis installed"
+  sqlite3 "$REPO/.multiverso/ledger.db" \
+    "SELECT cast(payload AS text) FROM events WHERE type='receipt.recorded';" \
+    | python3 -c '
+import json, sys
+recs = [json.loads(line) for line in sys.stdin if line.strip()]
+props = [r for r in recs if r["oracle"]["id"] == "hypothesis-properties"]
+assert props, "no hypothesis-properties receipt was recorded"
+for r in props:
+    m, tools = r["result"]["metrics"], r["result"]["tools"]
+    source = tools.get("hypothesis-observability", "")
+    has_cases = "property_cases_total" in m
+    # Decision 15, byte for byte: one metric name, one provenance.
+    assert not (has_cases and source == "jsonl"), (m, tools)
+    if has_cases:
+        assert source == "stream", tools
+    if source == "jsonl":
+        assert "property_cases_invalid" not in m, m
+print("property receipts ok")
+' || fail "the property receipts violate the decision-15 provenance rule"
+fi
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default (after properties) failed"
+
+# --- 3x. THE COMPATIBILITY PROOF (M2a decision 25), under test rather than
+# in prose. Two halves, and both are claims a reader of the design document
+# would otherwise have to take on faith:
+#
+#   (a) the SHIPPED DEFAULT DOES NOT MOVE. `mvo policy show default
+#       --builtin --json` re-digests to the M1f constant, and none of M2a's
+#       four additive policy fields appears in its bytes — because a field
+#       that always serialized would mint a new digest for every existing
+#       policy, which is a silent replay break dressed as a schema addition.
+#   (b) a ledger written by the M1f BINARY replays byte-for-byte under this
+#       one. Not a ledger this binary wrote a minute ago: bytes produced
+#       before M2a existed, which is the only version of the claim worth
+#       making. The M1f binary is built from its own commit in a throwaway
+#       worktree; when that commit cannot be resolved (a shallow clone, a
+#       tarball) the half is SKIPPED BY NAME rather than quietly passing. ---
+M2A_DEFAULT="mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543"
+BUILTIN_JSON="$("$MVO" policy show default --builtin --json --dir "$REPO")"
+BUILTIN_DIG="mv0:$(printf '%s' "$BUILTIN_JSON" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+[ "$BUILTIN_DIG" = "$M2A_DEFAULT" ] \
+  || fail "the built-in default policy moved: $BUILTIN_DIG, want $M2A_DEFAULT
+     M2a decision 25 says every new rung is opt-in and the shipped default is byte-identical to M1f's."
+printf '%s' "$BUILTIN_JSON" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+pol = json.loads(raw)
+# The four additive v1 fields must be ABSENT from a policy that declares
+# none of them. Their compiled defaults reproduce M1f semantics exactly
+# (M1f decision 3), and their omission is what keeps every pre-M2a policy
+# digest where it was.
+for key in ("on_behavioral_split",):
+    assert key not in pol["escalation"], ("escalation." + key, pol["escalation"])
+for gate in pol["hard_gates"]:
+    assert "scope" not in gate, gate
+for oracle in pol["oracles"]:
+    assert "corpus" not in oracle, oracle
+    assert "mutation" not in oracle, oracle
+' || fail "the shipped default carries an M2a field it does not declare"
+
+M1F_COMMIT="$(git -C "$ROOT" rev-list -1 --grep '^M1f:' HEAD 2>/dev/null || true)"
+if [ -z "$M1F_COMMIT" ]; then
+  echo "SKIP 3x (replay half): no M1f commit reachable from HEAD in $ROOT (shallow clone or unpacked tarball); the byte-for-byte replay of PRE-M2a ledger bytes cannot be built here"
+else
+  OLDTREE="$WORK/m1f-src"
+  git -C "$ROOT" worktree add -q --detach "$OLDTREE" "$M1F_COMMIT" \
+    || fail "could not check out the M1f commit $M1F_COMMIT"
+  OLDMVO="$WORK/mvo-m1f"
+  (cd "$OLDTREE" && go build -o "$OLDMVO" ./cmd/mvo) \
+    || fail "the M1f binary does not build from $M1F_COMMIT"
+  OLDREPO="$WORK/m1f-repo"
+  mkdir -p "$OLDREPO"
+  cp -R "$OLDTREE/testdata/toyrepo/." "$OLDREPO/"
+  rm -rf "$OLDREPO/__pycache__" "$OLDREPO/.pytest_cache"
+  $GIT -C "$OLDREPO" init -q -b main
+  $GIT -C "$OLDREPO" add -A
+  $GIT -C "$OLDREPO" commit -qm "m1f-era baseline"
+  "$OLDMVO" init --dir "$OLDREPO" >/dev/null || fail "the M1f binary could not init a workspace"
+  OLD_INTENT="$("$OLDMVO" intent new --dir "$OLDREPO" --title "m1f-era race")"
+  "$OLDMVO" race "$OLD_INTENT" --dir "$OLDREPO" --agent script --patches "$OLDREPO/patches" >/dev/null \
+    || fail "the M1f binary could not race its own fixture"
+  OLD_RATIONALE="$("$OLDMVO" explain "$OLD_INTENT" --dir "$OLDREPO" | grep '^rationale:')"
+  # The M2a binary now reads bytes it did not write. audit re-derives every
+  # recorded decision from the recorded inputs and compares the rationale
+  # it produces against the recorded one.
+  "$MVO" audit --dir "$OLDREPO" --require-decisions 1 --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["chain_ok"] is True, r
+assert r["replay_identical"] is True, r
+assert r["decisions"] >= 1, r
+' || fail "an M1f-era ledger does not replay identically under the M2a binary"
+  NEW_RATIONALE="$("$MVO" explain "$OLD_INTENT" --dir "$OLDREPO" | grep '^rationale:')"
+  [ "$OLD_RATIONALE" = "$NEW_RATIONALE" ] \
+    || fail "the M2a binary renders an M1f-era decision differently:
+M1f: $OLD_RATIONALE
+M2a: $NEW_RATIONALE"
+  # And the M1f-era pinned policy still compiles to the same instance, so
+  # every historical receipt still matches its own gate's selector.
+  # (Captured, not piped: `grep -q` closes the pipe on its first match and
+  # `set -o pipefail` would turn the writer's EPIPE into a false failure.)
+  OLD_SHOW="$("$MVO" policy show default --dir "$OLDREPO")"
+  printf '%s' "$OLD_SHOW" | grep -q "$M2A_DEFAULT" \
+    || fail "the M1f-era workspace's default policy digest moved under the M2a binary:
+$OLD_SHOW"
+  git -C "$ROOT" worktree remove --force "$OLDTREE" >/dev/null 2>&1 || true
+fi
+
+# --- 3y. `mvo oracles` — the menu M2b allocates over. The assertion that
+# matters is not that a number is printed: it is that an UNMEASURED kind
+# never renders like a measured one. A scheduler that reads a fabricated
+# coefficient buys the wrong rung, and a two-point fit dressed as a fact is
+# the same over-claim as a skipped gate rendered green. ---
+MENU="$("$MVO" oracles --dir "$REPO")" || fail "mvo oracles exited non-zero"
+for kind in tree-guard pytest-collect pytest-suite hypothesis-properties \
+            corpus-observe corpus-differential mutation-diff; do
+  printf '%s' "$MENU" | grep -q "^$kind " \
+    || fail "mvo oracles does not render the kind $kind:
+$MENU"
+done
+printf '%s' "$MENU" | grep -q '^measured in this workspace:' \
+  || fail "mvo oracles prints no measurement block:
+$MENU"
+"$MVO" oracles --dir "$REPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == "multiverso.dev/oracle-menu/v0", r["schema"]
+kinds = {k["kind"]: k for k in r["kinds"]}
+for want in ("tree-guard", "pytest-collect", "pytest-suite", "hypothesis-properties",
+             "corpus-observe", "corpus-differential", "mutation-diff"):
+    assert want in kinds, sorted(kinds)
+measured = 0
+for name, k in kinds.items():
+    # Every kind declares its shape without running anything.
+    assert k["stage"] in ("world", "cohort"), k
+    assert isinstance(k["correlation"], dict), k
+    if k["measurement"] is None:
+        # An absent measurement SAYS SO, and says how many samples it had.
+        assert k["measurement_note"].startswith("no local measurement (n="), k
+        assert ("n=%d" % k["measurement_n"]) in k["measurement_note"], k
+    else:
+        measured += 1
+        assert k["measurement"]["n"] >= 3, k
+        assert k["measurement_note"] == "", k
+        assert k["measurement"]["units_min"] < k["measurement"]["units_max"], k
+# The cohort rung is the one M2b needs a barrier for, and it must say so.
+assert kinds["corpus-differential"]["stage"] == "cohort", kinds["corpus-differential"]
+assert kinds["corpus-differential"]["discriminates"] == "partition", kinds["corpus-differential"]
+print("oracle menu ok (%d of %d kinds measured in this workspace)" % (measured, len(kinds)))
+' || fail "mvo oracles --json renders a measurement that is not one"
+# A kind this workspace never ran must be unmeasured, with its count. This
+# is the negative half: the command has to be capable of saying "I do not
+# know" about something.
+"$MVO" oracles --dir "$REPO" --json | python3 -c '
+import json, sys
+kinds = {k["kind"]: k for k in json.load(sys.stdin)["kinds"]}
+for absent in ("mutation-diff", "hypothesis-properties"):
+    k = kinds[absent]
+    assert k["measurement"] is None, (absent, k)
+    assert k["measurement_n"] == 0, (absent, k)
+' || fail "mvo oracles claims a measurement for a rung this workspace never bought"
+# The menu fixture policy declares every rung, which is what M2b allocates
+# over. It must validate, and `--policy` must attribute its instances.
+cp "$ROOT/testdata/toyrepo/policies/menu.json" "$REPO/.multiverso/policies/menu.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/menu.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "the menu fixture policy (every rung) does not validate"
+MENU_POL="$("$MVO" oracles --dir "$REPO" --policy menu)" || fail "mvo oracles --policy menu exited non-zero"
+printf '%s' "$MENU_POL" | grep -q 'declared by policy menu' \
+  || fail "mvo oracles --policy does not attribute the policy's instances:
+$MENU_POL"
+MENU_DECLARED="$(printf '%s\n' "$MENU_POL" | sed -n '/declared by policy/,/^$/p')"
+for kind in tree-guard pytest-collect pytest-suite corpus-observe corpus-differential \
+            hypothesis-properties mutation-diff; do
+  printf '%s' "$MENU_DECLARED" | grep -q "^  $kind " \
+    || fail "mvo oracles --policy menu does not list an instance for $kind:
+$MENU_DECLARED"
+done
+
 # --- 3p. docs freshness: the reader-facing pages must agree with the
 # binary about the two things a reader copies verbatim — the shipped
 # default policy digest and the closed gate vocabulary. The design partner
@@ -630,7 +1107,7 @@ for doc in "$ROOT/docs/quickstart.md" "$ROOT/docs/design/M1f-trust-boundary.md";
     || fail "$(basename "$doc") does not mention the shipped default policy digest $DEFAULT_DIG
      (it pins an older one — re-record its transcripts)"
 done
-GATE_VOCAB='collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass'
+GATE_VOCAB='collect-nonempty, collected-not-below, corpus-complete, coverage-at-least, differential-cohort-at-least, mutation-survivors-not-above, no-failed-tests, paths-unmodified, properties-pass, property-cases-at-least, skips-not-above, status-pass'
 grep -qF "$GATE_VOCAB" "$ROOT/docs/quickstart.md" \
   || fail "docs/quickstart.md does not carry the current known-gate list:
      $GATE_VOCAB"

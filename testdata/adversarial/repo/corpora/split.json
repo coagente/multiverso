@@ -1,0 +1,10 @@
+{"cases": [
+  {"target": "billing:split_evenly", "args": [100, 3], "kwargs": {}},
+  {"target": "billing:split_evenly", "args": [100, 4], "kwargs": {}},
+  {"target": "billing:split_evenly", "args": [7, 2], "kwargs": {}},
+  {"target": "billing:split_evenly", "args": [1, 3], "kwargs": {}},
+  {"target": "billing:split_evenly", "args": [0, 3], "kwargs": {}},
+  {"target": "billing:split_evenly", "args": [100, 0], "kwargs": {}},
+  {"target": "billing:apply_rate_bp", "args": [1000, 1250], "kwargs": {}},
+  {"target": "billing:apply_rate_bp", "args": [333, 777], "kwargs": {}}
+]}

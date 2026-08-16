@@ -93,6 +93,24 @@ type raceRun struct {
 	// is held here rather than baked into a shared ladder.
 	baseline      int64
 	oracleTimeout time.Duration
+	// corpusRoot is the race's control-plane corpus tree, outside the worlds
+	// directory entirely: <workspace>/corpora/<race>/, mode 0700, with one
+	// subdirectory per world plus `base` for phase 0.
+	//
+	// corpusDir is phase 0's own directory inside it — where the corpus is
+	// materialized and where the BASE world reads it from. Candidate worlds
+	// never read this copy; each gets its own, written by the control plane
+	// after phase A has joined, so nothing a generating agent could see was
+	// ever the corpus (M2a decision 13, delivered rather than asserted).
+	corpusRoot string
+	corpusDir  string
+	// baseNodeIDs is the base tree's own collected node-id list, kept for
+	// the repo-suite corpus provider. The collect baseline already
+	// produced it, so that provider costs no extra process.
+	baseNodeIDs []string
+	// corpus is phase 0's output: the pinned inputs, the base tree's
+	// observation of them, and the reducer the cohort barrier will run.
+	corpus *corpusPlan
 
 	recMu  sync.Mutex // one total order over every ledger append in the race path
 	repoMu sync.Mutex // git worktree add/remove/prune contend on repo-level locks
@@ -119,6 +137,46 @@ type slot struct {
 	// land in. Both are created before the world is opened, because a T1
 	// container's mounts are fixed at open time.
 	evRoot, scratchRoot string
+	// corpusDir is THIS WORLD's own corpus directory. It is created EMPTY
+	// before the world is opened — a T1 container's mounts are fixed at open
+	// time, so the directory has to exist — and the corpus file is written
+	// into it only after phase A has joined.
+	//
+	// Both halves matter. Empty during phase A is what makes decision 13
+	// true on T1: the mount was there from the moment the keeper opened, and
+	// `docker inspect` showed `<raceDir>/corpus -> /mvo/corpus` on every
+	// candidate container while its agent was still running, so the
+	// generating agent could read the inputs its output would be compared
+	// on. Per-WORLD is what removes the cross-world channel: one shared file
+	// re-read from disk on every replay let a candidate rewrite the corpus a
+	// SIBLING would replay — eliminating the honest world for reporting a
+	// case nobody declared, or suppressing a split by making both worlds
+	// agree — while never touching its own observation.
+	corpusDir string
+	// corpusFile is the host path of this world's copy, kept so the control
+	// plane can re-digest it either side of the observe run.
+	corpusFile string
+	// obs is this world's parsed corpus observation, kept from phase B for
+	// phase B2's reducer. obsOK says an observation was produced at all;
+	// obs.Usable says it may be compared. Both are needed: "no corpus
+	// oracle ran" and "the corpus oracle ran and the stream was
+	// unusable" are different facts, and only the second is a statement
+	// about the candidate.
+	//
+	// obsPass is the observe RECEIPT's verdict, and it is a third fact
+	// again. A stream carrying a header, a session_start, a SUBSET of the
+	// declared case ids and a session_finish parses as USABLE — the
+	// usability rules kill on a missing finish, an undeclared id and a
+	// repeated id, none of which it commits — while the oracle's own status
+	// is `fail` (observed < total). Admitting such a world to the cohort let
+	// an already-eliminated candidate delete the distinguishing case from
+	// every honest sibling's denominator, because the comparison denominator
+	// is an intersection over every member. M2a's normative sentence is "the
+	// cohort is every world whose corpus-observe receipt is `pass` with a
+	// usable observation", and this is the `pass` half of it.
+	obs     oracle.Observation
+	obsOK   bool
+	obsPass bool
 }
 
 // ladderRung is one required oracle instance, named by the policy.
@@ -299,6 +357,43 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 	r.oracleTimeout = oracleTimeout
+	// M2a pre-flight, beside M1e's pytest probe and M1f's regime check: a
+	// corpus provider this binary cannot materialize is machinery, one
+	// line, ledger untouched. Substituting a different corpus would make
+	// every comparison in the race a comparison of inputs nobody pinned.
+	if err := preflightCorpus(pol); err != nil {
+		r.dropEvidenceDirs()
+		os.Remove(r.raceDir)
+		return nil, err
+	}
+	if _, need := needsCorpus(pol); need {
+		// Created before ANY world is opened: a T1 container's mounts are
+		// fixed at open time, and the base world materializes into it.
+		//
+		// It lives OUTSIDE the worlds tree, beside the plugin directory.
+		// Under <raceDir>/corpus it was the parent-sibling of every world's
+		// cwd, and a candidate reading `../corpus/corpus.json` from an
+		// ordinary pytest collection walked out with the whole pinned corpus
+		// — targets, arguments and ids. Moving it is defence in depth and
+		// nothing more: at T0 the oracle and the candidate run as the same
+		// uid on the same filesystem, so 0700 stops nobody who knows the
+		// layout. What the move buys is that the trivial relative walk no
+		// longer works and that the honest claim — "not DELIVERED to the
+		// generating agent", not "not REACHABLE by it" — is the one the
+		// tree makes.
+		r.corpusRoot = filepath.Join(filepath.Dir(cfg.WorldsDir), "corpora", filepath.Base(r.raceDir))
+		r.corpusDir = filepath.Join(r.corpusRoot, "base")
+		if err := os.MkdirAll(r.corpusDir, 0o700); err != nil {
+			r.dropEvidenceDirs()
+			os.Remove(r.raceDir)
+			return nil, fmt.Errorf("race: corpus dir: %w", err)
+		}
+		if err := os.Chmod(r.corpusRoot, 0o700); err != nil {
+			r.dropEvidenceDirs()
+			os.Remove(r.raceDir)
+			return nil, fmt.Errorf("race: corpus dir: %w", err)
+		}
+	}
 
 	var base *baseWorld
 	if needsBaseWorld(pol) {
@@ -349,8 +444,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// when a collected-not-below gate makes the delta mean something.
 	if base != nil {
 		r.baseline, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
+		if err == nil {
+			// PHASE 0 — corpus materialization, on the same base worktree
+			// (one open, two measurements) and BEFORE phase A, so the
+			// corpus exists on disk while agents run but is never mounted
+			// into a world during generation: a generator that can read
+			// the corpus can special-case it (M2a decision 13).
+			r.corpus, err = r.materializeCorpus(raceCtx, pol, base)
+		}
 		base.close(r)
 		if err != nil {
+			r.dropCorpusDir()
 			r.dropEvidenceDirs()
 			os.Remove(r.raceDir)
 			return nil, err
@@ -380,6 +484,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}
 		}
 		r.dropEvidenceDirs()
+		r.dropCorpusDir()
 		_ = os.Remove(r.raceDir) // fails harmlessly if a world survived
 	}()
 
@@ -407,9 +512,26 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 	}
 
+	// The corpus is delivered HERE — after phase A has joined, before any
+	// oracle runs. Every world's corpus directory has existed since it was
+	// opened (a T1 container's mounts are fixed at open time) and has been
+	// EMPTY for the whole of generation, so no generating agent could read
+	// the inputs its output will be compared on (M2a decision 13).
+	if err := r.deliverCorpus(r.corpus, completed); err != nil {
+		return nil, err
+	}
+
 	// Phase B — verification, bounded at Parallel.
 	r.pool(completed, func(i int) error { return r.verify(raceCtx, i) })
 	if err := r.failed(); err != nil {
+		return nil, err
+	}
+
+	// PHASE B2 — the cohort barrier. No process executes and nothing is
+	// opened: the reducer is a pure function of the corpus, the base
+	// observation and the cohort's observations, and it emits ONE RECEIPT
+	// PER WORLD, each bound to exactly the world it judges.
+	if err := r.runCohortBarrier(r.corpus); err != nil {
 		return nil, err
 	}
 
@@ -477,6 +599,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		r.repoMu.Unlock()
 		r.dropEvidenceDirs()
+		r.dropCorpusDir()
 		if err := os.Remove(r.raceDir); err != nil {
 			return nil, fmt.Errorf("race: cleanup: %w", err)
 		}
@@ -509,7 +632,13 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 	if s.evRoot, s.scratchRoot, err = r.worldEvidenceDirs(ordinal); err != nil {
 		return err
 	}
-	wh, err := cfg.Backend.Open(ctx, dir, r.openOptsFor(s.evRoot, s.scratchRoot))
+	// So is this world's corpus directory — and it is created EMPTY. The
+	// mount must exist at open time; the corpus must not exist until the
+	// agent is gone.
+	if s.corpusDir, err = r.worldCorpusDir(ordinal); err != nil {
+		return err
+	}
+	wh, err := cfg.Backend.Open(ctx, dir, r.openOptsFor(s.evRoot, s.scratchRoot, s.corpusDir))
 	if err != nil {
 		return fmt.Errorf("race: world %d: %w", ordinal, err)
 	}
@@ -680,6 +809,25 @@ func (r *raceRun) generate(ctx context.Context, i int) error {
 // per-world; the alternative was smuggling per-world state through the
 // Oracle interface or a type assertion, and this is two lines with no I/O
 // cost.
+// loadPatch fetches a world's captured patch from CAS. An empty key means
+// the capture produced nothing — a candidate that changed nothing — and
+// that is []byte{}, not nil: the mutation rung refuses a NIL patch because
+// "nobody supplied the diff" must never degrade into "the diff was empty",
+// which passes the survivor gate vacuously.
+func loadPatch(store *cas.Store, key string) ([]byte, error) {
+	if key == "" {
+		return []byte{}, nil
+	}
+	b, err := store.Get(key)
+	if err != nil {
+		return nil, fmt.Errorf("load captured patch %s: %w", key, err)
+	}
+	if b == nil {
+		b = []byte{}
+	}
+	return b, nil
+}
+
 func (r *raceRun) buildLadder(s *slot) ([]ladderRung, error) {
 	pol, cfg := r.pol, r.cfg
 	if pol.Dialect == policy.DialectV0 {
@@ -717,6 +865,34 @@ func (r *raceRun) buildLadder(s *slot) ([]ladderRung, error) {
 		if p.InWorldPlugin == "" {
 			p.InWorldPlugin = r.ev.pluginDir
 		}
+		if spec.Kind == policy.KindMutationDiff {
+			// O3's target set is derived from the AG-4 captured patch, and
+			// the bytes come back out of CAS under the digest the world
+			// object records — never re-read from the candidate's tree,
+			// where a patch file would be the candidate's to write.
+			patch, err := loadPatch(cfg.CAS, s.world.Patch)
+			if err != nil {
+				return nil, fmt.Errorf("race: oracle %q: %w", name, err)
+			}
+			p.Patch = patch
+		}
+		if spec.Kind == policy.KindCorpusObserve && r.corpus != nil {
+			p.Corpus, p.CorpusDigest = r.corpus.corpus, r.corpus.digest
+			// THIS WORLD's own copy, never the race's shared one: on T1 the
+			// per-world read-only mount, on T0 the per-world host path.
+			p.CorpusPath = s.corpusFile
+			if tier == object.TierT1Container {
+				p.CorpusPath = backend.InWorldCorpus + "/" + oracle.CorpusFile
+			}
+			p.CorpusRunner = r.corpus.runner
+			p.CorpusRunnerDigest = r.corpus.runnerDigest
+			// The corpus's targets must resolve to the CANDIDATE's code,
+			// so the world's own worktree root heads PYTHONPATH.
+			p.WorldRoot = s.dir
+			if tier == object.TierT1Container {
+				p.WorldRoot = backend.InWorldRoot
+			}
+		}
 		o, err := oracle.New(p)
 		if err != nil {
 			return nil, fmt.Errorf("race: %w", err)
@@ -740,7 +916,34 @@ func (r *raceRun) verify(ctx context.Context, i int) error {
 		return err
 	}
 	for _, rung := range rungs {
-		rec, err := rung.oracle.Run(ctx, s.wh)
+		var rec object.Receipt
+		var err error
+		if ob, ok := rung.oracle.(oracle.Observer); ok {
+			// The corpus rung yields its parsed observation as well as its
+			// receipt. Phase B2 needs the per-case FINGERPRINTS behind the
+			// counts, and re-deriving them from the stored stream would
+			// mean re-reading evidence after the fact — the one thing M1f
+			// removed.
+			// The delivered corpus is re-digested on the host either side of
+			// the replay. A mismatch aborts the RACE as machinery and never
+			// fails a world: the bytes are the control plane's, the digest
+			// is pinned in the ledger, and a world handed an altered file is
+			// a victim rather than a suspect.
+			if err := r.checkCorpusFile(s, "before"); err != nil {
+				return err
+			}
+			var obs oracle.Observation
+			rec, obs, err = ob.Observe(ctx, s.wh)
+			if err == nil {
+				s.obs, s.obsOK = obs, true
+				s.obsPass = rec.Result.Status == oracle.StatusPass
+			}
+			if cerr := r.checkCorpusFile(s, "after"); cerr != nil {
+				return cerr
+			}
+		} else {
+			rec, err = rung.oracle.Run(ctx, s.wh)
+		}
 		if err != nil {
 			return fmt.Errorf("race: oracle %s in %s: %w", rung.name, s.dir, err)
 		}

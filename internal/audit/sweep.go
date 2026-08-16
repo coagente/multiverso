@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/ledger"
@@ -74,7 +75,10 @@ func (r Report) OK() bool { return len(r.Missing) == 0 && len(r.Corrupt) == 0 }
 //
 //	every OBJECT event      the canonical bytes recorded under payload_dig
 //	world.created           context, patch, trace, env
-//	receipt.recorded        result.artifacts[*], execution.evidence_plugin
+//	receipt.recorded        result.artifacts[*], execution.evidence_plugin,
+//	                        inputs[*] where the value is a digest
+//	corpus.recorded         corpus, base_observation, observer, stdout, stderr
+//	oracle.skipped          — (observational, no payload digests)
 //	decision.recorded       evidence[*], policy, subject[*], intent
 //	intent.created          policy
 //	baseline.recorded       stdout, stderr, probe, evidence_stream
@@ -88,6 +92,22 @@ func (r Report) OK() bool { return len(r.Missing) == 0 && len(r.Corrupt) == 0 }
 // observational too, but it NAMES CAS blobs — and `stderr` is the only
 // place a CONFIG_ERROR world's reason survives, so a sweep that skipped it
 // would let the one record an operator needs be deleted under an `OK`.
+// inputKeys is the closed Receipt.Inputs vocabulary, in sweep order. Only
+// the digest-valued ones can name an object; the rest are labels.
+var inputKeys = []string{
+	object.InputCorpus, object.InputCohort, object.InputBaseTree,
+	object.InputBaseObservation, object.InputDiffTarget,
+	object.InputMutantSelection, object.InputEvidenceFloor,
+}
+
+// isDigest reports whether a provenance value names a CAS object rather
+// than a label. Git tree digests are deliberately excluded: a git object
+// lives in the repository, not in CAS, and sweeping for it there would
+// report every honest workspace as corrupt.
+func isDigest(v string) bool {
+	return strings.HasPrefix(v, object.DigestPrefix) || strings.HasPrefix(v, "sha256:")
+}
+
 var objectEvents = map[string]bool{
 	"intent.created":    true,
 	"world.created":     true,
@@ -160,6 +180,19 @@ func References(led *ledger.Ledger) ([]Ref, error) {
 			// bytes that observed the run, and the sweep is what holds
 			// them to it.
 			add(r.Execution.EvidencePlugin, at+" (execution.evidence_plugin)")
+			// M2a decision 24: inputs is PROVENANCE, and provenance whose
+			// referent has been deleted is a citation to a missing page.
+			// Only DIGEST-valued keys are swept — `evidence_floor` names a
+			// regime, not an object, and add() ignores anything that is
+			// not a key anyway, so the filter is about what the sweep
+			// CLAIMS rather than about what it can survive.
+			for _, key := range inputKeys {
+				v := r.Inputs[key]
+				if !isDigest(v) {
+					continue
+				}
+				add(v, at+" (inputs["+key+"])")
+			}
 		case "decision.recorded":
 			var d object.Decision
 			if err := json.Unmarshal(e.Payload, &d); err != nil {
@@ -179,6 +212,15 @@ func References(led *ledger.Ledger) ([]Ref, error) {
 				return fmt.Errorf("audit: %s: %w", at, err)
 			}
 			add(in.Policy, at+" (policy)")
+		case "corpus.recorded":
+			// The corpus IS the comparison: a differential decision whose
+			// inputs cannot be re-read is a decision nobody can replay.
+			// The base observation is the anchor every "vs base" count was
+			// measured against, and the observer is the runner that
+			// produced them all.
+			for _, field := range []string{"corpus", "base_observation", "observer", "stdout", "stderr"} {
+				add(stringField(e.Payload, field), at+" ("+field+")")
+			}
 		case "baseline.recorded":
 			// evidence_stream joins the three M1e artifacts: the baseline
 			// collect run streams like any other, and collected_base is

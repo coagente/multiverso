@@ -327,7 +327,7 @@ func TestValidateRejections(t *testing.T) {
 			name:  "unknown oracle kind",
 			pol:   with(func(p *object.PolicyV1) { p.Oracles[1].Kind = "cargo-nextest" }),
 			field: "oracles[1].kind",
-			want:  `unknown oracle kind "cargo-nextest" (known: command, pytest-collect, pytest-suite, tree-guard)`,
+			want:  `unknown oracle kind "cargo-nextest" (known: command, corpus-differential, corpus-observe, hypothesis-properties, mutation-diff, pytest-collect, pytest-suite, tree-guard)`,
 		},
 		{
 			name:  "command kind without argv",
@@ -367,7 +367,7 @@ func TestValidateRejections(t *testing.T) {
 			name:  "unknown gate",
 			pol:   with(func(p *object.PolicyV1) { p.HardGates[0].Gate = "suite-passes" }),
 			field: "hard_gates[0].gate",
-			want:  `unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, coverage-at-least, no-failed-tests, paths-unmodified, skips-not-above, status-pass)`,
+			want:  `unknown gate "suite-passes" (known: collect-nonempty, collected-not-below, corpus-complete, coverage-at-least, differential-cohort-at-least, mutation-survivors-not-above, no-failed-tests, paths-unmodified, properties-pass, property-cases-at-least, skips-not-above, status-pass)`,
 		},
 		{
 			name:  "gate names an undeclared oracle",
@@ -622,13 +622,16 @@ func TestUnrequiredOracleIsNotRequired(t *testing.T) {
 
 func TestVocabularyIsClosed(t *testing.T) {
 	if got := KnownGates(); !reflect.DeepEqual(got, []string{
-		GateCollectNonempty, GateCollectedNotBelow, GateCoverageAtLeast, GateNoFailedTests,
-		GatePathsUnmodified, GateSkipsNotAbove, GateStatusPass,
+		GateCollectNonempty, GateCollectedNotBelow, GateCorpusComplete, GateCoverageAtLeast,
+		GateDifferentialCohortAtLeast, GateMutationSurvivorsNotAbove, GateNoFailedTests,
+		GatePathsUnmodified, GatePropertiesPass, GatePropertyCasesAtLeast,
+		GateSkipsNotAbove, GateStatusPass,
 	}) {
 		t.Errorf("known gates = %v", got)
 	}
 	if got := KnownKinds(); !reflect.DeepEqual(got, []string{
-		KindCommand, KindPytestCollect, KindPytestSuite, KindTreeGuard,
+		KindCommand, KindCorpusDifferential, KindCorpusObserve, KindProperties,
+		KindMutationDiff, KindPytestCollect, KindPytestSuite, KindTreeGuard,
 	}) {
 		t.Errorf("known kinds = %v", got)
 	}

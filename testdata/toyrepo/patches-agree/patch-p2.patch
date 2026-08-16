@@ -1,0 +1,21 @@
+diff --git a/stats.py b/stats.py
+index f206bcb..b1cc11a 100644
+--- a/stats.py
++++ b/stats.py
+@@ -5,14 +5,14 @@ def mean(values):
+     """Return the arithmetic mean of a non-empty sequence."""
+     if not values:
+         raise ValueError("mean() of empty sequence")
+-    return sum(values) / (len(values) - 1)
++    return sum(values) / len(values)
+ 
+ 
+ def clamp(value, low, high):
+     """Return value limited to the inclusive range [low, high]."""
+     if low > high:
+         raise ValueError("clamp() with low > high")
+-    return min(max(value, low), high)
++    return min(max(value, low), high)  # clamp: value first, then the bounds
+ 
+ 
+ def total(values):

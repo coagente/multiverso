@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/coagente/multiverso/internal/backend"
+	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/gitx"
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
@@ -55,7 +57,10 @@ func (r *raceRun) openBaseWorld(ctx context.Context) (*baseWorld, error) {
 		bw.close(r)
 		return nil, fmt.Errorf("race: base world: %w", err)
 	}
-	wh, err := r.cfg.Backend.Open(ctx, dir, r.openOptsFor(bw.evRoot, bw.scratchRoot))
+	// The base world is the ONLY world that reads phase 0's own copy: it is
+	// where the corpus is materialized, it is control-plane owned from end
+	// to end, and it is torn down before phase A opens anything.
+	wh, err := r.cfg.Backend.Open(ctx, dir, r.openOptsFor(bw.evRoot, bw.scratchRoot, r.corpusDir))
 	if err != nil {
 		bw.close(r)
 		return nil, fmt.Errorf("race: base world: %w", err)
@@ -90,6 +95,13 @@ func needsBaseWorld(pol policy.Policy) bool {
 	if _, ok := pol.CollectOracle(); ok {
 		return true
 	}
+	// M2a phase 0: the corpus is materialized ON THE BASE TREE and
+	// observed there, so a corpus-consuming policy needs the same fixture
+	// for the same reason — inputs fixed before any candidate exists, from
+	// code the candidate did not write.
+	if _, ok := needsCorpus(pol); ok {
+		return true
+	}
 	return len(pytestOracles(pol)) > 0
 }
 
@@ -102,7 +114,14 @@ func pytestOracles(pol policy.Policy) []policy.Oracle {
 		if !ok {
 			continue
 		}
-		if o.Kind == policy.KindPytestCollect || o.Kind == policy.KindPytestSuite {
+		switch o.Kind {
+		case policy.KindPytestCollect, policy.KindPytestSuite,
+			// M2a: both new per-world rungs run pytest inside the world —
+			// O2p is a pytest run over the repository's @given tests, and
+			// O3 judges every mutant by a pytest run. A policy that
+			// declares either in an environment without pytest is refused
+			// at pre-flight, exactly like its M1e siblings.
+			policy.KindProperties, policy.KindMutationDiff:
 			out = append(out, o)
 		}
 	}
@@ -140,15 +159,29 @@ func preflight(ctx context.Context, pol policy.Policy, w backend.World, envDesc 
 			tools, _ = oracle.Probe(ctx, w, py)
 			probed[py] = tools
 		}
-		if tools[oracle.ToolPytest] != "" {
-			continue
+		if tools[oracle.ToolPytest] == "" {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("race: oracle %q (%s) pre-flight probe did not complete: %s (intent budget_wall_ms=%d) — raise --budget-wall-ms on a new intent, or drop the budget; this says nothing about whether pytest is installed",
+					o.Name, o.Kind, probeStopReason(ctxErr), budgetMS)
+			}
+			return fmt.Errorf("race: policy requires oracle %q (%s) but pytest is not importable in this environment (%s); Multiverso's oracle ladder is Python-first (PRD §10) — author a command-kind policy for other languages",
+				o.Name, o.Kind, envDesc)
 		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("race: oracle %q (%s) pre-flight probe did not complete: %s (intent budget_wall_ms=%d) — raise --budget-wall-ms on a new intent, or drop the budget; this says nothing about whether pytest is installed",
-				o.Name, o.Kind, probeStopReason(ctxErr), budgetMS)
+		// M2a decision 20: the same rule, one rung further out. A kind
+		// whose OWN toolchain is missing aborts here rather than producing
+		// a world full of receipts with absent metrics — the ledger stays
+		// empty of race events, because a missing toolchain is machinery
+		// and never a failing candidate. On the machine M2a was written on
+		// none of hypothesis, mutmut or cosmic-ray is installed, so this
+		// is the live path rather than a contingency.
+		if missing := oracle.MissingTools(o, tools); len(missing) > 0 {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("race: oracle %q (%s) pre-flight probe did not complete: %s (intent budget_wall_ms=%d) — raise --budget-wall-ms on a new intent, or drop the budget; this says nothing about whether %s is installed",
+					o.Name, o.Kind, probeStopReason(ctxErr), budgetMS, strings.Join(missing, " or "))
+			}
+			return fmt.Errorf("race: policy requires oracle %q (%s) but %s is not importable in this environment (%s); a missing oracle toolchain is machinery, never a failing candidate — install it, or drop the rung from the policy",
+				o.Name, o.Kind, strings.Join(missing, " or "), envDesc)
 		}
-		return fmt.Errorf("race: policy requires oracle %q (%s) but pytest is not importable in this environment (%s); Multiverso's oracle ladder is Python-first (PRD §10) — author a command-kind policy for other languages",
-			o.Name, o.Kind, envDesc)
 	}
 	return nil
 }
@@ -212,6 +245,14 @@ func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *ba
 		return 0, fmt.Errorf("race: baseline: %w", err)
 	}
 	total, known := rec.Result.Metrics[policy.MetricCollectedTotal]
+	// The collected node-id list is the repo-suite corpus provider's whole
+	// input, and this run already produced it. Reading it here is what
+	// makes that provider cost ZERO extra process — and the bytes are the
+	// BASE tree's stdout, produced before any candidate existed, which is
+	// the only reason stdout is admissible as a source at all here.
+	if o, need := needsCorpus(pol); need && o.Corpus.Provider == policy.ProviderRepoSuite {
+		r.baseNodeIDs = collectedNodeIDs(rec.Result.Artifacts, r.cfg.CAS)
+	}
 	artifact := func(i int) string {
 		if i < len(rec.Result.Artifacts) {
 			return rec.Result.Artifacts[i]
@@ -257,6 +298,28 @@ func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *ba
 			spec.Name, r.intent.Base.Tree, rec.Result.Status, rec.Execution.ExitCode, countText(total, known))
 	}
 	return total, nil
+}
+
+// collectedNodeIDs reads the base collect run's stdout artifact out of CAS
+// and returns the test node ids it listed. An unreadable artifact yields no
+// ids, which yields a corpus of zero cases, which aborts the race with the
+// reason named — never a corpus quietly smaller than the operator expects.
+func collectedNodeIDs(artifacts []string, store *cas.Store) []string {
+	if len(artifacts) == 0 || store == nil {
+		return nil
+	}
+	b, err := store.Get(artifacts[0])
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, raw := range strings.Split(string(b), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.Contains(line, "::") {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 func countText(total int64, known bool) string {

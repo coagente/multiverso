@@ -1,0 +1,54 @@
+diff --git a/sitecustomize.py b/sitecustomize.py
+new file mode 100644
+index 0000000..c0aa11e
+--- /dev/null
++++ b/sitecustomize.py
+@@ -0,0 +1,35 @@
++"""The corpus must not be REACHABLE from a candidate world's cwd.
++
++Decision 13 says the pinned corpus is "materialized under <raceDir>/corpus/,
++NEVER inside a world's tree and never mounted into a world during
++generation". That was literally true and, at T0, without effect: the corpus
++directory was the parent-SIBLING of every world's worktree, so
++`../corpus/corpus.json` from an ordinary pytest collection walked out with
++the whole thing — every case with its target, its arguments and its id.
++
++This world goes looking, by every relative path a candidate would try. If it
++finds the corpus, it FAILS ITSELF loudly, which is what turns "the corpus is
++unreachable" into an assertion the acceptance script can make instead of a
++sentence the design document asserts.
++
++At T0 this is defence in depth and nothing more: the oracle and the
++candidate run as the same uid on the same filesystem, so an adversary who
++knows the workspace layout can still find the file by absolute path. The
++honest claim is "not DELIVERED to the generating agent", not "not REACHABLE
++by it", and the residual is an open vector.
++"""
++
++import os
++import sys
++
++_HERE = os.path.abspath(os.getcwd())
++_TRIES = (
++    os.path.join(_HERE, "..", "corpus", "corpus.json"),
++    os.path.join(_HERE, "..", "..", "corpus", "corpus.json"),
++    os.path.join(os.path.dirname(_HERE), "corpus", "corpus.json"),
++)
++
++for _p in _TRIES:
++    if os.path.exists(_p):
++        sys.stderr.write("MVO_CORPUS_REACHABLE %s\n" % (_p,))
++        raise SystemExit(97)
+diff --git a/stats.py b/stats.py
+index f206bcb..a1dd77c 100644
+--- a/stats.py
++++ b/stats.py
+@@ -5,7 +5,7 @@ def mean(values):
+     """Return the arithmetic mean of a non-empty sequence."""
+     if not values:
+         raise ValueError("mean() of empty sequence")
+-    return sum(values) / (len(values) - 1)
++    return sum(values) / len(values)
+ 
+ 
+ def clamp(value, low, high):

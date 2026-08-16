@@ -180,7 +180,19 @@ func inWorldPath(tier, mount, kind string) string {
 
 // openOptsFor builds the mounts one world needs. T0 ignores them by
 // construction (M1c identity mapping, preserved byte-for-byte).
-func (r *raceRun) openOptsFor(evDir, scratchDir string) backend.OpenOpts {
+//
+// corpusDir is the caller's, never the race's shared one, and that is the
+// whole of the fix for a red-team finding: this function used to hand
+// `r.corpusDir` to EVERY world unconditionally, the keeper is opened before
+// `Adapter.Start` runs the agent inside it (M1c decision 4: one long-lived
+// keeper per world), and phase 0 has already written the corpus by then. A
+// `docker inspect` of the candidate keepers during a T1 race showed
+// `<raceDir>/corpus -> /mvo/corpus ro=true` on every one of them, for the
+// whole of phase A — which is exactly what decision 13, backend.OpenOpts's
+// own comment and M2a's verdict on corpus vector 19 all say does not
+// happen. The mount is now per world and its directory is EMPTY until phase
+// A has joined.
+func (r *raceRun) openOptsFor(evDir, scratchDir, corpusDir string) backend.OpenOpts {
 	if r.ev.regime == object.RegimeInTree {
 		return backend.OpenOpts{}
 	}
@@ -188,5 +200,9 @@ func (r *raceRun) openOptsFor(evDir, scratchDir string) backend.OpenOpts {
 		EvidenceDir: evDir,
 		ScratchDir:  scratchDir,
 		PluginDir:   r.ev.pluginDir,
+		// Read-only, outside the worktree, and empty when no policy asks
+		// for a corpus — a race that declares none mounts nothing, so
+		// every pre-M2a keeper argv is unchanged.
+		CorpusDir: corpusDir,
 	}
 }

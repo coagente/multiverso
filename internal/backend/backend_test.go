@@ -334,3 +334,45 @@ func TestT1BackendExposesImageDigest(t *testing.T) {
 		t.Error("T0 backend exposes ImageDigest(); want none")
 	}
 }
+
+// The corpus mount is per world, read-only, and OUTSIDE the worktree — and
+// under the phase-A options it carries an EMPTY directory.
+//
+// The mount table alone cannot say "empty": that is the orchestrator's job
+// and internal/race asserts it. What this pins is the half a red team read
+// off `docker inspect`: the bind exists from the moment the keeper opens,
+// so the only thing that can keep the generating agent from the oracle's
+// inputs is the directory being empty until phase A has joined.
+func TestT1CorpusMountIsReadOnlyAndOutsideTheWorktree(t *testing.T) {
+	const world = "/tmp/worlds/race-1/001"
+	mounts := t1Mounts(world, OpenOpts{
+		EvidenceDir: "/tmp/ev", ScratchDir: "/tmp/scratch",
+		PluginDir: "/tmp/plugin", CorpusDir: "/tmp/corpora/race-1/w001",
+	})
+	var corpus *dockerx.Mount
+	for i := range mounts {
+		if mounts[i].Path == InWorldCorpus {
+			corpus = &mounts[i]
+		}
+	}
+	if corpus == nil {
+		t.Fatalf("no corpus mount in %+v", mounts)
+	}
+	if !corpus.ReadOnly {
+		t.Error("the corpus is mounted read-write: a world could rewrite the inputs it is compared on")
+	}
+	if strings.HasPrefix(corpus.HostPath, world) {
+		t.Errorf("the corpus host path %s is inside the worktree", corpus.HostPath)
+	}
+	if corpus.HostPath != "/tmp/corpora/race-1/w001" {
+		t.Errorf("host path = %s, want this world's OWN corpus directory: one shared, mutable file is a cross-world channel",
+			corpus.HostPath)
+	}
+	// A race that declares no corpus mounts no corpus directory, so every
+	// pre-M2a keeper argv is unchanged.
+	for _, m := range t1Mounts(world, OpenOpts{EvidenceDir: "/tmp/ev"}) {
+		if m.Path == InWorldCorpus {
+			t.Error("a race with no corpus mounted a corpus directory")
+		}
+	}
+}

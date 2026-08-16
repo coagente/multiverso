@@ -86,6 +86,31 @@ func Validate(p object.PolicyV1) error {
 				}
 			}
 		}
+		// Rule 17: a corpus-differential runs NO process and reads no
+		// configuration of its own — it is a pure function of the corpus,
+		// the base observation and the cohort's observations. The
+		// tree-guard rule (M1f 15), reused for the same reason: a policy
+		// that sets one of these reads as if it demanded something it does
+		// not.
+		if o.Kind == KindCorpusDifferential {
+			for _, bad := range []struct {
+				field string
+				set   bool
+			}{
+				{"argv", len(o.Argv) > 0},
+				{"args", len(o.Args) > 0},
+				{"coverage", o.Coverage},
+				{"reruns", o.Reruns != 0},
+				{"timeout_ms", o.TimeoutMS != 0},
+				{"corpus", o.Corpus != (object.CorpusSpec{})},
+			} {
+				if bad.set {
+					add(at+"."+bad.field, "kind %q runs no process: %s must be unset", KindCorpusDifferential, bad.field)
+				}
+			}
+		}
+		validateCorpus(at, o, p.Paths, add)
+		validateMutation(at, o, add)
 		if !knownKind || o.Name == "" {
 			continue
 		}
@@ -126,18 +151,57 @@ func Validate(p object.PolicyV1) error {
 		if ok && !def.threshold && g.Threshold != 0 {
 			add(at+".threshold", "gate %q takes no threshold parameter (got %d)", g.Gate, g.Threshold)
 		}
+		validateEnum(at+".scope", g.Scope, KnownScopes(), add)
+		// A cohort gate whose threshold is below 2 accepts a comparison
+		// that never happened: with one member the receipt carries
+		// diff_cohort_n and nothing else, so "at least 1" is a gate that
+		// passes on the absence of the very thing it names.
+		if g.Gate == GateDifferentialCohortAtLeast && g.Threshold < 2 {
+			add(at+".threshold", "%s: threshold %d is below 2 (a cohort of one is not a comparison)",
+				GateDifferentialCohortAtLeast, g.Threshold)
+		}
 		if !declared[g.Oracle] {
 			add(at+".oracle", "gate names oracle %q, which the policy does not declare", g.Oracle)
 			continue
 		}
 		// Rule 12: a paths-unmodified gate with nothing to guard is a gate
 		// that can only ever pass, which is worse than no gate at all.
-		if g.Gate == GatePathsUnmodified && len(p.Paths.Protected)+len(p.Paths.Harness) == 0 {
+		//
+		// A policy-declared corpus file or property module COUNTS: it
+		// compiles into paths.harness (decision 14), so a policy whose only
+		// frozen path is its corpus has something real to guard and the gate
+		// is exactly what rule 24 demands of it.
+		if g.Gate == GatePathsUnmodified &&
+			len(p.Paths.Protected)+len(p.Paths.Harness)+len(corpusFrozenPaths(p.Oracles)) == 0 {
 			add(at, "%s requires policy.paths to declare at least one pattern", GatePathsUnmodified)
 		}
 		spec, usable := byName[g.Oracle]
 		if !ok || !usable {
 			continue // the gate or the oracle's kind is already reported
+		}
+		// Rule 19: every gate over a COHORT-stage kind declares
+		// scope: "race". Admission has one subject, so such a gate could
+		// only ever fail there — an admission that can never succeed, which
+		// is the sealed.json failure M1f's red team found, rebuilt.
+		if KindStage(spec.Kind) == StageCohort && g.Scope != ScopeRace {
+			add(at, "%s@%s is a cohort-stage gate and must declare scope %q (admission has one subject, so a cohort of one is not a comparison)",
+				g.Gate, g.Oracle, ScopeRace)
+		}
+		// Rule 23 (integration): the same rule for a kind whose INPUTS only
+		// exist inside a race. `corpus-observe` replays a corpus that phase
+		// 0 materialized on the base tree before any world was created;
+		// admission has no phase 0, so the oracle has no corpus to replay
+		// and the gate is not "failed", it is unevaluatable — `mvo admit`
+		// aborts as machinery and the policy can never land anything.
+		//
+		// This is decision 21's argument one rung earlier than decision 21
+		// reached. It costs no prior policy anything (no policy predating
+		// M2a can declare a corpus), and it is a load error rather than a
+		// silent race-scope default because a landing gate set weaker than
+		// the race's is a legitimate choice that must be VISIBLE.
+		if RaceStagedInputs(spec.Kind) && g.Scope != ScopeRace {
+			add(at, "%s@%s reads a corpus materialized by the race's phase 0 and must declare scope %q (admission has no phase 0, so the corpus it replays does not exist there)",
+				g.Gate, g.Oracle, ScopeRace)
 		}
 		for _, m := range def.metrics {
 			// Instance-level, not kind-level: an oracle that CAN emit a
@@ -187,6 +251,63 @@ func Validate(p object.PolicyV1) error {
 		}
 	}
 
+	// --- M2a: the corpus plane ------------------------------------------
+	// Rule 18: a corpus-differential is a function of exactly one
+	// observer's output, so the policy must declare exactly one. Two
+	// observers would make "the cohort" ambiguous; zero would make the
+	// reducer a function of nothing.
+	observers, differentials := 0, 0
+	for _, o := range p.Oracles {
+		switch o.Kind {
+		case KindCorpusObserve:
+			observers++
+		case KindCorpusDifferential:
+			differentials++
+		}
+	}
+	if differentials > 0 && observers != 1 {
+		add("oracles", "a %q oracle requires exactly one declared %q oracle (got %d)",
+			KindCorpusDifferential, KindCorpusObserve, observers)
+	}
+	// Rule 21: an escalation rule that can never fire is an authoring bug.
+	// M1e decision 7's "unknown = load error" generalizes to "unreachable
+	// = load error": a policy that turns on_behavioral_split on without a
+	// reducer has asked for a sentence nothing can produce.
+	if n := p.Escalation.OnBehavioralSplit; n < 0 {
+		add("escalation.on_behavioral_split", "on_behavioral_split %d is negative", n)
+	} else if n > 0 && differentials == 0 {
+		add("escalation.on_behavioral_split",
+			"on_behavioral_split %d requires a declared %q oracle: a rule that can never fire is an authoring bug",
+			n, KindCorpusDifferential)
+	}
+
+	// Rule 16, property clause: a gate over a hypothesis-properties oracle
+	// needs a harness-frozen property module to read (decision 14).
+	validateProperties(p, byName, add)
+
+	// Rule 24 — THE CONVERSE OF RULE 12, and the rule decision 14 assumed
+	// without stating. Rule 12 refuses a paths-unmodified gate with nothing
+	// to guard; nothing refused paths to guard with no gate.
+	//
+	// Decision 14's whole defence for the property module is that
+	// `corpus.module` compiles into `paths.harness`, "closed by the gate that
+	// already closes conftest.py, at rung O-1". That gate is not implied by
+	// anything: the shipped `differential.json` fixture declared a corpus
+	// file, no tree-guard oracle and no paths-unmodified gate, and
+	// `mvo policy validate` printed `paths (frozen against the candidate)`
+	// over a freeze the policy could not keep. A candidate under it rewrote
+	// the corpus and passed every hard gate. For a property module the hole
+	// is total rather than small: a vacuous `@given` module passes
+	// `properties-pass` while asserting nothing.
+	//
+	// It costs no prior policy anything — no policy predating M2a can
+	// declare a corpus — which is the same M1f decision-3 argument decision
+	// 14 already relies on.
+	if frozen := corpusFrozenPaths(p.Oracles); len(frozen) > 0 && !declaresPathsGate(p.HardGates) {
+		add("hard_gates", "%s compiles into paths.harness but no %s gate evaluates it; a freeze nothing checks is not a freeze — declare a %s oracle and a %s hard gate over it",
+			strings.Join(frozen, ", "), GatePathsUnmodified, KindTreeGuard, GatePathsUnmodified)
+	}
+
 	// --- M1f: paths, invariants, evidence -------------------------------
 	validatePaths(p.Paths, add)
 	validateInvariants(p, byName, declared, add)
@@ -195,6 +316,37 @@ func Validate(p object.PolicyV1) error {
 	validateEnum("evidence.plugin_autoload", p.Evidence.PluginAutoload, KnownPluginAutoload(), add)
 	validateEnum("paths.protected_additions", p.Paths.ProtectedAdditions, KnownAdditions(), add)
 	return errors.Join(probs...)
+}
+
+// corpusFrozenPaths lists the repo-relative paths a policy's corpus
+// declarations compile into paths.harness, sorted and deduplicated. It is
+// the one place both rule 12 and rule 24 ask "does this policy freeze a
+// corpus file or a property module", so the two rules cannot drift apart.
+func corpusFrozenPaths(oracles []object.OracleSpec) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, spec := range oracles {
+		c := ResolvedCorpus(spec)
+		for _, p := range []string{c.File, c.Module} {
+			if p != "" && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// declaresPathsGate reports whether any hard gate is a paths-unmodified
+// gate — the only predicate that reads the compiled path set.
+func declaresPathsGate(gates []object.GateSpec) bool {
+	for _, g := range gates {
+		if g.Gate == GatePathsUnmodified {
+			return true
+		}
+	}
+	return false
 }
 
 type addProblem func(field, format string, a ...any)
@@ -212,6 +364,100 @@ func validateEnum(field, value string, allowed []string, add addProblem) {
 		}
 	}
 	add(field, "unknown value %q (known: %s)", value, known(allowed))
+}
+
+// reHex32 matches a hypothesis seed: 32 lowercase hex digits.
+var reHex32 = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// validateCorpus applies rules 16 and 22.
+//
+// Rule 22 is the one with teeth: corpus.file and corpus.module JOIN the
+// compiled harness path set, so a candidate that edits the corpus or the
+// property module dies at rung O-1 before any Python runs. A pattern in
+// paths.protected that would swallow them is refused here, because
+// protected paths allow ADDITIONS by default and "the candidate may add the
+// corpus file the oracle reads" is not a hole we ship.
+func validateCorpus(at string, o object.OracleSpec, paths object.PathSpec, add addProblem) {
+	c := o.Corpus
+	if c == (object.CorpusSpec{}) {
+		return
+	}
+	switch o.Kind {
+	case KindCorpusObserve, KindCorpusDifferential:
+	case KindProperties:
+		// O2p reads the same block for a different half of it: where the
+		// PROPERTIES come from (decision 14). The provider must be
+		// `hypothesis` — a property rung replaying a declared JSON corpus
+		// or the repo's own node ids would be a rung that runs no
+		// properties — and cases_max is its search budget.
+		if c.Provider != ProviderHypothesis && c.Provider != ProviderNone {
+			add(at+".corpus.provider", "kind %q takes provider %q, not %q",
+				KindProperties, ProviderHypothesis, c.Provider)
+			return
+		}
+	default:
+		add(at+".corpus", "kind %q consumes no corpus", o.Kind)
+		return
+	}
+	validateEnum(at+".corpus.provider", c.Provider, KnownProviders(), add)
+	if c.CasesMax < 0 {
+		add(at+".corpus.cases_max", "cases_max %d is negative", c.CasesMax)
+	}
+	if c.Seed != "" && !reHex32.MatchString(c.Seed) {
+		add(at+".corpus.seed", "seed %q is not 32 lowercase hex digits", c.Seed)
+	}
+	switch c.Provider {
+	case ProviderDeclared:
+		if c.File == "" {
+			add(at+".corpus.file", "provider %q requires a corpus file", ProviderDeclared)
+		}
+		if c.Module != "" {
+			add(at+".corpus.module", "provider %q declares no property module", ProviderDeclared)
+		}
+	case ProviderHypothesis:
+		// Unverifiable at load — we cannot know whether the repo has
+		// @given tests without reading it — so the module is required
+		// whenever the provider is hypothesis, which is the only form the
+		// validator can actually check.
+		if c.Module == "" {
+			add(at+".corpus.module", "provider %q requires a property module", ProviderHypothesis)
+		}
+		if c.File != "" {
+			add(at+".corpus.file", "provider %q reads no corpus file", ProviderHypothesis)
+		}
+	case ProviderRepoSuite:
+		if c.File != "" || c.Module != "" {
+			add(at+".corpus", "provider %q takes neither a file nor a module", ProviderRepoSuite)
+		}
+	case ProviderNone:
+		if c.File != "" || c.Module != "" || c.Seed != "" {
+			add(at+".corpus.provider", "corpus settings declared with no provider")
+		}
+	}
+	// Rule 22.
+	for _, f := range []struct {
+		field, value string
+	}{{"file", c.File}, {"module", c.Module}} {
+		if f.value == "" {
+			continue
+		}
+		pat, err := ParsePattern(f.value)
+		if err != nil {
+			add(at+".corpus."+f.field, "%v", err)
+			continue
+		}
+		_ = pat
+		for i, raw := range paths.Protected {
+			p, err := ParsePattern(raw)
+			if err != nil || !p.Match(f.value) {
+				continue
+			}
+			add(at+".corpus."+f.field,
+				"%q is matched by paths.protected[%d] (%q), which allows additions: it must be harness-frozen, not protected",
+				f.value, i, raw)
+			break
+		}
+	}
 }
 
 // validatePaths applies rule 13: every pattern parses under the decision-7
@@ -381,18 +627,65 @@ func resolveMetric(specs []object.OracleSpec, key, metric string) (object.Oracle
 // timeout_ms stays as declared (0 = "the intent's max_wall_ms"): resolving
 // it against an intent would make the identity intent-dependent.
 func ConfigDigest(spec object.OracleSpec) (string, error) {
-	dig, _, err := object.Digest(map[string]any{
+	cfg := map[string]any{
 		"args":       nonNil(spec.Args),
 		"argv":       ResolvedArgv(spec),
 		"coverage":   spec.Coverage,
 		"kind":       spec.Kind,
 		"reruns":     spec.Reruns,
 		"timeout_ms": spec.TimeoutMS,
-	})
+	}
+	// The corpus joins the identity ONLY when one is declared, and the
+	// omission is load-bearing rather than tidy. A config digest is what a
+	// gate's SELECTOR is built from and what a recorded receipt carries in
+	// oracle.config; replay recomputes the selector from the pinned policy
+	// and matches it against receipts recorded months ago. Adding a key
+	// unconditionally would move every pre-M2a instance's digest, and every
+	// historical receipt would stop matching its own gate — a silent replay
+	// break dressed as a schema addition.
+	if c := ResolvedCorpus(spec); c != (object.CorpusSpec{}) {
+		cfg["corpus"] = map[string]any{
+			"cases_max": c.CasesMax,
+			"file":      c.File,
+			"module":    c.Module,
+			"provider":  c.Provider,
+			"seed":      c.Seed,
+		}
+	}
+	// The mutation budget joins the identity on the same terms and for a
+	// second reason of its own: the CEILING is part of what the receipt
+	// means (decision 11). Two instances that differ only in max_mutants
+	// produce differently-partial scores, so they are not the same
+	// instance and their receipts must not be interchangeable evidence.
+	if r := ResolvedMutation(spec); !r.IsZero() {
+		cfg["mutation"] = map[string]any{
+			"max_mutants":           r.MaxMutants,
+			"max_per_line":          r.MaxPerLine,
+			"operators":             nonNil(r.Operators),
+			"timeout_per_mutant_ms": r.TimeoutPerMutant,
+			"tool":                  r.Tool,
+		}
+	}
+	dig, _, err := object.Digest(cfg)
 	if err != nil {
 		return "", fmt.Errorf("policy: digest oracle config: %w", err)
 	}
 	return dig, nil
+}
+
+// ResolvedCorpus applies the corpus spec's defaults: cases_max 0 means the
+// DefaultCasesMax ceiling. Resolving it here — once, where it can be tested
+// — is why a compiled instance's ceiling is a value rather than a sentinel
+// the runner has to reinterpret.
+func ResolvedCorpus(spec object.OracleSpec) object.CorpusSpec {
+	c := spec.Corpus
+	if c.Provider == ProviderNone {
+		return object.CorpusSpec{}
+	}
+	if c.CasesMax == 0 {
+		c.CasesMax = DefaultCasesMax
+	}
+	return c
 }
 
 // ResolvedArgv applies the kind's argv default: pytest kinds default to the
@@ -402,8 +695,19 @@ func ResolvedArgv(spec object.OracleSpec) []string {
 		return append([]string(nil), spec.Argv...)
 	}
 	switch spec.Kind {
-	case KindPytestCollect, KindPytestSuite:
+	case KindPytestCollect, KindPytestSuite, KindProperties:
+		// O2p IS a pytest run — the repository's own @given tests plus the
+		// declared module — so it resolves to the same runner prefix and a
+		// repo pinned to a virtualenv is probed and run by that
+		// interpreter.
 		return DefaultPytestPrefix()
+	case KindCorpusObserve:
+		// The corpus runner is executed BY PATH, not as a module: the
+		// prefix is an interpreter and nothing else, because the whole
+		// point of this rung is that pytest is not in the picture at all
+		// (M2a decision 12). An instance may still override it to name a
+		// virtualenv's python.
+		return []string{DefaultPytestPrefix()[0]}
 	default:
 		return []string{}
 	}
@@ -436,6 +740,8 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 			TimeoutMS: spec.TimeoutMS,
 			Coverage:  spec.Coverage,
 			Reruns:    spec.Reruns,
+			Corpus:    ResolvedCorpus(spec),
+			Mutation:  ResolvedMutation(spec),
 		}
 		byName[o.Name] = o
 		out.Oracles = append(out.Oracles, o)
@@ -450,7 +756,25 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 	// The path grammar compiles once, here, where a pattern error is a load
 	// error and not a silent no-match at 3 a.m. Validate already reported
 	// every unparseable pattern, so a residual error is machinery.
-	paths, err := compilePaths(p.Paths.Protected, p.Paths.Harness, p.Paths.ProtectedAdditions)
+	// A policy-declared corpus file or property module JOINS the harness
+	// set (M2a decision 14): a property module the candidate can edit is a
+	// property module that asserts whatever the candidate wants, and a
+	// corpus the candidate can edit is a corpus the candidate can agree
+	// with itself on. Closed by the gate that already closes conftest.py,
+	// at rung O-1, before any Python runs.
+	//
+	// This is legal under M1f decision 3 because no policy predating M2a
+	// can declare a corpus, so NO PRIOR POLICY'S COMPILED PATH SET MOVES.
+	harness := append([]string(nil), p.Paths.Harness...)
+	for _, spec := range p.Oracles {
+		c := ResolvedCorpus(spec)
+		for _, path := range []string{c.File, c.Module} {
+			if path != "" {
+				harness = append(harness, path)
+			}
+		}
+	}
+	paths, err := compilePaths(p.Paths.Protected, harness, p.Paths.ProtectedAdditions)
 	if err != nil {
 		return Policy{}, Problem{Field: "paths", Detail: err.Error()}
 	}
@@ -482,6 +806,7 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 			Label:           g.Gate + "@" + g.Oracle,
 			Sel:             selFor(g.Oracle),
 			RefuseAdditions: paths.ProtectedAdditions == AdditionsRefuse,
+			Scope:           scopeOf(g.Scope),
 		})
 		required = append(required, g.Oracle)
 	}
@@ -518,6 +843,7 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 		OnRankingTie:               p.Escalation.OnRankingTie,
 		OnAllWorldsFailedMachinery: p.Escalation.OnAllWorldsFailedMachinery,
 		OnInvariantViolation:       p.Escalation.OnInvariantViolation,
+		OnBehavioralSplit:          p.Escalation.OnBehavioralSplit,
 	}
 	reqNames := append([]string{}, p.Escalation.RequireEvidence...)
 	sort.Strings(reqNames)
@@ -743,6 +1069,16 @@ func roleKey(spec object.InvariantSpec) string {
 		out += role + "=" + spec.Oracles[role] + "\x00"
 	}
 	return out
+}
+
+// scopeOf resolves a gate's declared scope sentinel exactly once, here,
+// where it can be tested: "" is ScopeBoth, which is what every M1e/M1f gate
+// meant and what replay must keep meaning.
+func scopeOf(raw string) string {
+	if raw == "" {
+		return ScopeBoth
+	}
+	return raw
 }
 
 func nonNil(s []string) []string {

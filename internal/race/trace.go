@@ -23,6 +23,21 @@ const (
 	// FORGERY under the same heading as "the tests didn't pass", and the
 	// operator would never learn that something lied to them.
 	RuleOnInvariantViolation = "on_invariant_violation"
+	// RuleOnBehavioralSplit is M2a rule 1b. It is the block's product: a
+	// partition of the cohort into >= N behaviour classes on a shared,
+	// control-plane-authored corpus PROVES that the intent as specified,
+	// plus the repository's own tests, do not determine behaviour on the
+	// inputs that separated them. The honest consumer of that is a human,
+	// and the honest artifact is the input and what each candidate
+	// returned on it.
+	//
+	// It is an ESCALATION and not a gate, and not a ranking key, because
+	// every directional reading of a difference is wrong-signed: the
+	// majority is a popularity contest among samples from one model prior;
+	// "agrees with base" ranks the candidate that did nothing above the
+	// one that did the job; and a hard gate on divergence rejects the only
+	// correct candidate when it diverges from five wrong siblings.
+	RuleOnBehavioralSplit = "on_behavioral_split"
 )
 
 // Comparison step results.
@@ -250,6 +265,15 @@ func policySelectors(pol policy.Policy) []policy.Selector {
 	}
 	for _, r := range pol.Esc.RequireEvidence {
 		add(r.Sel)
+	}
+	// M2a: the comparison receipt, which an escalation rule reads without
+	// any gate naming it. The DoS-resistant fixture shape declares no
+	// differential hard gate on purpose (corpus vector 18), so a selector
+	// derived only from gates and keys would leave the reducer's receipts
+	// uncounted and make on_behavioral_split unfireable in exactly the
+	// configuration the block ships.
+	if sel, ok := differentialSelector(pol); ok {
+		add(sel)
 	}
 	return out
 }
@@ -536,8 +560,11 @@ func comparisonText(k policy.Key, winner, other KeyValue) string {
 }
 
 // escalate evaluates the CLOSED escalation rule set in its fixed order —
-// first match wins and supplies the reason (M1e decision 6). Rule 1
-// replaces REJECT; rules 2-4 replace SELECT.
+// first match wins and supplies the reason (M1e decision 6). Rule 0
+// replaces SELECT or REJECT; rule 1 replaces REJECT; rules 1b and 2-4
+// replace SELECT, and every one of them therefore sits BELOW the
+// `PassCount == 0` guard: an escalation that can only replace a SELECT must
+// not fire on a race in which nothing passed.
 func escalate(pol policy.Policy, t *RaceTrace) EscalationResult {
 	esc := pol.Esc
 	// 0. A world's own evidence contradicts itself. This outranks
@@ -590,6 +617,32 @@ func escalate(pol policy.Policy, t *RaceTrace) EscalationResult {
 	}
 	if t.PassCount == 0 {
 		return EscalationResult{}
+	}
+	// 1b. The cohort behaves differently on inputs neither the intent nor
+	//     the repository's tests pin down. It sits BELOW machinery failure
+	//     — if nothing produced evidence, "they disagree" is a false
+	//     statement about a race that never ran — and ABOVE
+	//     require_evidence, because a detected behavioural ambiguity is a
+	//     stronger reason to stop than a missing optional source.
+	//
+	//     It also sits below the `PassCount == 0` guard, and that placement
+	//     is load-bearing rather than incidental: rule 1b REPLACES SELECT
+	//     (M2a's precedence table), and rule 1 is the only REJECT-replacer.
+	//     Evaluated above the guard it converted a REJECT into "the shared
+	//     evidence does not say which behavior is intended" for a race in
+	//     which every world failed a hard gate — where the shared evidence
+	//     says exactly that, and says it about all of them. A red team
+	//     reproduced it under a policy ordering corpus-complete above the
+	//     suite gate.
+	//
+	//     Inserting a rule into a fixed precedence list changes no
+	//     historical evaluation: no pre-M2a policy can declare a
+	//     differential oracle, so no pre-M2a policy can reach this branch
+	//     (M1f decision 11's argument, reused).
+	if esc.OnBehavioralSplit > 0 {
+		if res, fired := behavioralSplit(esc.OnBehavioralSplit, t); fired {
+			return res
+		}
 	}
 	win := &t.Candidates[0]
 	// 2. The winner carries no USABLE evidence from an oracle the policy

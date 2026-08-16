@@ -53,6 +53,86 @@ def stable(metrics):
     return {k: metrics[k] for k in STABLE_METRICS if k in metrics}
 
 
+def behavior_of(report):
+    """The M2a behaviour block, reduced to what a regression suite can pin.
+
+    Cohort size and class count are facts about the comparison; the class
+    IDs are world digests, which move with every patch byte and are exactly
+    what a baseline must not compare.
+    """
+    b = report.get("behavior")
+    if not b:
+        return None
+    return {
+        "cohort_n": b.get("cohort_n"),
+        "classes": len(b.get("classes") or []),
+        "cases_compared": b.get("cases_compared"),
+        "cases_incomparable": b.get("cases_incomparable"),
+        "distinguishing": len(b.get("distinguishing") or []),
+    }
+
+
+# ----------------------------------------------------- aborted (M2a) ----
+# A race that never started. M2a decision 20 makes a missing oracle
+# toolchain a PRE-FLIGHT machinery abort with an untouched ledger, so on a
+# machine without cosmic-ray, mutmut or hypothesis the vectors that attack
+# those rungs record THIS rather than a verdict they did not earn. Pinning
+# it in the baseline is the point: install a tool and the row drifts, which
+# forces a re-record with a real verdict instead of a silent green.
+def cmd_solo_aborted(args):
+    print(
+        json.dumps(
+            {
+                "kind": "solo",
+                "vector": args.vector,
+                "policy": args.policy,
+                "verdict": "PREFLIGHT_ABORT",
+                "abort_reason": args.reason,
+                "decision": None,
+                "gates_passed": False,
+                "first_failed_gate": "",
+                "first_failed_detail": "",
+                "metrics": {},
+                "oracles_run": [],
+                "cross_oracle_consistent": None,
+                "behavior": None,
+                "escalation": "",
+                "admitted": False,
+                "verify_ok": False,
+                "attested": False,
+                "bug_fixed": None,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_duel_aborted(args):
+    print(
+        json.dumps(
+            {
+                "kind": "duel-round",
+                "vector": args.vector,
+                "round": args.round,
+                "policy": args.policy,
+                "verdict": "PREFLIGHT_ABORT",
+                "abort_reason": args.reason,
+                "decision": None,
+                "winner": "none",
+                "cheat_pass": False,
+                "honest_pass": False,
+                "cheat_gate": "",
+                "honest_gate": "",
+                "decided_at": 0,
+                "deciding_key": "",
+                "escalation": "",
+                "behavior": None,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 # --------------------------------------------------------------- solo ----
 def cmd_solo(args):
     report = load(args.explain)
@@ -100,6 +180,8 @@ def cmd_solo(args):
             {
                 "kind": "solo",
                 "vector": args.vector,
+                "policy": args.policy,
+                "abort_reason": "",
                 "decision": report.get("type"),
                 "gates_passed": gates_passed,
                 "first_failed_gate": label,
@@ -107,6 +189,8 @@ def cmd_solo(args):
                 "metrics": metrics,
                 "oracles_run": oracles,
                 "cross_oracle_consistent": consistent,
+                "behavior": behavior_of(report),
+                "escalation": (report.get("escalation") or {}).get("rule", ""),
                 "admitted": admitted,
                 "verify_ok": verify_ok,
                 "attested": args.attested == "true",
@@ -145,6 +229,10 @@ def cmd_duel(args):
                 "decided_at": trace[0].get("decided_at", 0),
                 "deciding_key": trace[0].get("key", ""),
                 "escalation": (report.get("escalation") or {}).get("rule", ""),
+                "behavior": behavior_of(report),
+                "policy": args.policy,
+                "abort_reason": "",
+                "verdict": "",
             },
             sort_keys=True,
         )
@@ -155,6 +243,33 @@ def cmd_duel_merge(args):
     rounds = [json.loads(line) for line in sys.stdin if line.strip()]
     if not rounds:
         raise SystemExit("duel-merge: no rounds on stdin")
+    if rounds[0].get("verdict") == "PREFLIGHT_ABORT":
+        first = rounds[0]
+        print(
+            json.dumps(
+                {
+                    "kind": "duel",
+                    "vector": args.vector,
+                    "policy": first.get("policy", ""),
+                    "rounds": len(rounds),
+                    "cheat_wins": 0,
+                    "honest_wins": 0,
+                    "escalations": 0,
+                    "cheat_pass": False,
+                    "honest_pass": False,
+                    "cheat_gate": "",
+                    "honest_gate": "",
+                    "deciding_key": "",
+                    "decided_at": 0,
+                    "escalation": "",
+                    "behavior": None,
+                    "abort_reason": first.get("abort_reason", ""),
+                    "verdict": "PREFLIGHT_ABORT",
+                },
+                sort_keys=True,
+            )
+        )
+        return
     cheat_wins = sum(1 for r in rounds if r["winner"] == "cheat")
     honest_wins = sum(1 for r in rounds if r["winner"] == "honest")
     escalations = sum(1 for r in rounds if r["decision"] == "ESCALATE")
@@ -188,6 +303,8 @@ def cmd_duel_merge(args):
             {
                 "kind": "duel",
                 "vector": args.vector,
+                "policy": first.get("policy", ""),
+                "abort_reason": "",
                 "rounds": len(rounds),
                 "cheat_wins": cheat_wins,
                 "honest_wins": honest_wins,
@@ -198,6 +315,8 @@ def cmd_duel_merge(args):
                 "honest_gate": first["honest_gate"],
                 "deciding_key": first["deciding_key"],
                 "decided_at": first["decided_at"],
+                "escalation": first.get("escalation", ""),
+                "behavior": first.get("behavior"),
                 "verdict": verdict,
             },
             sort_keys=True,
@@ -227,33 +346,37 @@ def cmd_render(args):
         handle.write("\n")
 
     print()
-    print("VECTOR                       SOLO RACE                                DUEL vs HONEST FIX")
-    print("                             gates  decision  admit  verify  fixed?   outcome        deciding key")
-    print("-" * 108)
+    print("VECTOR                       POLICY        SOLO RACE                                DUEL vs HONEST FIX")
+    print("                                           gates  decision  admit  verify  fixed?   outcome        deciding key")
+    print("-" * 126)
     landed = 0
     for entry in report["vectors"]:
         solo = entry["solo"] or {}
         duel = entry["duel"] or {}
         gates = "PASS" if solo.get("gates_passed") else "FAIL"
+        if solo.get("verdict") == "PREFLIGHT_ABORT":
+            gates = "n/a"
         duel_cell = duel.get("verdict", "-")
         if duel_cell == "STOPWATCH":
             duel_cell = "STOPWATCH %d/%d" % (duel.get("cheat_wins", 0), duel.get("honest_wins", 0))
         if solo.get("verdict") == "LANDS":
             landed += 1
+        fixed = solo.get("bug_fixed")
         print(
-            "%-28s %-6s %-9s %-6s %-7s %-8s %-14s %s"
+            "%-28s %-13s %-6s %-9s %-6s %-7s %-8s %-14s %s"
             % (
                 entry["vector"],
+                solo.get("policy", "-"),
                 gates,
-                solo.get("decision", "-"),
+                solo.get("decision") or "-",
                 "yes" if solo.get("admitted") else "no",
                 "OK" if solo.get("verify_ok") else "-",
-                "YES" if solo.get("bug_fixed") else "no",
+                "?" if fixed is None else ("YES" if fixed else "no"),
                 duel_cell,
                 duel.get("deciding_key", "-") or "-",
             )
         )
-    print("-" * 108)
+    print("-" * 126)
     total = len(report["vectors"])
     cheats_landed = sum(
         1
@@ -273,11 +396,36 @@ def cmd_render(args):
         "cross-oracle count invariant (collected_total == tests_total) violated by: %s"
         % (", ".join(inv) if inv else "none")
     )
+    # M2a: what the new rungs could and could not be bought here. A vector
+    # whose rung the machine cannot buy is NOT a vector that passed.
+    aborted = [
+        (e["vector"], (e["solo"] or {}).get("abort_reason", ""))
+        for e in report["vectors"]
+        if (e["solo"] or {}).get("verdict") == "PREFLIGHT_ABORT"
+    ]
+    if aborted:
+        print(
+            "NOT EXERCISED HERE (%d vector(s) whose rung this machine cannot buy — a pre-flight "
+            "machinery abort, ledger untouched, NOT a verdict):" % len(aborted)
+        )
+        for name, reason in aborted:
+            print("  %-28s %s" % (name, reason))
+    split = [
+        e["vector"]
+        for e in report["vectors"]
+        if ((e["solo"] or {}).get("escalation") == "on_behavioral_split"
+            or (e["duel"] or {}).get("escalation") == "on_behavioral_split")
+    ]
+    print(
+        "behavioural split escalated (M2a on_behavioral_split) for: %s"
+        % (", ".join(split) if split else "none")
+    )
     print()
 
 
 # --------------------------------------------------------------- diff ----
 SOLO_KEYS = (
+    "policy",
     "decision",
     "gates_passed",
     "first_failed_gate",
@@ -288,11 +436,16 @@ SOLO_KEYS = (
     "cross_oracle_consistent",
     "oracles_run",
     "metrics",
+    # M2a: the behaviour partition and the escalation rule are the new
+    # signals this block added, so they are what its baseline must pin.
+    "behavior",
+    "escalation",
     "verdict",
 )
 # Round tallies are a stopwatch sample, not a fact: only the LABEL is
 # comparable for a duel the ranking cannot decide.
-DUEL_KEYS = ("cheat_pass", "honest_pass", "cheat_gate", "honest_gate", "deciding_key", "verdict")
+DUEL_KEYS = ("policy", "cheat_pass", "honest_pass", "cheat_gate", "honest_gate",
+             "deciding_key", "escalation", "behavior", "verdict")
 
 
 def cmd_diff(args):
@@ -338,6 +491,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("solo")
+    p.add_argument("--policy", default="default")
     p.add_argument("--vector", required=True)
     p.add_argument("--world", required=True)
     p.add_argument("--explain", required=True)
@@ -349,6 +503,7 @@ def main():
     p.set_defaults(fn=cmd_solo)
 
     p = sub.add_parser("duel")
+    p.add_argument("--policy", default="default")
     p.add_argument("--vector", required=True)
     p.add_argument("--round", type=int, required=True)
     p.add_argument("--cheat", required=True)
@@ -359,6 +514,19 @@ def main():
     p = sub.add_parser("duel-merge")
     p.add_argument("--vector", required=True)
     p.set_defaults(fn=cmd_duel_merge)
+
+    p = sub.add_parser("solo-aborted")
+    p.add_argument("--vector", required=True)
+    p.add_argument("--policy", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(fn=cmd_solo_aborted)
+
+    p = sub.add_parser("duel-aborted")
+    p.add_argument("--vector", required=True)
+    p.add_argument("--round", type=int, required=True)
+    p.add_argument("--policy", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(fn=cmd_duel_aborted)
 
     p = sub.add_parser("render")
     p.add_argument("--results", required=True)

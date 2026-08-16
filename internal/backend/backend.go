@@ -51,6 +51,13 @@ type OpenOpts struct {
 	EvidenceDir string // host dir, control-plane-owned; bind → /mvo/evidence
 	ScratchDir  string // host dir, oracle-uid-writable;  bind → /mvo/scratch
 	PluginDir   string // host dir, read-only;            bind → /mvo/plugin
+	// CorpusDir holds the race's materialized corpus (M2a). It is
+	// read-only and lives OUTSIDE the worktree: the world must execute the
+	// corpus, so the executing process necessarily sees it, but nothing
+	// writes it into the tree, nothing stages it, and it is not mounted
+	// during phase A at all — the generating agent never sees the inputs
+	// its output will be compared on.
+	CorpusDir string // host dir, read-only;            bind → /mvo/corpus
 }
 
 // In-world mount points (T1). Under T0 the in-world path of each of these
@@ -60,6 +67,12 @@ const (
 	InWorldEvidence = "/mvo/evidence"
 	InWorldScratch  = "/mvo/scratch"
 	InWorldPlugin   = "/mvo/plugin"
+	InWorldCorpus   = "/mvo/corpus"
+	// InWorldRoot is where the worktree itself is mounted read-write. The
+	// corpus runner needs it on sys.path so the candidate's own modules
+	// are importable, and it is a constant rather than w.Dir() because on
+	// T1 the host path is not a path the container can see.
+	InWorldRoot = "/work"
 )
 
 // World is one provisioned world's execution surface.

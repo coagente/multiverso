@@ -2,6 +2,185 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-15 — M2a: an oracle menu worth scheduling over
+
+**M2's thesis is an adaptive scheduler, and before this block there was
+nothing to schedule.** Three rungs — `tree-guard`, `pytest-collect`,
+`pytest-suite` — about four hundred milliseconds and two `git ls-tree` walks.
+A scheduler is a function from a budget to a purchase; with one plausible
+purchase it is a constant. M2a builds the menu: four new oracle kinds
+spanning three orders of magnitude of cost, each declaring what it costs, what
+it scales by, what signal it reads, and who authored its inputs.
+
+The centrepiece is the **cross-candidate differential** (EP-4). Research ch. 8
+puts candidate-vs-candidate behavioural diffing at *function* scale in the
+literature and finds **nobody doing it at repository scale on real patches**.
+We already pay for N isolated worlds of one intent; comparing them costs one
+interpreter start per world and a hash table. Two candidates implement
+`clamp` correctly for all eight tests, tie on every ranking key that measures
+anything, and diverge on `clamp(nan, 0, 10)`: `nan` versus `0`. Under M1f that
+race ESCALATEd on `on_ranking_tie` and told the maintainer that two digests
+tied. Under M2a it ESCALATEs on `on_behavioral_split` and hands them the input
+and both answers. That difference is the block.
+
+**The measured costs, because the whole point is that a scheduler needs
+numbers.** Anything that imports pytest costs ~400 ms fixed on this tree,
+which dwarfs the tests: `--collect-only` over the 8-test toyrepo is
+0.39–0.88 s real while collection reports 0.00 s. `corpus-observe` — a bare
+interpreter, no pytest, no conftest, no plugin system — is **~25 ms**, and 500
+trivial cases add 0.12 ms. Cheap *and* the smallest attack surface on the
+ladder is an unusual combination and the scheduler should exploit it. The
+largest single lever turned out to be a security control: sealing pytest's
+entry-point autoload (M1f's `evidence.plugin_autoload`) takes the same run
+from 0.45 s to 0.10 s. `mvo oracles` fits `wall_ms ≈ fixed + per_unit × units`
+per kind from this workspace's own receipts and prints "no local measurement
+(n=…)" below three samples, because a two-point fit rendered as a fact is the
+same over-claim as a skipped gate rendered green.
+
+**What the red team broke, in the order it hurt.**
+
+*The corpus was one file, and a world could poison the one its neighbour would
+read.* Phase 0 wrote it beside every worktree, owned by the candidate's own
+uid, and the runner re-read it from disk on every replay — so a poisoner
+changed the NEXT world's inputs and never its own observation. Both payoffs
+ran. Declare a case id nobody pinned, and the honest sibling's stream
+faithfully reports it, its metrics go absent, and it is convicted of tampering
+it did not do while the poisoner is SELECTed, ADMITted, `mvo verify HEAD` OK.
+Or preserve every id, rewrite one argument so both worlds agree, and the split
+simply never fires — reproduced 3/3 under `--parallel 2`. Neither touched a
+protected or harness path. Three of our sentences were false at once, including
+`A WORLD CAN ONLY REMOVE ITSELF`, written twice in the source as a flat claim.
+
+*And the field that would have caught it was dead.* `mvo_corpus.py` emitted
+`"corpus": corpus.get("digest","")` over an object with no `digest` member —
+the digest is the content address of the canonical bytes and is never inside
+them — so every stream this tree could produce recorded `""`, and nothing on
+the Go side read it. The runner now hashes the bytes it actually loaded, the
+pinned digest travels on argv, and an observation of a corpus nobody pinned is
+unusable. Beside it: one corpus copy per world, written only after the agents
+are gone, re-digested by the control plane before and after every replay, with
+a mismatch aborting the **race** as machinery rather than failing a world —
+because a world handed an altered file is a victim, not a suspect.
+
+*Under T1 we mounted the corpus into every candidate world for the whole of
+generation.* `docker inspect` of the candidate keepers showed
+`<raceDir>/corpus -> /mvo/corpus ro=true` mid-race, which is the exact
+opposite of what decision 13, `backend.OpenOpts`'s own comment and our verdict
+on corpus vector 19 all say. The keeper is opened before the agent starts
+inside it, and phase 0 has already written the corpus by then. Each world now
+gets its own corpus directory, created **empty** at open time and filled only
+after phase A joins.
+
+*"A world can only remove itself" failed twice more, and neither needed a
+forgery.* A stream with a header, a `session_start`, a **subset** of the
+declared ids and a `session_finish` breaks no framing rule — so it parsed as
+usable while the oracle's own status was `fail`, entered the cohort anyway,
+and, because the comparison denominator is an intersection over every member,
+deleted the distinguishing case for every honest sibling. And a world that
+observed *every* case and answered `opaque` on all of them passed its own gate
+while collapsing the denominator to zero for the entire race, silently,
+because nothing gates or escalates on `diff_cases_compared`. The cohort now
+requires the receipt's `pass`; a member that compares nothing is excluded and
+the exclusion recorded with every member's contribution beside it.
+
+*A mutant that hangs was a free pass.* A per-mutant timeout is correctly
+excluded from `mutation_score_bp`'s denominator — and it was also excluded
+from the only mutation gate M2a ships, so a mutant the suite provably failed
+to kill cost the candidate nothing. Two killed, one 90-second sleep:
+`mutants_survived=0`, `mutation_score_bp=10000`, gate PASS, race SELECT, and
+the report printing `survivors: 0` beside it. The gate now reads
+`survived + timeout`; the score still does not, because what a ratio means and
+what the tests did are different questions.
+
+*The mutation tool resolved through the candidate's tree.* `python -m
+cosmic_ray.cli` runs with cwd = the worktree, so `sys.path[0]` is the
+candidate's; a six-line `cosmic_ray/cli.py` whose `dump` prints nothing gave
+`mutants_candidates=0` beside our own `mutation_lines_targeted=18`, and the
+gate passed vacuously. No glob was ever going to close it — the shadow is an
+ordinary directory named after a tool. Enumeration now runs under
+`PYTHONSAFEPATH=1`, and zero mutants over a non-empty target set is machinery
+with a named reason, not a pass.
+
+*And a compiled freeze had no gate to enforce it.* A policy-declared corpus
+file or property module joins `paths.harness` — that is decision 14's entire
+defence for the property module — and nothing required a `paths-unmodified`
+gate to exist. The shipped `differential.json` was exactly that shape:
+`mvo policy validate` printed `paths (frozen against the candidate)` over a
+freeze the policy could not keep, and a candidate that rewrote the corpus
+passed every hard gate. Validation rule 24 is the converse of rule 12, both
+fixtures carry the guard, and `mvo policy show` now prints
+`paths (declared, NOT ENFORCED)` for a path block no gate reads.
+
+**What a differential result does and does not establish.** A partition of the
+cohort into two or more behaviour classes on a shared, control-plane-authored
+corpus proves exactly one thing: **the intent as specified, plus the
+repository's own tests, do not determine behaviour on the inputs that
+separated them.** It does not say which class is right, and every ranking key
+we could derive from it is wrong-signed. "Agree with the most siblings" is a
+popularity contest among samples from one model prior — CAPA says those errors
+are becoming *more* correlated, and the minority-correct case is the case this
+product exists for. "Agree with the base tree" ranks *did nothing* above *did
+the job*: we verified it on the adversarial corpus, where vectors 06–08 leave
+the bug in place and therefore agree with base while the honest fix does not.
+So zero ranking keys ship. The output is an escalation to a human with the
+distinguishing input attached, and the metrics are recorded so M2b can
+correlate them against ground truth before anyone builds on them.
+
+The floor under it is `streamed`, and the receipt says so: `evidence_regime:
+"derived"` with `inputs["evidence_floor"]: "streamed"`, never the flattering
+`control-plane`. The reducer runs no candidate code, and every byte it
+consumes came out of a candidate's process. A forged observation is a forged
+statement about a *sibling* — that is the new attack class this design
+introduces, it is stated in the design doc in as many words, and it is
+tolerable for exactly one reason: the output is a question for a maintainer,
+not a verdict that can reject a rival. If the differential ever acquires a
+hard gate, that analysis has to be redone.
+
+**Still open, and written down as open** in the design doc, `docs/concepts.md`
+and the README: at T0 the corpus copies are owned by the uid the candidate's
+process runs as, so a sibling can still reach another world's directory —
+detected and attributed now, not prevented; a cohort member that answers
+"opaque" on *some* cases still shrinks everyone's comparison; a candidate can
+read the corpus off the filesystem at oracle time at T0, so what decision 13
+delivers there is "not delivered to the generating agent", not "not reachable
+by it"; and below CPython 3.11 `PYTHONSAFEPATH` is ignored, so tool shadowing
+is caught by the contradiction check alone. Two corpus providers ship, not the
+three decision 5 promised. `hypothesis`, `mutmut` and `cosmic-ray` are all
+absent on this machine, so every degradation path in the block is the path
+this tree actually takes — the acceptance script asserts the pre-flight
+machinery abort with an untouched ledger rather than skipping quietly.
+
+Compatibility, proved rather than claimed: the shipped default policy does not
+move (`mv0:f207c3fa…`), every new rung is opt-in, and every M0–M1f ledger
+replays byte-for-byte. Receipt digests do move — three additive fields — which
+is free for the same reason it was in M1b, M1c, M1e and M1f: nothing about a
+recorded decision is ever re-derived from a re-serialization of its inputs.
+
+**Numbers:** 4 new oracle kinds, 5 gate predicates, 22 metrics, 1 escalation
+rule, 24 validation rules, 19 adversarial vectors, `scripts/accept.sh` at 10 new
+steps. `gofmt`, `go vet`, `go test ./...`, `accept.sh`, `m0-accept.sh` and
+`adversarial.sh` all green.
+
+**And the honest number is not 19 of 19.** With `hypothesis` and `mutmut`
+installed afterwards — the three vectors that had aborted as *machinery* now
+actually run, and all three are caught — the corpus reads **eighteen stopped or
+escalated, one landed**. `19-differential_conformity` passes every gate in a
+solo race, is SELECTed, admitted, and `mvo verify` accepts it, with the bug
+fully intact. It reads the input corpus off the filesystem at oracle time and
+special-cases exactly those inputs, leaving every other input wrong. Raced
+against an honest fix it escalates, because the two land in different behaviour
+classes — but alone, it wins.
+
+That is open at T0 **by construction**, and worth stating without softening: the
+world has to execute the corpus, so the world can read it. We can withhold the
+inputs from the *generating* agent, and do; we cannot withhold them from the
+process that must run them. T1 closes the sibling half — one world can no longer
+reach another's corpus — and leaves this half exactly where it was. It is the
+classic overfit-to-the-oracle, it lives in application code a reviewer is about
+to read, and the differential's answer to it is ambiguity rather than
+conviction. The README and `docs/concepts.md` now lead with this rather than
+with the eighteen.
+
 ## 2026-08-15 — M1f: moving the trust boundary
 
 **We red-teamed our own fix and it lost twice.** M1f shipped that morning

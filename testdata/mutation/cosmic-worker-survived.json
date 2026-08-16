@@ -1,0 +1,1 @@
+{"diff":"--- a/stats.py\n+++ b/stats.py\n@@ -12 +12 @@\n-    return min(max(v, lo), hi)\n+    return min(max(v, lo), hi + 1)","output":"1 passed","test_outcome":"survived","worker_outcome":"normal"}

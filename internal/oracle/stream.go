@@ -34,6 +34,23 @@ const (
 	recCollected     = "collected"
 	recTest          = "test"
 	recSessionFinish = "session_finish"
+	// recCase is M2a's ONE additive record kind: the corpus runner's
+	// per-case observation. It rides the same header, the same nonce, the
+	// same strictly-increasing seq and the same parse rules 1-7 as every
+	// M1f record, which is why adding it needed no wire version bump.
+	recCase = "case"
+	// recPropertyCase is O2p's additive record: ONE Hypothesis example,
+	// forwarded onto the control plane's stream by the observability
+	// callback the plugin registers (M2a decision 15).
+	//
+	// It exists so property_cases_* can be METRICS at all. Hypothesis's
+	// own observability output is JSONL written into a directory the test
+	// process can write, which makes those records candidate-authorable
+	// AFTER EXIT — coverage_bp's status, and unacceptable for a number a
+	// gate reads. Records that arrive here instead carry the stream's
+	// S1/S2/S3 protections; when the callback cannot be registered the
+	// metrics are ABSENT and result.tools says which path ran.
+	recPropertyCase = "property_case"
 )
 
 // Test outcomes, in the JUnit equivalence classes so the cross-check
@@ -72,6 +89,17 @@ type Stream struct {
 	// per-nodeid derivation so a disagreement between the plugin's tally
 	// and the record stream is visible rather than silently reconciled.
 	FinishTotal, FinishFailed, FinishErrored, FinishSkipped int64
+
+	// O2p: Hypothesis examples that arrived ON THE STREAM.
+	// HasPropertyCases is what decides whether property_cases_* are
+	// EMITTED AT ALL — false means the observability callback could not be
+	// registered, the JSONL fallback ran, and the metrics are absent
+	// (decision 15). A zero PropertyCases with HasPropertyCases true is a
+	// different and much stronger statement: the search ran and found
+	// nothing to run.
+	PropertyCases        int64
+	PropertyCasesInvalid int64
+	HasPropertyCases     bool
 }
 
 // evidenceChannel is one run's append channel: a control-plane-owned file
@@ -237,24 +265,43 @@ type record struct {
 	payload []byte
 }
 
-// ParseStream applies the normative parse rules over raw stream bytes and
-// derives the metrics. It is PURE: no I/O, no clock — the FIFO fixtures in
-// testdata/stream/ drive it directly, with no Python and no plugins.
-//
-// Any violation of rules 1, 2, 3 or 6 makes the stream UNUSABLE, which
-// makes every stream-derived metric absent. Rule 7 (no session_finish)
-// makes it incomplete, which does the same thing and additionally feeds
-// S1's "a 0-exit with no usable stream is error, never pass".
-func ParseStream(raw []byte, nonce string, over bool) Stream {
-	s := Stream{Raw: raw}
-	unusable := func(format string, a ...any) Stream {
-		s.Usable, s.Reason = false, fmt.Sprintf(format, a...)
-		return s
+// streamKinds and obsKinds are the record kinds each reader KEEPS. Every
+// other kind is ignored and counted (rule 5), which is precisely what makes
+// the two wire dialects forward- and backward-compatible with each other:
+// an M1f-era reader tolerates a corpus stream and an M2a reader tolerates a
+// suite stream, because neither has to know the other's records exist.
+var (
+	streamKinds = map[string]bool{
+		recSessionStart: true, recCollected: true, recTest: true, recSessionFinish: true,
+		// A property run IS a pytest run, so O2p reads the suite dialect
+		// and its per-example records ride in the same stream.
+		recPropertyCase: true,
 	}
-	if over {
-		return unusable("evidence stream exceeds the %d MiB cap", artifactCapBytes>>20)
+	obsKinds = map[string]bool{
+		recSessionStart: true, recCase: true, recSessionFinish: true,
 	}
-	if int64(len(raw)) > artifactCapBytes {
+)
+
+// framed is the result of applying the normative FRAMING rules (1-6) to raw
+// stream bytes. reason != "" means the stream is unusable and no record in
+// it may be read.
+type framed struct {
+	recs   []record
+	notes  string
+	reason string
+}
+
+// parseFrames applies parse rules 1-6, which are identical for every
+// dialect the channel carries: the header and its nonce, the strictly
+// increasing sequence, exactly one session_start at seq 1, records after
+// session_finish discarded, unknown kinds ignored and counted, and the
+// 64 MiB cap. The DERIVATION differs per dialect; the framing does not, and
+// a second copy of these rules is a second place for them to drift.
+func parseFrames(raw []byte, nonce string, over bool, keep map[string]bool) framed {
+	unusable := func(format string, a ...any) framed {
+		return framed{reason: fmt.Sprintf(format, a...)}
+	}
+	if over || int64(len(raw)) > artifactCapBytes {
 		return unusable("evidence stream exceeds the %d MiB cap", artifactCapBytes>>20)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
@@ -262,7 +309,7 @@ func ParseStream(raw []byte, nonce string, over bool) Stream {
 		return unusable("stream header missing or nonce mismatch")
 	}
 	// Rule 1: the header names the schema AND the nonce this run generated
-	// — the identity tag against staleness (decision 15). It proves the
+	// — the identity tag against staleness (M1f decision 15). It proves the
 	// stream belongs to the run we started, defeating a replayed stream
 	// left in a tree; it authenticates nothing against an in-process
 	// adversary, and is documented as exactly that.
@@ -294,15 +341,14 @@ func ParseStream(raw []byte, nonce string, over bool) Stream {
 			afterFinish++
 			continue
 		}
-		switch parts[1] {
-		case recSessionStart, recCollected, recTest, recSessionFinish:
+		if keep[parts[1]] {
 			recs = append(recs, record{seq: seq, kind: parts[1], payload: []byte(parts[2])})
 			if parts[1] == recSessionFinish {
 				finished = true
 			}
-		default:
-			unknown++ // rule 5: ignored and counted
+			continue
 		}
+		unknown++ // rule 5: ignored and counted
 	}
 	// Rule 3: exactly one session_start, at seq 1.
 	if len(recs) == 0 || recs[0].kind != recSessionStart || recs[0].seq != 1 {
@@ -313,15 +359,34 @@ func ParseStream(raw []byte, nonce string, over bool) Stream {
 			return unusable("stream has a second session_start at seq %d", r.seq)
 		}
 	}
+	out := framed{recs: recs}
 	if afterFinish > 0 {
-		s.Notes += fmt.Sprintf("mvo: oracle: %d evidence record(s) after session_finish discarded\n", afterFinish)
+		out.notes += fmt.Sprintf("mvo: oracle: %d evidence record(s) after session_finish discarded\n", afterFinish)
 	}
 	if unknown > 0 {
-		s.Notes += fmt.Sprintf("mvo: oracle: %d unknown evidence record kind(s) ignored\n", unknown)
+		out.notes += fmt.Sprintf("mvo: oracle: %d unknown evidence record kind(s) ignored\n", unknown)
 	}
+	return out
+}
 
+// ParseStream applies the normative parse rules over raw stream bytes and
+// derives the metrics. It is PURE: no I/O, no clock — the FIFO fixtures in
+// testdata/stream/ drive it directly, with no Python and no plugins.
+//
+// Any violation of rules 1, 2, 3 or 6 makes the stream UNUSABLE, which
+// makes every stream-derived metric absent. Rule 7 (no session_finish)
+// makes it incomplete, which does the same thing and additionally feeds
+// S1's "a 0-exit with no usable stream is error, never pass".
+func ParseStream(raw []byte, nonce string, over bool) Stream {
+	s := Stream{Raw: raw}
+	f := parseFrames(raw, nonce, over, streamKinds)
+	if f.reason != "" {
+		s.Usable, s.Reason = false, f.reason
+		return s
+	}
+	s.Notes = f.notes
 	s.Usable = true
-	deriveStream(&s, recs)
+	deriveStream(&s, f.recs)
 	if !s.Complete {
 		// Rule 7: an absent session_finish is INCOMPLETE. The prefix we
 		// received is honest, but a run that never said it finished may
@@ -376,6 +441,23 @@ func deriveStream(s *Stream, recs []record) {
 			}
 			if r.seq >= n.lastSeq {
 				n.lastSeq, n.last = r.seq, p.Outcome
+			}
+		case recPropertyCase:
+			// One Hypothesis example. `invalid` and `gave_up` are the
+			// honest-degradation statuses PBT usually hides: a property
+			// whose assume() filters rejected almost every draw has
+			// SEARCHED NOTHING while reporting a pass.
+			var p struct {
+				Property string `json:"property"`
+				Status   string `json:"status"`
+			}
+			if json.Unmarshal(r.payload, &p) != nil {
+				continue
+			}
+			s.HasPropertyCases = true
+			s.PropertyCases++
+			if p.Status == propertyInvalid || p.Status == propertyGaveUp {
+				s.PropertyCasesInvalid++
 			}
 		case recSessionFinish:
 			var p struct {

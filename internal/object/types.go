@@ -154,6 +154,29 @@ const (
 	RegimeIsolated     = "isolated"      // T1 + distinct oracle uid + read-only worktree
 	RegimeStreamed     = "streamed"      // framed stream over a FIFO; any tier
 	RegimeInTree       = "in-tree"       // M1e behaviour, explicitly declared only
+	// RegimeDerived is M2a decision 3: a receipt whose metrics are
+	// CONTROL-PLANE ARITHMETIC over inputs that were themselves observed
+	// inside candidate processes. The reducer executes no candidate code
+	// and touches no candidate tree, so `control-plane` is the tempting
+	// label — and it would be an over-claim, because every byte it
+	// consumed was produced by a `streamed` run. A derived receipt
+	// therefore also names its evidence FLOOR in inputs["evidence_floor"],
+	// so a reader learns from the receipt alone that the comparison is
+	// arithmetic over candidate-influenced observations.
+	RegimeDerived = "derived"
+)
+
+// Evidence floor / input provenance keys (Receipt.Inputs). The vocabulary
+// is CLOSED (M2a decision 24): Inputs is provenance, not evidence, so it
+// may not grow a key a gate could learn to read.
+const (
+	InputCorpus          = "corpus"
+	InputCohort          = "cohort"
+	InputBaseTree        = "base_tree"
+	InputBaseObservation = "base_observation"
+	InputDiffTarget      = "diff_target"
+	InputMutantSelection = "mutant_selection"
+	InputEvidenceFloor   = "evidence_floor"
 )
 
 // Execution records how the oracle ran. Argv is the IN-WORLD invocation
@@ -230,11 +253,43 @@ type Freshness struct {
 }
 
 // Cost accounts what a receipt cost to produce.
+//
+// Units and Unit are M2a decision 22's scaling denominator. wall_ms alone
+// is unlearnable — 400 ms for eight tests and 400 ms for eight hundred are
+// the same number and mean opposite things — so every receipt records the
+// count of whatever its kind scales by. With it a scheduler fits
+// wall_ms ≈ fixed + per_unit × units per repository per kind from the
+// ledger it already has. Unknown is {0, ""}: honest absence, as everywhere.
 type Cost struct {
-	WallMS int64 `json:"wall_ms"`
+	WallMS int64  `json:"wall_ms"`
+	Units  int64  `json:"units"`
+	Unit   string `json:"unit"` // "" iff Units == 0
+}
+
+// Correlation is SCHEDULER metadata (M2a decision 23): declared per kind,
+// recorded per receipt, and NEVER read by Decide. Family stays where it is
+// and means what it always meant — it is the v0 dialect's evidence
+// selector, and giving it a second job would break that.
+//
+// It exists so "how independent is this purchase from the last one?" is
+// computable from the ledger rather than hard-coded in a heuristic.
+// Generator is the field that makes "ten tests written by one model are not
+// ten observations" machine-readable, and it is the seam LLM-synthesized
+// corpora arrive through with no contract change.
+type Correlation struct {
+	Signal    string `json:"signal"`    // tree-bytes | test-identity | test-outcomes | value-behavior | suite-adequacy
+	Corpus    string `json:"corpus"`    // "" | "repo-suite" | a corpus digest
+	Generator string `json:"generator"` // control-plane | base-tree | repo | repo+policy | model:<family>
+	Executor  string `json:"executor"`  // candidate-process | control-plane
 }
 
 // Receipt is the evidence record of one oracle run in one world.
+//
+// Inputs and Correlation are M2a's additive envelope fields. Both follow
+// M1b decision 5 — no omitempty games — so new receipts get NEW DIGESTS,
+// exactly as in M1b, M1c, M1e and M1f, and replay of pre-M2a ledgers is
+// unaffected because M1e decision 1 pairs each recorded object with the
+// digest it was recorded under and never re-serializes it.
 type Receipt struct {
 	Schema      string    `json:"schema"` // multiverso.dev/receipt/v0
 	World       string    `json:"world"`  // world digest
@@ -245,8 +300,23 @@ type Receipt struct {
 	RecheckTier string    `json:"recheck_tier"` // "V1-replayable"
 	Family      string    `json:"family"`       // "suite"
 	Cost        Cost      `json:"cost"`
-	CreatedAt   string    `json:"created_at"`
+	// Inputs records the CONTROL-PLANE-SUPPLIED run-time inputs a metric
+	// was derived against: provenance, not evidence (M2a decision 24).
+	// oracle.config is what the policy chose and result is what was
+	// measured; between them sat an unrecorded gap. Keys are the closed
+	// Input* vocabulary; the map is ALWAYS serialized and is {} for every
+	// M1 kind. Decide never reads it — a provenance field a gate could
+	// read is a metric with extra steps — but the CAS sweep and mvo
+	// explain do.
+	Inputs      map[string]string `json:"inputs"`
+	Correlation Correlation       `json:"correlation"`
+	CreatedAt   string            `json:"created_at"`
 }
+
+// NoInputs is the empty, non-nil provenance map every M1-era kind carries:
+// {} is "supplied nothing", null is a lie about the shape of the record
+// (the EP-2 rule, applied to the new field).
+func NoInputs() map[string]string { return map[string]string{} }
 
 // Decision records the pure-function outcome of a race (NFR-1: replay must
 // reproduce Type, Subject, Evidence, Rationale byte-for-byte).
@@ -356,6 +426,66 @@ type OracleSpec struct {
 	TimeoutMS int64    `json:"timeout_ms"` // 0 = the intent's max_wall_ms
 	Coverage  bool     `json:"coverage"`   // pytest-suite: measure coverage when coverage.py is present
 	Reruns    int      `json:"reruns"`     // pytest-suite: --reruns N when BOTH plugins are present
+	// Corpus declares where the shared input corpus comes from (M2a).
+	// OMITZERO, unlike every other field on this struct, and the reason is
+	// the compatibility claim M2a makes and proves: the shipped default
+	// policy must NOT move (it stays mv0:f207c3fa…). A field that always
+	// serialized would rewrite the bytes of every policy that never heard
+	// of a corpus, minting a new digest for a purely additive change and
+	// forcing a migration M1e decision 2 exists to prevent. Absence is
+	// exactly "this instance consumes no corpus", which is what every
+	// pre-M2a policy meant.
+	Corpus CorpusSpec `json:"corpus,omitzero"`
+	// Mutation is the diff-scoped mutation oracle's configuration (M2a
+	// decision 11). OMITZERO for the same reason as Corpus: a pre-M2a
+	// policy declares no mutation rung, so its bytes must not move.
+	Mutation MutationSpec `json:"mutation,omitzero"`
+}
+
+// MutationSpec is the mutation budget cap as a FIRST-CLASS, PINNED
+// parameter (M2a decision 11). CP-5's rule is that the pinned policy
+// determines the gate, and it survives here in a sharper form: the policy
+// fixes the predicate, the threshold AND the ceiling. Within the ceiling a
+// scheduler may buy fewer mutants; it may never buy more, and the receipt
+// records all three numbers — the ceiling, what the tool generated, and
+// what actually ran — so a reader can see how partial a partial score is
+// without consulting the policy.
+//
+// There is no incremental-cache field and there will not be one (decision
+// 18): mutmut's cache and cosmic-ray's session database are EVIDENCE
+// STORES, and under M1e/M1f semantics they would live in the candidate's
+// writable tree, where a planted cache asserting "all mutants killed" is a
+// two-line forgery. Every run gets a fresh session in control-plane
+// scratch.
+type MutationSpec struct {
+	Tool             string   `json:"tool,omitempty"`                  // "" ⇒ "auto" | "cosmic-ray" | "mutmut"
+	MaxMutants       int64    `json:"max_mutants,omitempty"`           // 0 ⇒ 20
+	MaxPerLine       int64    `json:"max_per_line,omitempty"`          // 0 ⇒ 2
+	Operators        []string `json:"operators,omitempty"`             // [] ⇒ the tool's default set, sorted
+	TimeoutPerMutant int64    `json:"timeout_per_mutant_ms,omitempty"` // 0 ⇒ 5 × the baseline suite run
+}
+
+// IsZero reports whether the spec declares nothing at all — the test
+// `omitzero` applies, and the test ConfigDigest applies before it folds a
+// mutation configuration into an instance's identity in evidence. A slice
+// field makes the struct incomparable, so this cannot be `== MutationSpec{}`.
+func (m MutationSpec) IsZero() bool {
+	return m.Tool == "" && m.MaxMutants == 0 && m.MaxPerLine == 0 &&
+		len(m.Operators) == 0 && m.TimeoutPerMutant == 0
+}
+
+// CorpusSpec declares where the shared input corpus comes from. The
+// provider vocabulary is CLOSED; Module and File are repo-relative paths
+// that COMPILE INTO paths.harness (M2a decision 14): a corpus or property
+// module the candidate can edit is one that asserts whatever the candidate
+// wants — the same class of hole as an editable conftest.py, closed by the
+// same gate, at rung O-1, before any Python runs.
+type CorpusSpec struct {
+	Provider string `json:"provider,omitempty"`  // "" ⇒ none | "repo-suite" | "declared" | "hypothesis"
+	File     string `json:"file,omitempty"`      // provider=declared: the corpus JSON, repo-relative
+	Module   string `json:"module,omitempty"`    // provider=hypothesis: the property module
+	CasesMax int64  `json:"cases_max,omitempty"` // 0 ⇒ 100; the materialization ceiling
+	Seed     string `json:"seed,omitempty"`      // provider=hypothesis: 32 hex; "" ⇒ derived from the base tree
 }
 
 // GateSpec is one ordered hard gate: a predicate over one oracle's counted
@@ -365,6 +495,14 @@ type GateSpec struct {
 	Oracle    string `json:"oracle"`    // a name declared in Oracles
 	Basis     string `json:"basis"`     // Basis* — the weakest acceptable evidence
 	Threshold int64  `json:"threshold"` // per-gate meaning; 0 when the gate takes no parameter
+	// Scope is M2a decision 21: "" ⇒ "both" | "race" | "landing". A cohort
+	// of one is not a comparison, so a differential gate at admission —
+	// which has exactly one subject — would carry diff_cohort_n=1, absent
+	// metrics, a failed gate and an admission that can never succeed.
+	// OMITEMPTY for the same digest-stability reason as OracleSpec.Corpus:
+	// "" compiles to "both", which is what every pre-M2a gate meant, so
+	// its bytes must not move.
+	Scope string `json:"scope,omitempty"`
 }
 
 // EscalationSpec is the CLOSED, purely declarative escalation rule set
@@ -381,6 +519,20 @@ type EscalationSpec struct {
 	// Inserting a rule at the front of the list cannot change any
 	// historical evaluation: no M1e policy can declare an invariant.
 	OnInvariantViolation bool `json:"on_invariant_violation"`
+	// OnBehavioralSplit is M2a rule 1b: 0 = off, N = escalate when the
+	// cohort partitions into at least N behaviour classes. An int whose
+	// zero means off — matching MinCandidatesPassing rather than M1f
+	// decision 4's tri-state strings — and the distinction is real:
+	// decision 4 forbids a zero-value that makes an OLD policy silently
+	// LESS checked, whereas "escalation rule off" is exactly what every
+	// pre-M2a policy had. Reproducing the prior state is the requirement.
+	//
+	// It ships OFF in the default (M2a decision 9): with six candidates
+	// from one model prior, splits may be routine, and an escalation rule
+	// that fires on most races spends the operator's attention until they
+	// stop reading. We do not know the rate; shipping it on would be
+	// guessing with somebody else's attention.
+	OnBehavioralSplit int `json:"on_behavioral_split,omitempty"`
 }
 
 // RecordedWorld and RecordedReceipt are the identity-carrying forms of a

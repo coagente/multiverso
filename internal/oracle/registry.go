@@ -24,13 +24,24 @@ const (
 	KindPytestCollect = policy.KindPytestCollect
 	KindPytestSuite   = policy.KindPytestSuite
 	KindTreeGuard     = policy.KindTreeGuard
+	// M2a's two per-world rungs beside the differential: O2p, the property
+	// oracle, and O3, diff-scoped mutation.
+	KindProperties   = policy.KindProperties
+	KindMutationDiff = policy.KindMutationDiff
+	// M2a's cross-candidate differential, in two halves (decision 1): an
+	// ordinary per-world observer, and a pure control-plane reducer.
+	KindCorpusObserve      = policy.KindCorpusObserve
+	KindCorpusDifferential = policy.KindCorpusDifferential
 )
 
 // Correlation families a kind's receipts carry.
 const (
-	FamilySuite   = policy.FamilySuite
-	FamilyCollect = policy.FamilyCollect
-	FamilyTree    = policy.FamilyTree
+	FamilySuite    = policy.FamilySuite
+	FamilyCollect  = policy.FamilyCollect
+	FamilyTree     = policy.FamilyTree
+	FamilyProperty = policy.FamilyProperty
+	FamilyMutation = policy.FamilyMutation
+	FamilyBehavior = policy.FamilyBehavior
 )
 
 // Metric names the pytest kinds emit (EP-2). Absence is meaningful: a
@@ -48,6 +59,27 @@ const (
 	MetricCoverageBP            = policy.MetricCoverageBP
 	MetricTestsFailedFirstRun   = policy.MetricTestsFailedFirstRun
 	MetricTestsPassedAfterRerun = policy.MetricTestsPassedAfterRun
+
+	// O2p. property_cases_* exist ONLY when the per-case records reached
+	// the control-plane stream (M2a decision 15); under the JSONL fallback
+	// they are absent and result.tools says which path ran.
+	MetricPropertiesTotal      = policy.MetricPropertiesTotal
+	MetricPropertiesPassed     = policy.MetricPropertiesPassed
+	MetricPropertiesFailed     = policy.MetricPropertiesFailed
+	MetricPropertiesErrored    = policy.MetricPropertiesErrored
+	MetricPropertyCasesTotal   = policy.MetricPropertyCasesTotal
+	MetricPropertyCasesInvalid = policy.MetricPropertyCasesInvalid
+
+	// O3.
+	MetricMutationLinesTargeted = policy.MetricMutationLinesTargeted
+	MetricMutantsBudget         = policy.MetricMutantsBudget
+	MetricMutantsCandidates     = policy.MetricMutantsCandidates
+	MetricMutantsTested         = policy.MetricMutantsTested
+	MetricMutantsKilled         = policy.MetricMutantsKilled
+	MetricMutantsSurvived       = policy.MetricMutantsSurvived
+	MetricMutantsTimeout        = policy.MetricMutantsTimeout
+	MetricMutantsUnviable       = policy.MetricMutantsUnviable
+	MetricMutationScoreBP       = policy.MetricMutationScoreBP
 )
 
 // Structured sources the tools probe reports (decision 16). These are
@@ -110,6 +142,33 @@ type Params struct {
 	Repo          string
 	BaseTree      string
 	CandidateTree string
+
+	// --- M2a: O3 --------------------------------------------------------
+	// Patch is the AG-4 captured patch of THIS world — the bytes the
+	// control plane captured and hashed, never a file read back out of the
+	// candidate's tree. mutation-diff derives its target set from it, so a
+	// nil patch is refused at construction: an unsupplied patch and an
+	// empty one must not produce the same vacuous pass.
+	Patch []byte
+
+	// --- M2a: the corpus plane -----------------------------------------
+	// Corpus is the PINNED corpus a corpus-observe instance replays, and
+	// CorpusDigest its content address. Both come from phase 0, which
+	// materialized them on the base tree before any candidate existed —
+	// which is what makes corpus_cases_total a number no candidate can
+	// author in any regime.
+	Corpus       Corpus
+	CorpusDigest string
+	// CorpusPath is where the runner reads the corpus (host path on T0,
+	// the read-only mount on T1). It is never inside the worktree.
+	CorpusPath string
+	// CorpusRunner is the in-world path of mvo_corpus.py and
+	// CorpusRunnerDigest its content address, recorded in every receipt it
+	// produced. WorldRoot is the in-world worktree root, prepended to
+	// PYTHONPATH so the corpus's targets resolve to the CANDIDATE's code.
+	CorpusRunner       string
+	CorpusRunnerDigest string
+	WorldRoot          string
 
 	// Regime is the RESOLVED evidence regime for this run (never "auto":
 	// the orchestrator resolves auto against the tier before building the
@@ -192,6 +251,16 @@ func New(p Params) (Oracle, error) {
 			tree:  p.CandidateTree,
 		}, nil
 	}
+	if s.Kind == KindCorpusDifferential {
+		// The reducer is a PURE function, not a runnable oracle: it takes
+		// many worlds' observations and emits many receipts, so it cannot
+		// satisfy Run(ctx, world) → Receipt and must not pretend to. The
+		// orchestrator calls Reduce at the cohort barrier (phase B2)
+		// instead, and building an instance here would only produce a
+		// handle whose Run would have to lie.
+		return nil, fmt.Errorf("oracle: %s is a cohort-stage reducer: it is run once at the cohort barrier over every world's observation, not per world",
+			s.Kind)
+	}
 	regime := p.Regime
 	if regime == "" || regime == policy.RegimeAuto {
 		// A receipt must never record a word that means "it depends". An
@@ -219,6 +288,79 @@ func New(p Params) (Oracle, error) {
 	autoload := p.PluginAutoload
 	if autoload == "" {
 		autoload = policy.AutoloadOff
+	}
+	if s.Kind == KindMutationDiff {
+		// The captured patch is the target set's ONLY source (M2a decision
+		// 16), and a nil one is machinery failure rather than an empty
+		// diff: "the candidate changed no mutable line" passes the
+		// survivor gate vacuously, so it must never be what an unsupplied
+		// patch degrades into.
+		if p.Patch == nil {
+			return nil, fmt.Errorf("oracle: %s: no captured patch supplied: the mutation target set is derived from the AG-4 patch, and an unsupplied patch must not read as an empty one", s.Kind)
+		}
+		return &mutationOracle{
+			spec:    s,
+			store:   p.CAS,
+			patch:   append([]byte(nil), p.Patch...),
+			paths:   p.Paths,
+			timeout: timeout,
+			cap:     artifactCapBytes,
+			ev: evidencePlan{
+				regime:          regime,
+				crosscheck:      crosscheck,
+				autoload:        autoload,
+				hostEvidence:    p.EvidenceDir,
+				hostScratch:     p.ScratchDir,
+				inWorldEvidence: p.InWorldEvidence,
+				inWorldScrap:    p.InWorldScratch,
+				pluginDir:       p.PluginDir,
+				inWorldPlugin:   p.InWorldPlugin,
+				pluginDigest:    p.PluginDigest,
+			},
+		}, nil
+	}
+	if s.Kind == KindCorpusObserve {
+		switch {
+		case p.CorpusDigest == "":
+			return nil, fmt.Errorf("oracle: %s: no pinned corpus (phase 0 materializes it on the base tree before any world exists)", s.Kind)
+		case p.CorpusPath == "":
+			return nil, fmt.Errorf("oracle: %s: the corpus was not delivered to this world", s.Kind)
+		case p.CorpusRunner == "":
+			return nil, fmt.Errorf("oracle: %s: no corpus runner was materialized", s.Kind)
+		case p.EvidenceDir == "":
+			// The observation IS the stream. Without a channel there is
+			// nothing to observe with, and an oracle that ran anyway would
+			// produce a receipt whose absent metrics look like a candidate
+			// problem rather than a plumbing one.
+			return nil, fmt.Errorf("oracle: %s: evidence regime %q requires a control-plane evidence channel, and none was supplied",
+				s.Kind, regime)
+		}
+		root := p.WorldRoot
+		if root == "" {
+			return nil, fmt.Errorf("oracle: %s: no in-world worktree root to import the candidate's modules from", s.Kind)
+		}
+		return &observeOracle{
+			spec:         s,
+			store:        p.CAS,
+			timeout:      timeout,
+			cap:          artifactCapBytes,
+			corpus:       p.Corpus,
+			corpusDigest: p.CorpusDigest,
+			baseTree:     p.BaseTree,
+			corpusPath:   p.CorpusPath,
+			runner:       p.CorpusRunner,
+			runnerDigest: p.CorpusRunnerDigest,
+			worldRoot:    root,
+			ev: evidencePlan{
+				regime:          regime,
+				crosscheck:      crosscheck,
+				autoload:        autoload,
+				hostEvidence:    p.EvidenceDir,
+				hostScratch:     p.ScratchDir,
+				inWorldEvidence: p.InWorldEvidence,
+				inWorldScrap:    p.InWorldScratch,
+			},
+		}, nil
 	}
 	return &pytestOracle{
 		kind:     s.Kind,

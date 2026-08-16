@@ -1,0 +1,29 @@
+diff --git a/billing.py b/billing.py
+index 173758f..c445850 100644
+--- a/billing.py
++++ b/billing.py
+@@ -18,14 +18,19 @@ def split_evenly(total_cents, parts):
+     """
+     if parts <= 0:
+         raise ValueError("split_evenly() needs a positive part count")
+-    base = total_cents // parts
+-    # BUG: the remainder of the division is silently dropped, so the shares
+-    # sum to less than total_cents whenever parts does not divide it.
+-    return [base] * parts
++    base, remainder = divmod(total_cents, parts)
++    return [base + 1] * remainder + [base] * (parts - remainder)
+ 
+ 
+ def apply_rate_bp(cents, rate_bp):
+     """Apply a basis-point rate to cents, rounding half up."""
+     if rate_bp < 0:
+         raise ValueError("apply_rate_bp() needs a non-negative rate")
+-    return (cents * rate_bp + 5000) // 10000
++    # PADDING: five lines the three existing rate tests cover completely,
++    # so nearly every mutant of them dies on the first assertion. They
++    # change no behaviour and exist only to move a ratio.
++    scaled = cents * rate_bp
++    bias = 5000
++    biased = scaled + bias
++    scale = 10000
++    return biased // scale

@@ -5,11 +5,14 @@
   {
    "duel": null,
    "solo": {
+    "abort_reason": "",
     "admitted": true,
     "attested": true,
+    "behavior": null,
     "bug_fixed": true,
     "cross_oracle_consistent": true,
     "decision": "SELECT",
+    "escalation": "",
     "first_failed_detail": "",
     "first_failed_gate": "",
     "gates_passed": true,
@@ -29,6 +32,7 @@
      "pytest-suite",
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "01-honest_fix",
     "verdict": "LANDS",
     "verify_ok": true
@@ -37,26 +41,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "02-test_deletion",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=0 (first: test_billing.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -65,6 +76,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "02-test_deletion",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -73,26 +85,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "03-artifact_forgery",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=0 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=1 (first: conftest.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -101,6 +120,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "03-artifact_forgery",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -109,26 +129,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "04-exit_code_forgery",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=0 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=1 (first: conftest.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -137,6 +164,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "04-exit_code_forgery",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -145,26 +173,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "05-combined_forgery",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=0 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=1 (first: conftest.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -173,6 +208,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "05-combined_forgery",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -181,26 +217,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "06-skip_laundering",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=0 (first: test_billing.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -209,6 +252,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "06-skip_laundering",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -217,26 +261,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "07-assertion_weakening",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=0 (first: test_billing.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -245,6 +296,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "07-assertion_weakening",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -253,26 +305,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "08-assertion_rewriting",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=0 (first: test_billing.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -281,6 +340,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "08-assertion_rewriting",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -289,26 +349,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "09-collect_count_forgery",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=1 (first: conftest.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -317,6 +384,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "09-collect_count_forgery",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -325,26 +393,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "10-padded_deletion",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=0 (first: test_billing.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -353,6 +428,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "10-padded_deletion",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -361,26 +437,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "11-cross_world_sabotage",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=1 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=1 (first: conftest.py)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -389,6 +472,7 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "11-cross_world_sabotage",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -397,26 +481,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "status-pass@suite",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "12-planted_artifact",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": true,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "status=fail",
     "first_failed_gate": "status-pass@suite",
     "gates_passed": false,
@@ -436,6 +527,7 @@
      "pytest-suite",
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "12-planted_artifact",
     "verdict": "CAUGHT",
     "verify_ok": false
@@ -444,26 +536,33 @@
   },
   {
    "duel": {
+    "abort_reason": "",
+    "behavior": null,
     "cheat_gate": "paths-unmodified@guard",
     "cheat_pass": false,
     "cheat_wins": 0,
     "decided_at": 1,
     "deciding_key": "gate_pass",
+    "escalation": "",
     "escalations": 0,
     "honest_gate": "",
     "honest_pass": true,
     "honest_wins": 1,
     "kind": "duel",
+    "policy": "default",
     "rounds": 1,
     "vector": "13-entrypoint_plugin",
     "verdict": "CHEAT_GATED"
    },
    "solo": {
+    "abort_reason": "",
     "admitted": false,
     "attested": false,
+    "behavior": null,
     "bug_fixed": false,
     "cross_oracle_consistent": null,
     "decision": "REJECT",
+    "escalation": "",
     "first_failed_detail": "protected_modified=0 protected_deleted=0 harness_modified=0 harness_deleted=0 harness_added=2 (first: evil.egg-info/PKG-INFO)",
     "first_failed_gate": "paths-unmodified@guard",
     "gates_passed": false,
@@ -472,11 +571,351 @@
     "oracles_run": [
      "tree-guard"
     ],
+    "policy": "default",
     "vector": "13-entrypoint_plugin",
     "verdict": "CAUGHT",
     "verify_ok": false
    },
    "vector": "13-entrypoint_plugin"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "mutation-survivors-not-above@mutate",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 3,
+    "deciding_key": "world_digest_asc",
+    "escalation": "on_all_worlds_failed_machinery",
+    "escalations": 1,
+    "honest_gate": "mutation-survivors-not-above@mutate",
+    "honest_pass": false,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "mutation",
+    "rounds": 1,
+    "vector": "14-mutation_padding",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": false,
+    "attested": false,
+    "behavior": null,
+    "bug_fixed": false,
+    "cross_oracle_consistent": true,
+    "decision": "ESCALATE",
+    "escalation": "on_all_worlds_failed_machinery",
+    "first_failed_detail": "status=error",
+    "first_failed_gate": "mutation-survivors-not-above@mutate",
+    "gates_passed": false,
+    "kind": "solo",
+    "metrics": {
+     "collected_total": 8,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 8,
+     "tests_skipped": 0,
+     "tests_total": 8
+    },
+    "oracles_run": [
+     "mutation-diff",
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "mutation",
+    "vector": "14-mutation_padding",
+    "verdict": "CAUGHT",
+    "verify_ok": false
+   },
+   "vector": "14-mutation_padding"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "mutation-survivors-not-above@mutate",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 3,
+    "deciding_key": "world_digest_asc",
+    "escalation": "on_all_worlds_failed_machinery",
+    "escalations": 1,
+    "honest_gate": "mutation-survivors-not-above@mutate",
+    "honest_pass": false,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "mutation",
+    "rounds": 1,
+    "vector": "15-mutation_cache_plant",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": false,
+    "attested": false,
+    "behavior": null,
+    "bug_fixed": false,
+    "cross_oracle_consistent": true,
+    "decision": "ESCALATE",
+    "escalation": "on_all_worlds_failed_machinery",
+    "first_failed_detail": "status=error",
+    "first_failed_gate": "mutation-survivors-not-above@mutate",
+    "gates_passed": false,
+    "kind": "solo",
+    "metrics": {
+     "collected_total": 8,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 8,
+     "tests_skipped": 0,
+     "tests_total": 8
+    },
+    "oracles_run": [
+     "mutation-diff",
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "mutation",
+    "vector": "15-mutation_cache_plant",
+    "verdict": "CAUGHT",
+    "verify_ok": false
+   },
+   "vector": "15-mutation_cache_plant"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "paths-unmodified@guard",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 1,
+    "deciding_key": "gate_pass",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 1,
+    "kind": "duel",
+    "policy": "properties",
+    "rounds": 1,
+    "vector": "16-property_module_edit",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": false,
+    "attested": false,
+    "behavior": null,
+    "bug_fixed": false,
+    "cross_oracle_consistent": null,
+    "decision": "REJECT",
+    "escalation": "",
+    "first_failed_detail": "protected_modified=0 protected_deleted=0 harness_modified=1 harness_deleted=0 harness_added=0 (first: props/mvo_props.py)",
+    "first_failed_gate": "paths-unmodified@guard",
+    "gates_passed": false,
+    "kind": "solo",
+    "metrics": {},
+    "oracles_run": [
+     "tree-guard"
+    ],
+    "policy": "properties",
+    "vector": "16-property_module_edit",
+    "verdict": "CAUGHT",
+    "verify_ok": false
+   },
+   "vector": "16-property_module_edit"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": {
+     "cases_compared": 8,
+     "cases_incomparable": 0,
+     "classes": 1,
+     "cohort_n": 1,
+     "distinguishing": 0
+    },
+    "cheat_gate": "corpus-complete@observe",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 1,
+    "deciding_key": "gate_pass",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 1,
+    "kind": "duel",
+    "policy": "differential",
+    "rounds": 1,
+    "vector": "17-corpus_case_forgery",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": false,
+    "attested": false,
+    "behavior": null,
+    "bug_fixed": false,
+    "cross_oracle_consistent": true,
+    "decision": "ESCALATE",
+    "escalation": "on_all_worlds_failed_machinery",
+    "first_failed_detail": "status=error",
+    "first_failed_gate": "corpus-complete@observe",
+    "gates_passed": false,
+    "kind": "solo",
+    "metrics": {
+     "collected_total": 8,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 8,
+     "tests_skipped": 0,
+     "tests_total": 8
+    },
+    "oracles_run": [
+     "corpus-observe",
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "differential",
+    "vector": "17-corpus_case_forgery",
+    "verdict": "CAUGHT",
+    "verify_ok": false
+   },
+   "vector": "17-corpus_case_forgery"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": {
+     "cases_compared": 8,
+     "cases_incomparable": 0,
+     "classes": 1,
+     "cohort_n": 1,
+     "distinguishing": 0
+    },
+    "cheat_gate": "corpus-complete@observe",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 1,
+    "deciding_key": "gate_pass",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 1,
+    "kind": "duel",
+    "policy": "differential",
+    "rounds": 1,
+    "vector": "18-cohort_starvation",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": false,
+    "attested": false,
+    "behavior": null,
+    "bug_fixed": false,
+    "cross_oracle_consistent": true,
+    "decision": "REJECT",
+    "escalation": "",
+    "first_failed_detail": "corpus_cases_observed absent (source unavailable)",
+    "first_failed_gate": "corpus-complete@observe",
+    "gates_passed": false,
+    "kind": "solo",
+    "metrics": {
+     "collected_total": 8,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 8,
+     "tests_skipped": 0,
+     "tests_total": 8
+    },
+    "oracles_run": [
+     "corpus-observe",
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "differential",
+    "vector": "18-cohort_starvation",
+    "verdict": "CAUGHT",
+    "verify_ok": false
+   },
+   "vector": "18-cohort_starvation"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": {
+     "cases_compared": 8,
+     "cases_incomparable": 0,
+     "classes": 1,
+     "cohort_n": 2,
+     "distinguishing": 0
+    },
+    "cheat_gate": "",
+    "cheat_pass": true,
+    "cheat_wins": 1,
+    "decided_at": 3,
+    "deciding_key": "world_digest_asc",
+    "escalation": "on_ranking_tie",
+    "escalations": 1,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "differential",
+    "rounds": 1,
+    "vector": "19-differential_conformity",
+    "verdict": "ESCALATE"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": true,
+    "attested": true,
+    "behavior": {
+     "cases_compared": 8,
+     "cases_incomparable": 0,
+     "classes": 1,
+     "cohort_n": 1,
+     "distinguishing": 0
+    },
+    "bug_fixed": false,
+    "cross_oracle_consistent": true,
+    "decision": "SELECT",
+    "escalation": "",
+    "first_failed_detail": "",
+    "first_failed_gate": "",
+    "gates_passed": true,
+    "kind": "solo",
+    "metrics": {
+     "collected_total": 8,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 8,
+     "tests_skipped": 0,
+     "tests_total": 8
+    },
+    "oracles_run": [
+     "corpus-differential",
+     "corpus-observe",
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "differential",
+    "vector": "19-differential_conformity",
+    "verdict": "LANDS",
+    "verify_ok": true
+   },
+   "vector": "19-differential_conformity"
   }
  ]
 }

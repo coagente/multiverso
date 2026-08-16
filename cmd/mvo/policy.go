@@ -349,7 +349,16 @@ func writePolicySummary(w io.Writer, pol policy.Policy) {
 // policy declares them: an M1e-era policy's rendering is unchanged.
 func writePathsAndInvariants(w io.Writer, pol policy.Policy) {
 	if !pol.Paths.Empty() {
-		fmt.Fprintln(w, "paths (frozen against the candidate):")
+		// A path set no gate reads is not frozen against anything, and
+		// printing that it is was a claim the policy could not keep. Rule 24
+		// now refuses the corpus-derived case at load, so this heading is
+		// reachable only for a hand-authored paths block with no
+		// paths-unmodified gate — where it is still exactly true.
+		heading := "paths (frozen against the candidate):"
+		if !pol.EnforcesPaths() {
+			heading = "paths (declared, NOT ENFORCED — no paths-unmodified gate reads them):"
+		}
+		fmt.Fprintln(w, heading)
 		for _, cls := range []struct {
 			label    string
 			patterns []policy.Pattern
@@ -391,6 +400,14 @@ func escalationRules(e policy.Escalation) []string {
 	}
 	if e.OnAllWorldsFailedMachinery {
 		out = append(out, "on_all_worlds_failed_machinery")
+	}
+	// Rule 1b (M2a): below machinery failure, above require_evidence. It
+	// carries its parameter because the parameter IS the rule — "escalate
+	// at 2 classes" and "escalate at 6" are different products, and a
+	// policy summary that printed only the name would leave an operator
+	// unable to see which one they installed.
+	if e.OnBehavioralSplit > 0 {
+		out = append(out, fmt.Sprintf("on_behavioral_split=%d", e.OnBehavioralSplit))
 	}
 	if len(e.RequireEvidence) > 0 {
 		names := make([]string, 0, len(e.RequireEvidence))

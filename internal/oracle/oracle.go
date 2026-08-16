@@ -24,6 +24,7 @@ import (
 	"github.com/coagente/multiverso/internal/backend"
 	"github.com/coagente/multiverso/internal/cas"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/policy"
 )
 
 // Receipt result statuses (receipt/v0 subset).
@@ -39,6 +40,23 @@ const (
 	// escaped the group and still holds the output pipes open.
 	waitDelay = 5 * time.Second
 )
+
+// sizedCost pairs a wall time with the count its kind scales by, and it
+// enforces object.Cost's documented invariant — `Unit == "" iff Units == 0`
+// — at the one place every kind funnels through.
+//
+// The invariant matters because M2b fits `wall_ms ≈ fixed + per_unit ×
+// units` over these pairs. A receipt that carries a named unit beside a zero
+// count reads as "this rung ran and scaled by nothing", and it enters the
+// least-squares fit at x = 0 — precisely the intercept a scheduler reads as
+// the kind's FIXED cost. `{0, ""}` is the sentinel for "unknown" (M2a
+// decision 22), and unknown is what a machinery path leaves behind.
+func sizedCost(wallMS, units int64, unit string) object.Cost {
+	if units == 0 {
+		return object.Cost{WallMS: wallMS}
+	}
+	return object.Cost{WallMS: wallMS, Units: units, Unit: unit}
+}
 
 // Oracle produces evidence receipts for a world (EP-1).
 type Oracle interface {
@@ -140,7 +158,15 @@ func (o *CommandOracle) Run(ctx context.Context, w backend.World) (object.Receip
 		Freshness:   object.Freshness{Basis: object.BasisConstruction},
 		RecheckTier: recheckTier,
 		Family:      FamilySuite,
-		Cost:        object.Cost{WallMS: res.WallMS},
+		// A command oracle parses nothing, so it knows no scaling unit:
+		// {0, ""} is the honest record of "unknown", exactly as an absent
+		// metric is (M2a decision 22).
+		Cost: object.Cost{WallMS: res.WallMS},
+		// {} rather than null: this kind is supplied no control-plane
+		// inputs at all, which is a different statement from "the field is
+		// missing" (M2a decision 24).
+		Inputs:      object.NoInputs(),
+		Correlation: policy.KindCorrelation(KindCommand),
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }

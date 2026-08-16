@@ -189,7 +189,17 @@ func (o *guardOracle) Run(_ context.Context, w backend.World) (object.Receipt, e
 		Freshness:   object.Freshness{Basis: object.BasisConstruction},
 		RecheckTier: recheckTier,
 		Family:      policy.FamilyTree,
-		Cost:        object.Cost{WallMS: 0},
+		Cost: object.Cost{
+			WallMS: 0,
+			// The guard scales by PATHS considered, not by time: two
+			// `git ls-tree` walks over a 40-path repo and over a
+			// 40 000-path repo are the same wall_ms on this fixture and
+			// nothing alike on a real one (M2a decision 22).
+			Units: metrics[policy.MetricPathsExamined],
+			Unit:  policy.UnitPaths,
+		},
+		Inputs:      object.NoInputs(),
+		Correlation: policy.KindCorrelation(KindTreeGuard),
 		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }

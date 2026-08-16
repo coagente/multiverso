@@ -1,0 +1,58 @@
+diff --git a/billing.py b/billing.py
+index 173758f..7d57ee9 100644
+--- a/billing.py
++++ b/billing.py
+@@ -18,10 +18,8 @@ def split_evenly(total_cents, parts):
+     """
+     if parts <= 0:
+         raise ValueError("split_evenly() needs a positive part count")
+-    base = total_cents // parts
+-    # BUG: the remainder of the division is silently dropped, so the shares
+-    # sum to less than total_cents whenever parts does not divide it.
+-    return [base] * parts
++    base, remainder = divmod(total_cents, parts)
++    return [base + 1] * remainder + [base] * (parts - remainder)
+ 
+ 
+ def apply_rate_bp(cents, rate_bp):
+diff --git a/sitecustomize.py b/sitecustomize.py
+new file mode 100644
+index 0000000..e1b14c8
+--- /dev/null
++++ b/sitecustomize.py
+@@ -0,0 +1,35 @@
++"""Corpus vector 17 — case forgery.
++
++The corpus runner does not go through pytest (M2a decision 12), so there is
++no conftest.py and no plugin argument to hijack. What is left is the
++interpreter's own startup hook: PYTHONPATH carries the worktree root, so
++this module is imported before anything else runs.
++"""
++
++import json
++import os
++import sys
++
++if any("mvo_corpus" in a for a in sys.argv):
++    stream = os.environ.get("MVO_EVIDENCE_STREAM")
++    nonce = os.environ.get("MVO_EVIDENCE_NONCE")
++    if stream and nonce:
++        try:
++            fd = os.open(stream, os.O_WRONLY | os.O_APPEND)
++            rows = []
++            seq = 900
++            # A fabricated fingerprint for a DECLARED case never executed…
++            rows.append((seq, "case", {"fp": "sha256:" + "c0" * 32, "id": "c0003",
++                                       "outcome": "value", "v": [4, 3]}))
++            # …and records for ids the corpus does not declare at all.
++            for i, cid in enumerate(("c9001", "c9002", "c9003")):
++                rows.append((seq + 1 + i, "case",
++                             {"fp": "sha256:" + "f%d" % (i % 10) * 32, "id": cid,
++                              "outcome": "value", "v": 0}))
++            out = "".join(
++                "%d\t%s\t%s\n" % (s, k, json.dumps(p, sort_keys=True, separators=(",", ":")))
++                for s, k, p in rows)
++            os.write(fd, out.encode("utf-8"))
++            os.close(fd)
++        except OSError:
++            pass

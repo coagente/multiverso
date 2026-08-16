@@ -98,6 +98,14 @@ func cmdAdmit(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("admit: %s: %s", res.Decision.Type, res.Decision.Rationale)
 	}
 
+	// Named before the verdict, because it changes what the verdict MEANS:
+	// these gates were evaluated in the race and not on the landing tree
+	// (M2a decision 21). Silence here would let a weaker landing gate set
+	// read as the full one.
+	if len(res.RaceScopeGates) > 0 {
+		fmt.Fprintf(stdout, "race-scope gates not evaluated at admission: %s\n",
+			strings.Join(res.RaceScopeGates, ", "))
+	}
 	fmt.Fprintf(stdout, "ADMIT %s\n", res.Decision.Subject[0])
 	fmt.Fprintf(stdout, "commit:      %s\n", res.Commit)
 	fmt.Fprintf(stdout, "attestation: %s\n", res.AttestationKey)

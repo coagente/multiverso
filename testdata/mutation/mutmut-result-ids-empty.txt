@@ -1,0 +1,2 @@
+To apply a mutant on disk:
+    mutmut apply <id>

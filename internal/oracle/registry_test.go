@@ -15,14 +15,21 @@ import (
 )
 
 func TestNewKinds(t *testing.T) {
-	if got, want := Kinds(), []string{KindCommand, KindPytestCollect, KindPytestSuite, KindTreeGuard}; !reflect.DeepEqual(got, want) {
+	if got, want := Kinds(), []string{
+		KindCommand, KindCorpusDifferential, KindCorpusObserve, KindProperties,
+		KindMutationDiff, KindPytestCollect, KindPytestSuite, KindTreeGuard,
+	}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Kinds() = %v, want %v", got, want)
 	}
 	for kind, want := range map[string]string{
-		KindCommand:       FamilySuite,
-		KindPytestCollect: FamilyCollect,
-		KindPytestSuite:   FamilySuite,
-		KindTreeGuard:     FamilyTree,
+		KindCommand:            FamilySuite,
+		KindPytestCollect:      FamilyCollect,
+		KindPytestSuite:        FamilySuite,
+		KindTreeGuard:          FamilyTree,
+		KindProperties:         FamilyProperty,
+		KindMutationDiff:       FamilyMutation,
+		KindCorpusObserve:      FamilyBehavior,
+		KindCorpusDifferential: FamilyBehavior,
 	} {
 		if got := Family(kind); got != want {
 			t.Errorf("Family(%q) = %q, want %q", kind, got, want)
@@ -225,8 +232,19 @@ func TestParseProbe(t *testing.T) {
 			// The probe runs in a world an agent wrote to: its output is
 			// input, not truth, so unknown names are ignored.
 			name: "unknown names are ignored",
-			raw:  `{"pytest":"9.1.1","mutmut":"3.7.0"}`,
+			raw:  `{"pytest":"9.1.1","numpy":"2.0.0"}`,
 			want: map[string]string{ToolPytest: "9.1.1"},
+		},
+		{
+			// M2a's three additions (decision 20). None of them is
+			// installed on the machine this was written on, which is why
+			// every degradation path they feed is a live path.
+			name: "the M2a toolchain",
+			raw:  `{"cosmic-ray":"8.3.7","hypothesis":"6.100.0","mutmut":"2.4.4","pytest":"9.1.1"}`,
+			want: map[string]string{
+				ToolCosmicRay: "8.3.7", ToolHypothesis: "6.100.0",
+				ToolMutmut: "2.4.4", ToolPytest: "9.1.1",
+			},
 		},
 		{name: "not json", raw: "ModuleNotFoundError: importlib\n", want: map[string]string{}},
 		{name: "empty", raw: "", want: map[string]string{}},
@@ -246,7 +264,8 @@ func TestParseProbe(t *testing.T) {
 func TestProbeScriptGolden(t *testing.T) {
 	const want = "import json,importlib.metadata as m\n" +
 		"o={}\n" +
-		"for n in (\"pytest\",\"coverage\",\"pytest-reportlog\",\"pytest-rerunfailures\"):\n" +
+		"for n in (\"pytest\",\"coverage\",\"pytest-reportlog\",\"pytest-rerunfailures\"," +
+		"\"hypothesis\",\"mutmut\",\"cosmic-ray\"):\n" +
 		"    try: o[n]=m.version(n)\n" +
 		"    except Exception: pass\n" +
 		"print(json.dumps(o,sort_keys=True))\n"

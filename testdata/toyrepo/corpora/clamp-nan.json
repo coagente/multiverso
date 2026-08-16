@@ -1,0 +1,6 @@
+{"cases": [
+  {"target": "stats:clamp", "args": [{"f": "7ff8000000000000"}, 0, 10], "kwargs": {}},
+  {"target": "stats:clamp", "args": [5, 0, 10], "kwargs": {}},
+  {"target": "stats:mean", "args": [[1, 2, 3]], "kwargs": {}},
+  {"target": "stats:clamp", "args": [-3, 0, 10], "kwargs": {}}
+]}

@@ -24,7 +24,78 @@ const (
 	// vocabulary could read it — the study's third vector, unreadable.
 	GatePathsUnmodified = "paths-unmodified"
 	GateSkipsNotAbove   = "skips-not-above"
+	// M2a. corpus-complete is the observation's own gate: a world that did
+	// not produce a record for every declared case has told us it is not
+	// running our corpus, and its metrics are absent rather than partial.
+	// differential-cohort-at-least is the ONE cohort gate, and it is
+	// documented as an operator choice with a stated cost — with N=2 a
+	// single silenced world denies the comparison to the whole race
+	// (corpus vector 18), which is why the shipped fixture escalates
+	// instead of gating.
+	GateCorpusComplete            = "corpus-complete"
+	GateDifferentialCohortAtLeast = "differential-cohort-at-least"
+	// M2a O2p/O3. properties-pass is the property rung's verdict gate.
+	// property-cases-at-least reads the honest-degradation metric PBT
+	// usually hides: a property whose assume() filters rejected almost
+	// every draw has SEARCHED NOTHING while reporting a pass. It is
+	// correctly signed because the case budget is fixed by the corpus
+	// config and identical across worlds, so a low count means the search
+	// collapsed, not that the candidate is small.
+	//
+	// mutation-survivors-not-above is the ONLY mutation gate (decision
+	// 10). A survivor is a concrete, actionable artifact: a mutant of a
+	// line THE CANDIDATE WROTE that no test killed. The absolute count is
+	// correctly signed under diff-scoping — a larger diff makes the gate
+	// strictly harder — and it is immune to the padding attack (corpus
+	// vector 14), because padding adds mutants that may themselves
+	// survive. mutation_score_bp is a ratio over a denominator the
+	// candidate chooses: recorded, rendered, and gated by nothing.
+	GatePropertiesPass            = "properties-pass"
+	GatePropertyCasesAtLeast      = "property-cases-at-least"
+	GateMutationSurvivorsNotAbove = "mutation-survivors-not-above"
 )
+
+// Gate scope (M2a decision 21). "" ⇒ ScopeBoth, which reproduces M1e/M1f
+// semantics exactly. A gate over a COHORT-stage kind must declare
+// ScopeRace: `mvo admit` has one subject, so a cohort of one is not a
+// comparison, and a differential gate there would fail forever on absent
+// metrics — the sealed.json failure M1f's red team found, rebuilt.
+const (
+	ScopeBoth    = "both"
+	ScopeRace    = "race"
+	ScopeLanding = "landing"
+)
+
+// KnownScopes returns the legal gate scopes, sorted.
+func KnownScopes() []string { return []string{ScopeBoth, ScopeLanding, ScopeRace} }
+
+// Corpus providers (M2a decision 5). The set is CLOSED.
+//
+//   - ProviderDeclared: the policy names a JSON corpus file. Zero
+//     dependencies, fully deterministic, and the honest answer for a
+//     repository that has neither Hypothesis nor an appetite for one.
+//   - ProviderRepoSuite: cases are the base tree's own test node ids. It is
+//     documented as the honest FLOOR and as nearly information-free — among
+//     candidates that passed the suite gate every world's outcome vector is
+//     identical, so the partition has one class and the differential says
+//     "no divergence", which is true and useless.
+//   - ProviderHypothesis: materialized on the base tree from the repo's
+//     @given tests plus the policy-declared property module.
+const (
+	ProviderNone       = ""
+	ProviderRepoSuite  = "repo-suite"
+	ProviderDeclared   = "declared"
+	ProviderHypothesis = "hypothesis"
+)
+
+// KnownProviders returns the legal corpus.provider values, sorted.
+func KnownProviders() []string {
+	return []string{ProviderDeclared, ProviderHypothesis, ProviderRepoSuite}
+}
+
+// DefaultCasesMax is the materialization ceiling a corpus spec leaving
+// cases_max at 0 resolves to.
+const DefaultCasesMax = 100
 
 // Ranking keys. gate_pass is an implicit FIRST key and world_digest_asc an
 // implicit TERMINAL key of every compiled policy (M1e decision 4): the
@@ -64,6 +135,80 @@ const (
 	MetricHarnessDeleted    = "harness_deleted"
 	MetricHarnessAdded      = "harness_added"
 	MetricPathsExamined     = "paths_examined"
+
+	// M2a corpus-observe metrics. corpus_cases_total comes from the CORPUS
+	// OBJECT, materialized on the base tree before any candidate existed:
+	// no candidate authors that number in any regime. The other three are
+	// stream-derived and carry exactly the streamed regime's guarantees —
+	// they cannot be suppressed into a pass (S1), cannot be authored after
+	// exit, and can be forged by an adversary already executing in the
+	// process.
+	MetricCorpusCasesTotal    = "corpus_cases_total"
+	MetricCorpusCasesObserved = "corpus_cases_observed"
+	MetricCorpusCasesOpaque   = "corpus_cases_opaque"
+	MetricCorpusCasesErrored  = "corpus_cases_errored"
+
+	// M2a corpus-differential metrics: this world's POSITION IN THE
+	// COMPARISON, computed by the control-plane reducer over the cohort's
+	// observations. diff_cohort_n < 2 ⇒ every other diff_* metric is
+	// ABSENT: a comparison of one is not a comparison, and diff_cohort_n
+	// itself is recorded so a reader can see WHY the others are missing.
+	//
+	// diff_cases_vs_base and diff_cases_unilateral_vs_base are RECORDED
+	// AND NOT CONSUMED. "Agrees with base" is indistinguishable from "did
+	// nothing" without a fail-to-pass reproduction test, so a ranking key
+	// over them would rank the candidate that changed nothing above the
+	// honest fix (M2a decision 7). M2b's evaluation needs the numbers to
+	// correlate against ground truth before anyone builds on them.
+	MetricDiffCohortN              = "diff_cohort_n"
+	MetricDiffClasses              = "diff_classes"
+	MetricDiffClassSize            = "diff_class_size"
+	MetricDiffCasesCompared        = "diff_cases_compared"
+	MetricDiffCasesIncomparable    = "diff_cases_incomparable"
+	MetricDiffCasesDivergent       = "diff_cases_divergent"
+	MetricDiffCasesUnilateral      = "diff_cases_unilateral"
+	MetricDiffCasesVsBase          = "diff_cases_vs_base"
+	MetricDiffCasesUnilateralVBase = "diff_cases_unilateral_vs_base"
+
+	// M2a hypothesis-properties (O2p) metrics. The four properties_*
+	// counts are stream-derived and carry the streamed regime's
+	// guarantees. property_cases_* are emitted ONLY when the per-case
+	// records reached the control-plane stream through the observability
+	// callback (decision 15): under the JSONL fallback the records are
+	// candidate-authorable AFTER EXIT — coverage_bp's status, and
+	// unacceptable for a number a gate reads — so the JSONL is stored as
+	// an artifact, result.tools says so, and THE METRICS ARE ABSENT. One
+	// metric name, one provenance, forever: a metric whose
+	// trustworthiness varied silently by code path would be worse than no
+	// metric.
+	MetricPropertiesTotal      = "properties_total"
+	MetricPropertiesPassed     = "properties_passed"
+	MetricPropertiesFailed     = "properties_failed"
+	MetricPropertiesErrored    = "properties_errored"
+	MetricPropertyCasesTotal   = "property_cases_total"
+	MetricPropertyCasesInvalid = "property_cases_invalid"
+
+	// M2a mutation-diff (O3) metrics. mutation_lines_targeted is derived
+	// by the CONTROL PLANE from the AG-4 captured patch: the candidate
+	// chose the content but cannot change what the content IS, so this
+	// one is not candidate-authorable in any regime. The rest are
+	// stream-derived per mutant run.
+	//
+	// mutants_budget / mutants_candidates / mutants_tested are all three
+	// recorded (decision 11) so a reader can see HOW PARTIAL a partial
+	// score is without consulting the policy. Timeouts and unviable
+	// mutants are excluded from mutation_score_bp's denominator and
+	// counted separately, because "the mutant hung" and "the mutant did
+	// not import" are not "the tests caught it".
+	MetricMutationLinesTargeted = "mutation_lines_targeted"
+	MetricMutantsBudget         = "mutants_budget"
+	MetricMutantsCandidates     = "mutants_candidates"
+	MetricMutantsTested         = "mutants_tested"
+	MetricMutantsKilled         = "mutants_killed"
+	MetricMutantsSurvived       = "mutants_survived"
+	MetricMutantsTimeout        = "mutants_timeout"
+	MetricMutantsUnviable       = "mutants_unviable"
+	MetricMutationScoreBP       = "mutation_score_bp"
 )
 
 // Oracle kinds (the registry's closed key space) and the correlation
@@ -78,10 +223,38 @@ const (
 	// table, the ESCALATE payload, admission re-gating, replay and
 	// publication all work for free.
 	KindTreeGuard = "tree-guard"
+	// M2a's cross-candidate differential is TWO kinds, not one, and that
+	// is decision 1: corpus-observe is an ordinary per-world oracle bound
+	// to exactly the world it observed, and corpus-differential is a pure
+	// control-plane reducer that emits ONE COMPARISON RECEIPT PER WORLD.
+	// A single N-world oracle would have had to make Receipt.World and
+	// Freshness.ValidFor plural, and a receipt whose valid_for names one
+	// tree while its metrics derive from N trees is lying about what it
+	// judged — M1f's "the label doing the laundering".
+	KindCorpusObserve      = "corpus-observe"
+	KindCorpusDifferential = "corpus-differential"
+	// KindProperties is O2p: the repository's own Hypothesis tests plus a
+	// policy-declared property module, run through pytest under the
+	// control-plane observer. KindMutationDiff is O3: Google's recipe —
+	// mutate only the diff, cap the budget, and never run a full mutation
+	// pass (ch. 8 §8.1: exhaustive mutation "does not scale").
+	KindProperties   = "hypothesis-properties"
+	KindMutationDiff = "mutation-diff"
 
 	FamilySuite   = "suite"
 	FamilyCollect = "collect"
 	FamilyTree    = "tree"
+	// FamilyBehavior is shared by both differential kinds: family is the
+	// v0 dialect's evidence selector and is FROZEN in meaning (M2a
+	// decision 23), so the new correlation descriptor — not the family —
+	// carries the scheduler's view of what a receipt reads.
+	FamilyBehavior = "behavior"
+	// FamilyProperty and FamilyMutation are the two rungs M2a adds beside
+	// the differential. They are distinct families because family is the
+	// v0 dialect's evidence selector: a property receipt must never be
+	// selectable by a v0 suite gate that has no idea what it is reading.
+	FamilyProperty = "property"
+	FamilyMutation = "mutation"
 )
 
 // DefaultPytestPrefix is the runner prefix a pytest-kind oracle resolves to
@@ -113,6 +286,29 @@ var gateDefs = map[string]gateDef{
 	// meaningful ("no skipped tests at all"): M1e validation rule 5's
 	// "threshold must be 0 when the predicate takes none" does not apply.
 	GateSkipsNotAbove: {metrics: []string{MetricTestsSkipped}, threshold: true},
+	GateCorpusComplete: {metrics: []string{
+		MetricCorpusCasesObserved, MetricCorpusCasesTotal,
+	}},
+	// The threshold is a world count and must be >= 2 (rule 19's
+	// companion): a cohort gate that accepts a cohort of one accepts a
+	// comparison that never happened.
+	GateDifferentialCohortAtLeast: {metrics: []string{MetricDiffCohortN}, threshold: true},
+	GatePropertiesPass: {metrics: []string{
+		MetricPropertiesFailed, MetricPropertiesErrored,
+	}},
+	GatePropertyCasesAtLeast: {metrics: []string{MetricPropertyCasesTotal}, threshold: true},
+	// mutation-survivors-not-above TAKES a parameter, so threshold == 0 is
+	// legal and is in fact the shipped fixture's value ("no mutant of a
+	// line this patch wrote went unkilled"). It reads two ABSOLUTE counts,
+	// never the ratio: the ratio's denominator is the candidate's own diff.
+	// `mutants_timeout` is in the numerator beside `mutants_survived`
+	// because a mutant that hung is a mutant the tests did not kill, and
+	// leaving it out made a hang a free escape from the only mutation gate
+	// M2a ships.
+	GateMutationSurvivorsNotAbove: {
+		metrics:   []string{MetricMutantsSurvived, MetricMutantsTimeout},
+		threshold: true,
+	},
 }
 
 // keyDef declares a ranking key's direction and, for metric-bearing keys,
@@ -154,6 +350,25 @@ var kindDefs = map[string]kindDef{
 		MetricTestsTotal, MetricTestsPassed, MetricTestsFailed, MetricTestsErrored,
 		MetricTestsSkipped, MetricDurationMS, MetricCoverageBP,
 		MetricTestsFailedFirstRun, MetricTestsPassedAfterRun,
+	}},
+	KindCorpusObserve: {family: FamilyBehavior, metrics: []string{
+		MetricCorpusCasesTotal, MetricCorpusCasesObserved,
+		MetricCorpusCasesOpaque, MetricCorpusCasesErrored,
+	}},
+	KindCorpusDifferential: {family: FamilyBehavior, metrics: []string{
+		MetricDiffCohortN, MetricDiffClasses, MetricDiffClassSize,
+		MetricDiffCasesCompared, MetricDiffCasesIncomparable, MetricDiffCasesDivergent,
+		MetricDiffCasesUnilateral, MetricDiffCasesVsBase, MetricDiffCasesUnilateralVBase,
+	}},
+	KindProperties: {family: FamilyProperty, metrics: []string{
+		MetricPropertiesTotal, MetricPropertiesPassed, MetricPropertiesFailed,
+		MetricPropertiesErrored, MetricPropertyCasesTotal, MetricPropertyCasesInvalid,
+		MetricDurationMS, MetricCoverageBP,
+	}},
+	KindMutationDiff: {family: FamilyMutation, metrics: []string{
+		MetricMutationLinesTargeted, MetricMutantsBudget, MetricMutantsCandidates,
+		MetricMutantsTested, MetricMutantsKilled, MetricMutantsSurvived,
+		MetricMutantsTimeout, MetricMutantsUnviable, MetricMutationScoreBP,
 	}},
 }
 
@@ -240,6 +455,14 @@ func SpecEmits(spec object.OracleSpec, metric string) bool {
 	}
 	if metric == MetricCoverageBP {
 		return spec.Coverage && CoverageWrappable(ResolvedArgv(spec))
+	}
+	// A corpus-observe instance that declares no provider has no corpus to
+	// replay, so it emits nothing at all. Catching that at load is the same
+	// authoring-bug class as a coverage gate on a coverage-disabled suite:
+	// the alternative is a gate that fails forever on
+	// "corpus_cases_total absent (source unavailable)".
+	if spec.Kind == KindCorpusObserve {
+		return spec.Corpus.Provider != ProviderNone
 	}
 	return true
 }

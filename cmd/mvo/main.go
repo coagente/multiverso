@@ -64,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdAudit(rest, stdout, stderr)
 	case "guard":
 		err = cmdGuard(rest, stdout, stderr)
+	case "oracles":
+		err = cmdOracles(rest, stdout, stderr)
 	case "version", "--version", "-v":
 		writeVersion(stdout)
 		return exitOK
@@ -146,6 +148,11 @@ commands:
                                     compare two trees under a policy's protected and
                                     harness path sets; exit 1 on any violation. Writes
                                     nothing: no ledger, no worktree, no race.
+  oracles [--json] [--policy NAME|DIGEST]
+                                    the oracle menu: every kind's declared cost shape
+                                    and correlation, plus coefficients FITTED from this
+                                    workspace's receipts. Fewer than 3 receipts for a
+                                    kind prints "no local measurement (n=…)", never a fit
   admit <intent-digest>             land the SELECT winner on trunk with a signed attestation
   verify <commit> [--key PUB] [--json]  verify the admission attestation offline
   publish <intent-digest> [--remote R] [--include-rejected]
