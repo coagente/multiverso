@@ -15,6 +15,7 @@ import (
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
 	"github.com/coagente/multiverso/internal/policy"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // baseWorld is one world-shaped worktree at the intent's base commit, opened
@@ -91,7 +92,7 @@ func (bw *baseWorld) close(r *raceRun) {
 // needsBaseWorld reports whether a policy obliges the race to measure the
 // base state at all: a pytest kind must be pre-flighted (decision 15), and a
 // collected-not-below gate needs its denominator (decision 13).
-func needsBaseWorld(pol policy.Policy) bool {
+func needsBaseWorld(pol policy.Policy, collectInert bool) bool {
 	if _, ok := pol.CollectOracle(); ok {
 		return true
 	}
@@ -102,14 +103,19 @@ func needsBaseWorld(pol policy.Policy) bool {
 	if _, ok := needsCorpus(pol); ok {
 		return true
 	}
-	return len(pytestOracles(pol)) > 0
+	return len(pytestOracles(pol, collectInert)) > 0
 }
 
 // pytestOracles lists the REQUIRED pytest-kind instances, in ladder order.
 // Declared-but-unrequired oracles are never run and never pre-flighted.
-func pytestOracles(pol policy.Policy) []policy.Oracle {
+func pytestOracles(pol policy.Policy, collectInert bool) []policy.Oracle {
 	var out []policy.Oracle
-	for _, name := range pol.Required {
+	// The probe covers exactly the rungs the race can run, which under
+	// --collect-inert is wider than pol.Required (M2b decision 11). Probing
+	// the narrower set would move a missing toolchain from a pre-flight
+	// refusal with an empty ledger to a mid-race machinery error with half a
+	// race recorded — the failure mode M1e decision 15 exists to prevent.
+	for _, name := range schedule.LadderNames(pol, collectInert) {
 		o, ok := pol.OracleByName(name)
 		if !ok {
 			continue
@@ -150,9 +156,9 @@ func oraclePython(o policy.Oracle) string {
 // wrong AND sent the operator off to rewrite their policy for a language
 // problem they did not have, so the two causes are told apart here and
 // budgetMS names the bound that actually stopped it.
-func preflight(ctx context.Context, pol policy.Policy, w backend.World, envDesc string, budgetMS int64) error {
+func preflight(ctx context.Context, pol policy.Policy, collectInert bool, w backend.World, envDesc string, budgetMS int64) error {
 	probed := make(map[string]map[string]string)
-	for _, o := range pytestOracles(pol) {
+	for _, o := range pytestOracles(pol, collectInert) {
 		py := oraclePython(o)
 		tools, seen := probed[py]
 		if !seen {
@@ -216,7 +222,7 @@ func execDesc(be backend.Backend) string {
 // a repo whose base tree collects no tests cannot give the guard meaning, and
 // racing on it would produce receipts whose collected_delta was a fiction.
 func (r *raceRun) measureBaseline(ctx context.Context, pol policy.Policy, bw *baseWorld, timeout time.Duration) (int64, error) {
-	spec, ok := pol.CollectOracle()
+	spec, ok := pol.BaselineCollectOracle()
 	if !ok {
 		return 0, nil
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
 	"github.com/coagente/multiverso/internal/policy"
+	"github.com/coagente/multiverso/internal/schedule"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -107,8 +108,19 @@ type menuRow struct {
 	SamplesByAutoload map[string]int `json:"measurement_n_by_plugin_autoload"`
 }
 
-// fit is a least-squares fit of wall_ms ≈ fixed + per_unit × units over one
+// fit is a THEIL–SEN fit of wall_ms ≈ fixed + per_unit × units over one
 // kind's receipts in this workspace.
+//
+// M2a fitted by least squares, and M2b amendment B replaces it: one poisoned
+// sample drags a least-squares line arbitrarily far, and `cost.units` is a
+// candidate-authorable number for the pytest kinds, so the estimator was a
+// remote-write primitive on every future race's cost model in the workspace.
+// The median of pairwise slopes tolerates a minority of poisoned points. The
+// honest limit is stated rather than implied: at the minSamples floor a
+// median of three pairwise slopes survives exactly ONE bad point, which is
+// weak — the unit clamp in the allocator is the layer that removes the
+// capability, and this is the layer that makes one bad sample survivable.
+// `estimator` is on the wire so a reader cannot mistake one fit for the other.
 //
 // BelowResolution is not a detail. `cost.wall_ms` is an integer count of
 // milliseconds, so a rung that costs 30 µs records 0 for every sample and
@@ -127,6 +139,10 @@ type fit struct {
 	// (M2a decision 27). A coefficient without it is an average over two
 	// populations that differ by a factor of four.
 	Autoload string `json:"plugin_autoload"`
+	// Estimator names the line-fitter (M2b amendment B). It is recorded
+	// because the number's meaning changed without its units changing, which
+	// is exactly the kind of move a reader cannot detect from the value.
+	Estimator string `json:"estimator"`
 }
 
 // minSamples is the smallest sample a coefficient may be printed from. Two
@@ -270,13 +286,11 @@ func menuRows(receipts []receiptRec, kindOf map[string]attribution, declared map
 		case len(obs) < minSamples:
 			row.Note = fmt.Sprintf("no local measurement (n=%d, need %d)", len(obs), minSamples)
 		default:
-			xs := make([]float64, 0, len(obs))
-			ys := make([]float64, 0, len(obs))
+			samples := make([]schedule.Sample, 0, len(obs))
 			lo, hi := obs[0].units, obs[0].units
 			allZero := true
 			for _, s := range obs {
-				xs = append(xs, float64(s.units))
-				ys = append(ys, float64(s.wall))
+				samples = append(samples, schedule.Sample{Units: s.units, WallMS: s.wall})
 				if s.wall != 0 {
 					allZero = false
 				}
@@ -287,45 +301,39 @@ func menuRows(receipts []receiptRec, kindOf map[string]attribution, declared map
 					hi = s.units
 				}
 			}
-			fixed, per, ok := leastSquares(xs, ys)
+			// The SAME estimator the allocator spends against, called through
+			// the same function (M2b amendment B). Two implementations of one
+			// cost model is two cost models.
+			estimator := schedule.EstimatorTheilSen
+			fixed, perMicro, ok := schedule.TheilSen(samples)
 			if !ok {
 				// Every receipt scaled by the same unit count. There are
 				// infinitely many (fixed, per-unit) pairs through that
-				// column of points, so any pair we printed would be
-				// invented. The count is real and gets said.
-				row.Note = fmt.Sprintf("no local measurement (n=%d, units do not vary: every receipt scaled %d)",
+				// column of points, so no SLOPE may be printed — but the
+				// FIXED cost was measured n times, and reporting "no local
+				// measurement" about a kind this workspace has timed nine
+				// times is the honesty rule pointed the wrong way. The
+				// median wall time is the measurement; the slope stays
+				// absent, and the note says which is which.
+				fixed, perMicro, ok = schedule.MedianFixed(samples)
+				if !ok {
+					row.Note = fmt.Sprintf("no local measurement (n=%d, units do not vary: every receipt scaled %d)",
+						len(obs), lo)
+					break
+				}
+				estimator = schedule.EstimatorMedianFixed
+				row.Note = fmt.Sprintf("fixed cost only (n=%d, units do not vary: every receipt scaled %d, so no per-unit coefficient exists)",
 					len(obs), lo)
-				break
 			}
 			row.Measurement = &fit{
-				N: len(obs), FixedMS: fixed, PerUnit: per,
+				N: len(obs), FixedMS: float64(fixed), PerUnit: float64(perMicro) / 1000,
 				MinUnits: lo, MaxUnits: hi, BelowResolution: allZero,
-				Autoload: fitted,
+				Autoload: fitted, Estimator: estimator,
 			}
 		}
 		rows = append(rows, row)
 	}
 	return rows
-}
-
-// leastSquares fits y ≈ a + b·x. ok is false when x has no variance, which
-// is not a fit with a large error bar — it is no fit at all.
-func leastSquares(xs, ys []float64) (a, b float64, ok bool) {
-	n := float64(len(xs))
-	var sx, sy, sxx, sxy float64
-	for i := range xs {
-		sx += xs[i]
-		sy += ys[i]
-		sxx += xs[i] * xs[i]
-		sxy += xs[i] * ys[i]
-	}
-	den := n*sxx - sx*sx
-	if den == 0 {
-		return 0, 0, false
-	}
-	b = (n*sxy - sx*sy) / den
-	a = (sy - b*sx) / n
-	return a, b, true
 }
 
 func writeMenuHuman(w io.Writer, rows []menuRow, polRef *string, polName, polDigest string) {
@@ -365,9 +373,14 @@ func writeMenuHuman(w io.Writer, rows []menuRow, polRef *string, polName, polDig
 				r.Kind, r.Measurement.N, r.Measurement.MinUnits, r.Measurement.MaxUnits)
 			continue
 		}
-		fmt.Fprintf(w, "  %-22s fixed %.0f ms  +  %s ms/%s     (n=%d, units %d..%d, plugin_autoload %s)\n",
+		// The estimator is named beside the number for the same reason it is
+		// on the wire: M2b amendment B changed what the coefficient MEANS
+		// without changing its units, and a reader cannot tell a median of
+		// pairwise slopes from a least-squares line by looking at it.
+		fmt.Fprintf(w, "  %-22s fixed %.0f ms  +  %s ms/%s     (n=%d, units %d..%d, plugin_autoload %s, %s)\n",
 			r.Kind, r.Measurement.FixedMS, sigfig(r.Measurement.PerUnit), unitSingular(r.Unit),
-			r.Measurement.N, r.Measurement.MinUnits, r.Measurement.MaxUnits, dash(r.Measurement.Autoload))
+			r.Measurement.N, r.Measurement.MinUnits, r.Measurement.MaxUnits,
+			dash(r.Measurement.Autoload), dash(r.Measurement.Estimator))
 	}
 }
 

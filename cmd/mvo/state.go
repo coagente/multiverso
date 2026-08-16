@@ -6,6 +6,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/ledger"
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // Ledger event types (M0 + M1a + M1e).
@@ -24,7 +25,26 @@ const (
 	evPublishStarted      = "publish.started"
 	evPublishFinished     = "publish.finished"
 	evPruneExecuted       = "prune.executed"
+	// M1e/M2a observational events the M2b explain surface reads for the
+	// CONTROL-PLANE BOUNDS the bracket is allowed to use: the base tree's
+	// collect measurement and the pinned corpus's case count. Both were
+	// produced before any candidate existed, which is the only reason the
+	// scheduler may read them at all (M1f, restated by M2b decision 3b).
+	evBaselineRecorded = "baseline.recorded"
+	evCorpusRecorded   = "corpus.recorded"
 )
+
+// scheduleEvents are M2b's four observational trace events. They carry no
+// payload digests, are covered by the ledger hash chain, are IGNORED BY
+// REPLAY, and reach Decide never — so collecting them here can change no
+// decision, which is the property that lets the scheduler be rewritten
+// without invalidating history.
+var scheduleEvents = map[string]bool{
+	schedule.EventStarted:       true,
+	schedule.EventStep:          true,
+	schedule.EventFinished:      true,
+	schedule.EventOracleSkipped: true,
+}
 
 // policyRec is one recorded policy: the canonical bytes exactly as they
 // were appended, and the digest they were recorded under. Policies are
@@ -77,6 +97,26 @@ type publishFinishRec struct {
 	Intent string
 }
 
+// scheduleEventRec is one raw allocation-trace event: the type and the
+// canonical payload bytes exactly as recorded. The bytes are kept UNPARSED
+// here and decoded by internal/schedule, which owns the shape — the trace is
+// RECORDED EVIDENCE and this view must not become a second, drifting reading
+// of it (M2b decision 17).
+type scheduleEventRec struct {
+	Seq     int64
+	Type    string
+	Payload []byte
+}
+
+// boundRec is one control-plane measurement the bracket may use as a
+// ceiling: `baseline.recorded`'s collected_total or `corpus.recorded`'s case
+// count, each with the intent it was measured for.
+type boundRec struct {
+	Seq    int64
+	Intent string
+	Value  int64
+}
+
 // ledgerState is the typed view of one full ledger scan. Payload digests
 // double as object digests because payloads are the canonical object bytes.
 type ledgerState struct {
@@ -90,6 +130,9 @@ type ledgerState struct {
 	AdmissionStarts   []admissionStartRec      // seq order
 	AdmissionFinishes []admissionFinishRec     // seq order
 	PublishFinishes   []publishFinishRec       // seq order (prune's --older-than input)
+	Schedules         []scheduleEventRec       // seq order — M2b's allocation trace
+	Baselines         []boundRec               // seq order — collected_base per race
+	Corpora           []boundRec               // seq order — pinned corpus cases per race
 }
 
 func loadState(led *ledger.Ledger) (*ledgerState, error) {
@@ -166,6 +209,29 @@ func loadState(led *ledger.Ledger) (*ledgerState, error) {
 			st.PublishFinishes = append(st.PublishFinishes, publishFinishRec{
 				Seq: e.Seq, TS: e.TS, Intent: body.Intent,
 			})
+		case evBaselineRecorded:
+			var body struct {
+				Intent         string `json:"intent"`
+				CollectedTotal int64  `json:"collected_total"`
+			}
+			if err := json.Unmarshal(e.Payload, &body); err != nil {
+				return fmt.Errorf("seq %d: decode baseline.recorded: %w", e.Seq, err)
+			}
+			st.Baselines = append(st.Baselines, boundRec{Seq: e.Seq, Intent: body.Intent, Value: body.CollectedTotal})
+		case evCorpusRecorded:
+			var body struct {
+				Intent string `json:"intent"`
+				Cases  int64  `json:"cases"`
+			}
+			if err := json.Unmarshal(e.Payload, &body); err != nil {
+				return fmt.Errorf("seq %d: decode corpus.recorded: %w", e.Seq, err)
+			}
+			st.Corpora = append(st.Corpora, boundRec{Seq: e.Seq, Intent: body.Intent, Value: body.Cases})
+		}
+		if scheduleEvents[e.Type] {
+			st.Schedules = append(st.Schedules, scheduleEventRec{
+				Seq: e.Seq, Type: e.Type, Payload: append([]byte(nil), e.Payload...),
+			})
 		}
 		// Other event types (race.finished, attestation.recorded,
 		// key.generated, publish.started, prune.executed) carry no state the
@@ -232,6 +298,42 @@ func (st *ledgerState) raceStartBefore(intentDig string, seq int64) int64 {
 		}
 	}
 	return best
+}
+
+// scheduleWindow returns the allocation-trace events recorded inside one
+// race's ledger window (minSeq, maxSeq), in seq order. The window is the
+// same one decision replay uses, because a workspace holds many races and a
+// trace assembled across two of them would describe an allocation nobody
+// made.
+func (st *ledgerState) scheduleWindow(minSeq, maxSeq int64) []schedule.Event {
+	out := make([]schedule.Event, 0, len(st.Schedules))
+	for _, se := range st.Schedules {
+		if se.Seq <= minSeq || (maxSeq > 0 && se.Seq >= maxSeq) {
+			continue
+		}
+		out = append(out, schedule.Event{Type: se.Type, Payload: se.Payload})
+	}
+	return out
+}
+
+// lastBound returns the last control-plane measurement recorded for an
+// intent inside a ledger window, and whether one exists at all. Absence is
+// returned honestly rather than as a zero: a bound of 0 and "no bound was
+// measured" are different facts, and only the second makes the bracket fail
+// open.
+func lastBound(recs []boundRec, intentDig string, minSeq, maxSeq int64) (int64, bool) {
+	var v int64
+	found := false
+	for _, r := range recs {
+		if r.Intent != intentDig || r.Seq <= minSeq {
+			continue
+		}
+		if maxSeq > 0 && r.Seq >= maxSeq {
+			continue
+		}
+		v, found = r.Value, true
+	}
+	return v, found
 }
 
 // admissionStartBefore returns the nearest admission.started event for the

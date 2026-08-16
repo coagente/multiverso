@@ -20,6 +20,7 @@ import (
 	"github.com/coagente/multiverso/internal/oracle"
 	"github.com/coagente/multiverso/internal/policy"
 	"github.com/coagente/multiverso/internal/race"
+	"github.com/coagente/multiverso/internal/schedule"
 	"github.com/coagente/multiverso/internal/workspace"
 )
 
@@ -61,6 +62,10 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	cpus := fs.String("cpus", "", "per-world CPU cap, decimal with at most 3 fractional digits (T1)")
 	pids := fs.Int64("pids", 0, "per-world pids-limit (T1; 0 = uncapped)")
 	allowNetwork := fs.Bool("allow-network", false, "T1 joins the default bridge instead of --network none (NFR-4 opt-out)")
+	scheduleArm := fs.String("schedule", schedule.ScheduleAdaptive,
+		"phase-B arm: adaptive (the M2b scheduler) or fixed (the exhaustive M1 ladder)")
+	collectInert := fs.Bool("collect-inert", false,
+		"also buy decision-inert rungs on worlds that passed every gate, labelled basis=research (M2b decision 11)")
 	if err := parseFlags(fs, rest); err != nil {
 		return err
 	}
@@ -177,6 +182,54 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 			pol.Digest, policy.SchemaShort(pol.Schema))
 	}
 
+	// --- M2b: which phase-B arm, and the one policy shape it refuses -----
+	arm := *scheduleArm
+	switch arm {
+	case schedule.ScheduleAdaptive, schedule.ScheduleFixed:
+	default:
+		return usagef("race: --schedule must be %s or %s (got %q)",
+			schedule.ScheduleAdaptive, schedule.ScheduleFixed, arm)
+	}
+	if *collectInert && arm == schedule.ScheduleFixed {
+		return usagef("race: --collect-inert applies only to --schedule=%s: the exhaustive ladder buys every declared rung already, so there is no inert rung left for it to add",
+			schedule.ScheduleAdaptive)
+	}
+	// VALIDATION RULE 25 (M2b decision 15). Checked at PRE-FLIGHT rather
+	// than at policy load, and the placement is the rule: the same policy is
+	// perfectly valid under the exhaustive ladder, so refusing it at load
+	// would brick a legitimate M1 configuration. Refused BEFORE race.Run,
+	// hence before race.started — the ledger stays untouched.
+	//
+	// `wall_ms_asc` sums cost.wall_ms over a world's COUNTED receipts. Under
+	// exhaustion every world buys the same rungs, so the key is at least
+	// comparable (noise, which is why M1f decision 20 dropped it from the
+	// default). Under adaptive allocation it is WRONG-SIGNED: a world the
+	// scheduler declined to verify has fewer receipts, a smaller sum, and
+	// wins the tiebreak. "The candidate we verified least, wins" is the
+	// study's stopwatch failure rebuilt out of our own scheduler.
+	//
+	// BOTH halves of decision 15's definition are checked, and the second is
+	// not a softening. The definition is "the key's value can change when a
+	// receipt is withheld from a world THAT STILL PASSES EVERY HARD GATE";
+	// withholding a hard-gated receipt makes its metric absent, fails the
+	// gate and drops the world out of the pass set, where no ranking key
+	// compares it. So the danger needs evidence the policy COUNTS but no
+	// hard gate BACKS — a rung named only by a ranking key, an invariant or
+	// require_evidence. Refusing without that second half would refuse every
+	// `--oracle-cmd` race, whose synthesized v0 policy ranks by wall_ms_asc
+	// and whose one counted selector is its one hard gate: M0's own
+	// quickstart, bricked to protect it from an attack its shape makes
+	// impossible.
+	if arm == schedule.ScheduleAdaptive {
+		keys, ungated := pol.AllocationSensitiveKeys(), pol.UngatedEvidence()
+		if len(keys) > 0 && len(ungated) > 0 {
+			return usagef("race: policy %s ranks by %s AND counts evidence no hard gate backs (%s), which cannot be scheduled adaptively (M2b validation rule 25): the key is a function of HOW MUCH EVIDENCE a world bought, and a world may decline that rung, keep its pass, and win the tiebreak by having been verified least.\n"+
+				"  Two outs: remove %s from the policy's ranking, or race the exhaustive M1 ladder with --schedule=%s.",
+				pol.Digest, strings.Join(keys, ","), strings.Join(ungated, ","),
+				strings.Join(keys, ","), schedule.ScheduleFixed)
+		}
+	}
+
 	var cands []race.Candidate
 	if isScript {
 		if cands, err = scriptCandidates(*patchesDir); err != nil {
@@ -251,18 +304,32 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
+	// The allocation trace is written straight to the ledger as canonical
+	// event payloads (M2b decision 17: ONE copy, no CAS artifact that could
+	// disagree with it). The recorder is handed in rather than constructed
+	// inside internal/race so that the package which owns the ledger owns
+	// the append, and so a caller that wants no trace passes nil and changes
+	// no allocation — the scheduler's product is observational.
+	trace := schedule.NewRecorder(func(typ string, payload []byte) error {
+		_, err := ws.Ledger.Append(typ, payload)
+		return err
+	})
+
 	res, err := race.Run(context.Background(), race.Config{
-		Repo:         ws.Root,
-		Ledger:       ws.Ledger,
-		CAS:          ws.CAS,
-		Intent:       intentDig,
-		Adapter:      ad,
-		Candidates:   cands,
-		WorldsDir:    ws.WorldsDir(),
-		Backend:      be,
-		Parallel:     *parallel,
-		KeepWorlds:   *keepWorlds,
-		LegacyOracle: legacy,
+		Repo:          ws.Root,
+		Ledger:        ws.Ledger,
+		CAS:           ws.CAS,
+		Intent:        intentDig,
+		Adapter:       ad,
+		Candidates:    cands,
+		WorldsDir:     ws.WorldsDir(),
+		Backend:       be,
+		Parallel:      *parallel,
+		KeepWorlds:    *keepWorlds,
+		LegacyOracle:  legacy,
+		Schedule:      arm,
+		CollectInert:  *collectInert,
+		ScheduleTrace: trace,
 	})
 	if err != nil {
 		return fmt.Errorf("race: %w", err)

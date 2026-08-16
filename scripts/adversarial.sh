@@ -32,6 +32,7 @@
 #   scripts/adversarial.sh --only 05          # one vector
 #   scripts/adversarial.sh --repeat 9         # coin-flip duels, 9 rounds
 #   scripts/adversarial.sh --json out.json    # also write the report here
+#   scripts/adversarial.sh --arm fixed        # race the M1 exhaustive ladder
 #
 # NO REAL AGENT CLI IS EVER INVOKED. Only `--agent script` is used, and the
 # harness front-loads PATH with poisoned stubs (below) so that any code path
@@ -48,9 +49,17 @@ REPEAT=5
 ONLY=""
 RECORD=0
 JSON_OUT=""
+# ARM selects phase B's arm for every race in the corpus (M2b). The default
+# is the shipped one; `--arm fixed` races the exhaustive M1 ladder instead,
+# which is what makes the corpus a BUDGET-MATCHED COMPARISON rather than a
+# single-arm regression suite. A fixed-arm run is expected to DRIFT from the
+# recorded baseline wherever a vector attacks the allocation — that drift is
+# the measurement, not a failure.
+ARM=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) RECORD=1; shift ;;
+    --arm) ARM="${2:?--arm needs adaptive or fixed}"; shift 2 ;;
     --only) ONLY="${2:?--only needs a vector prefix}"; shift 2 ;;
     --repeat) REPEAT="${2:?--repeat needs a count}"; shift 2 ;;
     --json) JSON_OUT="${2:?--json needs a path}"; shift 2 ;;
@@ -127,6 +136,17 @@ policy_for() {
   [ -f "$f" ] && tr -d '[:space:]' < "$f" || true
 }
 
+# budget_for VECTOR — the ORACLE BUDGET sidecar's contents, or "" for the
+# unbounded default (M2b decision 12: 0 ⇒ unbounded ⇒ the M1 exhaustive
+# ladder, which is what vectors 01-19 have always been raced under and why
+# their rows do not move). A vector that attacks the ALLOCATION needs a
+# budget that binds, and a budget is an intent field, so it rides on a
+# sidecar exactly as the policy does.
+budget_for() {
+  local f="$VECTORS/$1.budget"
+  [ -f "$f" ] && tr -d '[:space:]' < "$f" || true
+}
+
 # worldof REPO INTENT PATCHFILE — the world digest whose captured patch is
 # this file's bytes (accept.sh's identification technique).
 worldof() {
@@ -168,14 +188,17 @@ sys.exit(0 if ok else 1)
 # hypothesis that is the live path for the vectors that attack those rungs.
 # The reason lands in ABORTFILE, which is empty when the race ran.
 race_once() {
-  local repo="$1" pdir="$2" n="$3" title="$4" abortfile="$5" intent
+  local repo="$1" pdir="$2" n="$3" title="$4" abortfile="$5" budget="${6:-}" intent
   : > "$abortfile"
-  intent="$("$MVO" intent new --dir "$repo" --title "$title" --budget-candidates "$n")"
+  local iargs=(intent new --dir "$repo" --title "$title" --budget-candidates "$n")
+  [ -n "$budget" ] && iargs+=(--budget-oracle-ms "$budget")
+  intent="$("$MVO" "${iargs[@]}")"
   [ -n "$intent" ] || die "intent new printed no digest"
   local before after
   before="$(sqlite3 "$repo/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
-  if ! "$MVO" race "$intent" --dir "$repo" --agent script --patches "$pdir" \
-        >"$abortfile.raw" 2>&1; then
+  local rargs=(race "$intent" --dir "$repo" --agent script --patches "$pdir")
+  [ -n "$ARM" ] && rargs+=(--schedule="$ARM")
+  if ! "$MVO" "${rargs[@]}" >"$abortfile.raw" 2>&1; then
     after="$(sqlite3 "$repo/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
     [ "$before" = "$after" ] \
       || die "a refused race wrote $((after - before)) ledger event(s): a pre-flight abort must leave the ledger untouched"
@@ -211,7 +234,7 @@ solo() {
   mkdir -p "$pdir"
   cp "$VECTORS/$vec.patch" "$pdir/01-candidate.patch"
   mkrepo "$repo" "$policy"
-  intent="$(race_once "$repo" "$pdir" 1 "solo: $vec" "$WORK/$vec/solo.abort")"
+  intent="$(race_once "$repo" "$pdir" 1 "solo: $vec" "$WORK/$vec/solo.abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$vec/solo.abort" ]; then
     python3 "$CORPUS/report.py" solo-aborted \
       --vector "$vec" --policy "${policy:-default}" \
@@ -260,7 +283,7 @@ duel_round() {
   cp "$VECTORS/$vec.patch" "$pdir/01-cheat.patch"
   cp "$HONEST" "$pdir/02-honest.patch"
   mkrepo "$repo" "$policy"
-  intent="$(race_once "$repo" "$pdir" 2 "duel: $vec" "$WORK/$tag/abort")"
+  intent="$(race_once "$repo" "$pdir" 2 "duel: $vec" "$WORK/$tag/abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$tag/abort" ]; then
     python3 "$CORPUS/report.py" duel-aborted \
       --vector "$vec" --round "$round" --policy "${policy:-default}" \

@@ -18,6 +18,8 @@ func cmdIntentNew(args []string, stdout, stderr io.Writer) error {
 	desc := fs.String("desc", "", "intent description")
 	budgetCandidates := fs.Int("budget-candidates", 2, "max candidate worlds")
 	budgetWallMS := fs.Int64("budget-wall-ms", 600000, "max wall-clock budget in milliseconds")
+	budgetOracleMS := fs.Int64("budget-oracle-ms", 0,
+		"additive oracle spend the adaptive scheduler may allocate, in milliseconds (0 = unbounded = the exhaustive M1 ladder)")
 	policyRef := fs.String("policy", "", "pin this policy (name or mv0: digest) instead of the workspace default")
 	oracleCmd := fs.String("oracle-cmd", "", "pin a synthesized command-oracle policy running CMD as the suite gate")
 	if err := parseFlags(fs, args); err != nil {
@@ -28,6 +30,13 @@ func cmdIntentNew(args []string, stdout, stderr io.Writer) error {
 	}
 	if *budgetCandidates < 1 || *budgetWallMS < 1 {
 		return usagef("intent new: budgets must be positive")
+	}
+	// max_oracle_ms is the one budget whose ZERO is meaningful rather than
+	// invalid (M2b decision 12): 0 ⇒ unbounded ⇒ the exhaustive M1 ladder,
+	// which is what every intent recorded before M2b decodes to. A negative
+	// value is not a smaller budget, it is a typo.
+	if *budgetOracleMS < 0 {
+		return usagef("intent new: --budget-oracle-ms must not be negative (0 = unbounded)")
 	}
 	if *policyRef != "" && *oracleCmd != "" {
 		return usagef("intent new: --policy and --oracle-cmd are mutually exclusive: each pins a different policy")
@@ -69,10 +78,14 @@ func cmdIntentNew(args []string, stdout, stderr io.Writer) error {
 	}
 
 	in := object.Intent{
-		Schema:    object.SchemaIntent,
-		Base:      object.Base{Commit: commit, Tree: tree},
-		Spec:      object.Spec{Title: *title, Description: *desc},
-		Budget:    object.Budget{MaxCandidates: *budgetCandidates, MaxWallMS: *budgetWallMS},
+		Schema: object.SchemaIntent,
+		Base:   object.Base{Commit: commit, Tree: tree},
+		Spec:   object.Spec{Title: *title, Description: *desc},
+		Budget: object.Budget{
+			MaxCandidates: *budgetCandidates,
+			MaxWallMS:     *budgetWallMS,
+			MaxOracleMS:   *budgetOracleMS,
+		},
 		Policy:    polDig,
 		CreatedAt: nowRFC3339(),
 	}

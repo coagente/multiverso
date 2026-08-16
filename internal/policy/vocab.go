@@ -110,6 +110,135 @@ const (
 	KeyWorldDigestAsc  = "world_digest_asc"
 )
 
+// allocationSensitive classifies every ranking key by ONE question (M2b
+// decision 15): can this key's value change when a receipt is WITHHELD from
+// a world that still passes every hard gate?
+//
+// It matters because withholding monotonicity (M2b decision 4) protects the
+// PASS SET and not the RANKING. wall_ms_asc is the only sensitive key in
+// today's vocabulary, and under adaptive allocation it is not merely noisy
+// but WRONG-SIGNED: keyValue sums Cost.WallMS over a world's counted
+// receipts, so a world the scheduler declined to verify has fewer receipts,
+// a smaller sum, and WINS the tiebreak. "The candidate we verified least,
+// wins" is the study's stopwatch failure rebuilt out of our own scheduler.
+//
+// tests_passed_desc and coverage_desc read ONE counted receipt's metric;
+// patch_size_asc and cost_asc read the world object, which no purchase
+// touches; gate_pass and world_digest_asc are structural. The table is a
+// TABLE, checked by a totality test over the key vocabulary, so a future key
+// must be classified before it ships.
+var allocationSensitive = map[string]bool{
+	KeyGatePass:        false,
+	KeyTestsPassedDesc: false,
+	KeyCoverageDesc:    false,
+	KeyWallMSAsc:       true,
+	KeyCostAsc:         false,
+	KeyPatchSizeAsc:    false,
+	KeyWorldDigestAsc:  false,
+}
+
+// AllocationSensitive reports whether a ranking key is allocation-sensitive
+// and whether it is CLASSIFIED at all. An unclassified key is not "safe": it
+// is a key nobody has thought about, and the caller must treat it as
+// sensitive.
+func AllocationSensitive(key string) (sensitive, classified bool) {
+	s, ok := allocationSensitive[key]
+	return s, ok
+}
+
+// AllocationSensitiveKeys returns the compiled policy's effective ranking
+// keys that cannot be scheduled adaptively, in ranking order. A no-op key —
+// an unknown name in a v0 policy, which M0's rankLess ignored and the
+// compiled key therefore ignores too — is not listed: a key that orders
+// nothing cannot be reordered by an allocation.
+//
+// The refusal itself belongs at pre-flight and not at load (M2b decision
+// 15): the same policy is perfectly valid under the exhaustive ladder, and
+// refusing it at load would brick a legitimate M1 configuration.
+func (p Policy) AllocationSensitiveKeys() []string {
+	var out []string
+	for _, k := range p.Keys {
+		if k.NoOp {
+			continue
+		}
+		sensitive, classified := AllocationSensitive(k.Name)
+		if sensitive || !classified {
+			out = append(out, k.Name)
+		}
+	}
+	return out
+}
+
+// UngatedEvidence returns the declared oracle names whose receipts this
+// policy COUNTS but no hard gate reads, name-sorted.
+//
+// It is the second half of validation rule 25, and without it the rule
+// refuses far more than decision 15 defines. The definition is precise: a key
+// is allocation-sensitive iff its value can change when a receipt is withheld
+// FROM A WORLD THAT STILL PASSES EVERY HARD GATE. Withholding a receipt that
+// a hard gate's selector counts makes that gate's required metric absent, the
+// gate fails, and the world leaves the pass set — so `wall_ms_asc` never
+// compares it. That is M2a's purchase law doing the work again, and it means
+// a policy whose every counted selector is backed by a hard gate cannot have
+// its ranking steered by an allocation: every world still in the pass set
+// holds exactly the same rungs.
+//
+// The steerable shape is the other one — an oracle counted because a RANKING
+// KEY, an INVARIANT or REQUIRE_EVIDENCE names it while no hard gate does. A
+// world can decline that rung, keep its pass, and carry a smaller wall_ms sum
+// than the sibling that bought it.
+//
+// This is why `mvo race --oracle-cmd` still works: the v0 command policy
+// ranks by wall_ms_asc, and its one counted selector is its one hard gate.
+// Refusing it would have bricked M0's own quickstart to protect it from an
+// attack its shape makes impossible.
+func (p Policy) UngatedEvidence() []string {
+	gated := make(map[Selector]bool, len(p.Gates))
+	for _, g := range p.Gates {
+		gated[g.Sel] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(sel Selector) {
+		if gated[sel] {
+			return
+		}
+		name := p.OracleNameFor(sel)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	for _, k := range p.Keys {
+		if !k.NoOp && k.Metric != "" {
+			add(k.Sel)
+		}
+	}
+	for _, req := range p.Esc.RequireEvidence {
+		add(req.Sel)
+	}
+	for _, inv := range p.Invariants {
+		for _, role := range inv.RoleNames() {
+			add(inv.Roles[role])
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// OracleNameFor resolves a selector back to the declared instance name it
+// came from, or "" when the policy declares none (the v0 dialect selects by
+// family and declares no instances at all).
+func (p Policy) OracleNameFor(sel Selector) string {
+	for _, o := range p.Oracles {
+		if (Selector{ID: o.Kind, Config: o.Config}) == sel {
+			return o.Name
+		}
+	}
+	return ""
+}
+
 // Metric names (Receipt.Result.Metrics keys, EP-2). Integers only.
 const (
 	MetricCollectedTotal      = "collected_total"

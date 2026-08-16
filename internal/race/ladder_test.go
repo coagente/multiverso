@@ -112,6 +112,13 @@ func ladderPolicy(python, spareMarker string) object.PolicyV1 {
 
 // seedIntentV1 stores a v1 policy and an intent naming it.
 func seedIntentV1(t *testing.T, store *cas.Store, repo string, pol object.PolicyV1, maxCandidates int) string {
+	return seedIntentBudget(t, store, repo, pol, maxCandidates, 0)
+}
+
+// seedIntentBudget is seedIntentV1 with M2b's oracle budget pinned. 0 is
+// unbounded, which is what every pre-M2b intent decodes to (decision 12).
+func seedIntentBudget(t *testing.T, store *cas.Store, repo string, pol object.PolicyV1,
+	maxCandidates int, maxOracleMS int64) string {
 	t.Helper()
 	commit, tree, err := gitx.Head(repo)
 	if err != nil {
@@ -131,7 +138,7 @@ func seedIntentV1(t *testing.T, store *cas.Store, repo string, pol object.Policy
 		Schema:    object.SchemaIntent,
 		Base:      object.Base{Commit: commit, Tree: tree},
 		Spec:      object.Spec{Title: "fix x", Description: "make x.txt say fixed"},
-		Budget:    object.Budget{MaxCandidates: maxCandidates, MaxWallMS: 600000},
+		Budget:    object.Budget{MaxCandidates: maxCandidates, MaxWallMS: 600000, MaxOracleMS: maxOracleMS},
 		Policy:    polDig,
 		CreatedAt: fixedTime,
 	}

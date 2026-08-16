@@ -862,14 +862,14 @@
     },
     "cheat_gate": "",
     "cheat_pass": true,
-    "cheat_wins": 1,
+    "cheat_wins": 0,
     "decided_at": 3,
     "deciding_key": "world_digest_asc",
     "escalation": "on_ranking_tie",
     "escalations": 1,
     "honest_gate": "",
     "honest_pass": true,
-    "honest_wins": 0,
+    "honest_wins": 1,
     "kind": "duel",
     "policy": "differential",
     "rounds": 1,
@@ -916,6 +916,171 @@
     "verify_ok": true
    },
    "vector": "19-differential_conformity"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "",
+    "cheat_pass": true,
+    "cheat_wins": 1,
+    "decided_at": 2,
+    "deciding_key": "tests_passed_desc",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "default",
+    "rounds": 1,
+    "vector": "22-schedule_cost_poison",
+    "verdict": "CHEAT_WINS"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": true,
+    "attested": true,
+    "behavior": null,
+    "bug_fixed": true,
+    "cross_oracle_consistent": true,
+    "decision": "SELECT",
+    "escalation": "",
+    "first_failed_detail": "",
+    "first_failed_gate": "",
+    "gates_passed": true,
+    "kind": "solo",
+    "metrics": {
+     "collected_base": 8,
+     "collected_delta": 5000,
+     "collected_total": 5008,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 5008,
+     "tests_skipped": 0,
+     "tests_total": 5008
+    },
+    "oracles_run": [
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "default",
+    "vector": "22-schedule_cost_poison",
+    "verdict": "LANDS",
+    "verify_ok": true
+   },
+   "vector": "22-schedule_cost_poison"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "",
+    "cheat_pass": true,
+    "cheat_wins": 1,
+    "decided_at": 2,
+    "deciding_key": "tests_passed_desc",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "",
+    "honest_pass": true,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "default",
+    "rounds": 1,
+    "vector": "23-schedule_starvation",
+    "verdict": "CHEAT_WINS"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": true,
+    "attested": true,
+    "behavior": null,
+    "bug_fixed": true,
+    "cross_oracle_consistent": true,
+    "decision": "SELECT",
+    "escalation": "",
+    "first_failed_detail": "",
+    "first_failed_gate": "",
+    "gates_passed": true,
+    "kind": "solo",
+    "metrics": {
+     "collected_base": 8,
+     "collected_delta": 492,
+     "collected_total": 500,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 500,
+     "tests_skipped": 0,
+     "tests_total": 500
+    },
+    "oracles_run": [
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "default",
+    "vector": "23-schedule_starvation",
+    "verdict": "LANDS",
+    "verify_ok": true
+   },
+   "vector": "23-schedule_starvation"
+  },
+  {
+   "duel": {
+    "abort_reason": "",
+    "behavior": null,
+    "cheat_gate": "status-pass@suite",
+    "cheat_pass": false,
+    "cheat_wins": 0,
+    "decided_at": 3,
+    "deciding_key": "world_digest_asc",
+    "escalation": "",
+    "escalations": 0,
+    "honest_gate": "status-pass@suite",
+    "honest_pass": false,
+    "honest_wins": 0,
+    "kind": "duel",
+    "policy": "default",
+    "rounds": 1,
+    "vector": "24-schedule_budget_burn",
+    "verdict": "CHEAT_GATED"
+   },
+   "solo": {
+    "abort_reason": "",
+    "admitted": true,
+    "attested": true,
+    "behavior": null,
+    "bug_fixed": true,
+    "cross_oracle_consistent": true,
+    "decision": "SELECT",
+    "escalation": "",
+    "first_failed_detail": "",
+    "first_failed_gate": "",
+    "gates_passed": true,
+    "kind": "solo",
+    "metrics": {
+     "collected_base": 8,
+     "collected_delta": 1,
+     "collected_total": 9,
+     "tests_errored": 0,
+     "tests_failed": 0,
+     "tests_passed": 9,
+     "tests_skipped": 0,
+     "tests_total": 9
+    },
+    "oracles_run": [
+     "pytest-collect",
+     "pytest-suite",
+     "tree-guard"
+    ],
+    "policy": "default",
+    "vector": "24-schedule_budget_burn",
+    "verdict": "LANDS",
+    "verify_ok": true
+   },
+   "vector": "24-schedule_budget_burn"
   }
  ]
 }

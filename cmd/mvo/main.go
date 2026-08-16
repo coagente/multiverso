@@ -130,10 +130,19 @@ commands:
   policy use <name>                 install .multiverso/policies/<name>.json as the default
   intent new --title T [--desc D]   record an intent; prints its digest
              [--budget-candidates N] [--budget-wall-ms MS]
+             [--budget-oracle-ms MS]  additive oracle spend the M2b scheduler may
+                                      allocate; 0 (the default) = unbounded = the
+                                      exhaustive M1 ladder
              [--policy NAME|DIGEST | --oracle-cmd CMD]
   race <intent-digest> [--agent script|claude-code|codex]
        [--oracle-cmd CMD]           required with a policy/v0 intent, refused with policy/v1
        [--parallel N] [--exec T0|T1] [--keep-worlds]
+       [--schedule adaptive|fixed]  phase-B arm: the M2b adaptive scheduler
+                                    (default) or the exhaustive M1 ladder. A
+                                    policy ranking by wall_ms_asc is refused
+                                    under adaptive (validation rule 25)
+       [--collect-inert]            also buy decision-inert rungs on worlds that
+                                    passed every gate, labelled basis=research
        script (default):  --patches DIR
        claude-code|codex: [--prompt TEXT | --prompt-file P] [--model NAME[,NAME...]]
                           [--candidates N] [--max-usd USD] [--max-turns N]
@@ -141,9 +150,15 @@ commands:
        --exec T1:         --exec-image REF [--memory-mb N] [--cpus DEC]
                           [--pids N] [--allow-network]
   worlds <intent-digest>            table of worlds: digest, outcome, gate, wall_ms, tier
-  explain <intent-digest> [--json] [--diffs N]
+  explain <intent-digest> [--json] [--diffs N] [--schedule]
                                     render the decision: gates, why the winner
                                     won key by key, evidence, escalation
+                                    --schedule appends the recorded allocation
+                                    trace — what the scheduler bought, what it
+                                    considered and DECLINED and why, the cost
+                                    model it allocated against, and evidence
+                                    waste. Rows are rendered, never re-scored;
+                                    a race with no trace says so
   guard --base <rev|tree> [--tree <rev|tree>] [--policy NAME|DIGEST] [--json]
                                     compare two trees under a policy's protected and
                                     harness path sets; exit 1 on any violation. Writes

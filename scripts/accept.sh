@@ -297,6 +297,11 @@ cp "$REPO/policies/rank-two-keys.json" "$REPO/policies/tie-escalate.json" \
   || fail "policy use rank-two-keys did not install the v1 policy"
 INTENT5="$("$MVO" intent new --dir "$REPO" --title "rank by second key" --desc "two passing candidates")"
 [ -n "$INTENT5" ] || fail "mvo intent new (ranking intent) printed no digest"
+# Raced under the ADAPTIVE arm despite ranking by wall_ms_asc, and that is
+# validation rule 25 under test rather than an oversight: every selector
+# rank-two-keys counts is backed by a hard gate, so a world that declines a
+# rung leaves the pass set and the key never compares it. Step 5h races the
+# shape where that is NOT true and asserts the refusal.
 "$MVO" race "$INTENT5" --dir "$REPO" --agent script --patches "$REPO/patches-rank"
 PATCH_C_KEY="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO/patches-rank/patch-c.patch")"
 WORLD_C="$(sqlite3 "$REPO/.multiverso/ledger.db" \
@@ -1058,9 +1063,24 @@ for name, k in kinds.items():
         assert ("n=%d" % k["measurement_n"]) in k["measurement_note"], k
     else:
         measured += 1
-        assert k["measurement"]["n"] >= 3, k
-        assert k["measurement_note"] == "", k
-        assert k["measurement"]["units_min"] < k["measurement"]["units_max"], k
+        m = k["measurement"]
+        assert m["n"] >= 3, k
+        # TWO ESTIMATORS, TWO CONTRACTS, and the difference is exactly what
+        # was measured. Theil-Sen needs two samples with distinct unit counts
+        # and reports a slope. A population whose unit count never varied —
+        # which is EVERY pytest population on a single-repo workspace, since
+        # the unit is the repository test count — measures a FIXED cost and
+        # no slope at all: the median wall time is a real measurement and
+        # the missing coefficient is stated rather than printed as a zero.
+        if m["estimator"] == "median-fixed":
+            assert m["units_min"] == m["units_max"], k
+            assert m["per_unit_ms"] == 0, k
+            assert "units do not vary" in k["measurement_note"], k
+            assert "fixed cost only" in k["measurement_note"], k
+        else:
+            assert m["estimator"] == "theil-sen", k
+            assert k["measurement_note"] == "", k
+            assert m["units_min"] < m["units_max"], k
 # The cohort rung is the one M2b needs a barrier for, and it must say so.
 assert kinds["corpus-differential"]["stage"] == "cohort", kinds["corpus-differential"]
 assert kinds["corpus-differential"]["discriminates"] == "partition", kinds["corpus-differential"]
@@ -1069,13 +1089,52 @@ print("oracle menu ok (%d of %d kinds measured in this workspace)" % (measured, 
 # A kind this workspace never ran must be unmeasured, with its count. This
 # is the negative half: the command has to be capable of saying "I do not
 # know" about something.
-"$MVO" oracles --dir "$REPO" --json | python3 -c '
-import json, sys
+#
+# WHICH kinds those are is a property of THIS MACHINE, not of the code, and
+# hard-coding the list made the assertion environment-dependent: steps 3v and
+# 3w race the mutation and property ladders whenever their toolchains are
+# importable, so on a machine with hypothesis installed the properties rung
+# really was bought and n == 1 is the TRUE answer. The assertion that
+# survives both environments is the rule itself — below minSamples there is
+# no fit, and the count reported is the real one — plus n == 0 for exactly
+# the rungs whose toolchain is missing here.
+NEVER_RAN=""
+[ -z "$MUT_TOOL" ] && NEVER_RAN="$NEVER_RAN mutation-diff"
+[ -z "$HAS_HYP" ] && NEVER_RAN="$NEVER_RAN hypothesis-properties"
+"$MVO" oracles --dir "$REPO" --json | NEVER_RAN="$NEVER_RAN" python3 -c '
+import json, os, sys
 kinds = {k["kind"]: k for k in json.load(sys.stdin)["kinds"]}
-for absent in ("mutation-diff", "hypothesis-properties"):
+for absent in os.environ["NEVER_RAN"].split():
     k = kinds[absent]
     assert k["measurement"] is None, (absent, k)
     assert k["measurement_n"] == 0, (absent, k)
+    assert k["measurement_note"] == "no local measurement (n=0, need 3)", (absent, k)
+# The rule, over every kind, and it is one rule in both directions: a
+# coefficient exists only where one could be fitted, and where none could be
+# the command says so AND reports the sample count it actually has. Below the
+# floor the note names the floor; at or above it, the note names the reason
+# the samples could not produce a slope (all-equal unit counts, say). Never a
+# number, never a silence.
+for name, k in kinds.items():
+    n = k["measurement_n"]
+    if k["measurement"] is None:
+        assert k["measurement_note"].startswith("no local measurement (n=%d" % n), (name, k)
+        if n < 3:
+            assert k["measurement_note"] == ("no local measurement (n=%d, need 3)" % n), (name, k)
+    else:
+        assert n >= 3, (name, k)
+        if k["measurement"]["estimator"] == "median-fixed":
+            # A fixed cost measured n times with no slope to measure. The
+            # note is not silence and it is not a number nobody measured: it
+            # names which half of the model exists and which does not.
+            assert "units do not vary" in k["measurement_note"], (name, k)
+            assert k["measurement"]["per_unit_ms"] == 0, (name, k)
+        else:
+            assert k["measurement_note"] == "", (name, k)
+# And the command has to be CAPABLE of saying "I do not know": at least one
+# kind on the menu must report n == 0 and render it as such.
+unbought = [name for name, k in kinds.items() if k["measurement_n"] == 0]
+assert unbought, "every kind on the menu reports a sample; the n=0 rendering is untested here"
 ' || fail "mvo oracles claims a measurement for a rung this workspace never bought"
 # The menu fixture policy declares every rung, which is what M2b allocates
 # over. It must validate, and `--policy` must attribute its instances.
@@ -1135,7 +1194,7 @@ INTENT8="$("$MVO" intent new --dir "$REPO" --title "legacy policy" --policy lega
 grep -q 'is policy/v0' "$WORK/pin.err" || fail "pinning a v0 policy printed no warning: $(cat "$WORK/pin.err")"
 grep -q 'M1e decision 18' "$WORK/pin.err" || fail "the v0 warning does not cite the decision: $(cat "$WORK/pin.err")"
 "$MVO" race "$INTENT8" --dir "$REPO" --agent script --patches "$REPO/patches" \
-  --oracle-cmd "python3 -m pytest -q"
+  --oracle-cmd "python3 -m pytest -q" --schedule=fixed
 EXPLAIN8="$("$MVO" explain "$INTENT8" --dir "$REPO")"
 echo "$EXPLAIN8" | grep -q '^type: *SELECT$' || fail "legacy-v0 decision is not SELECT:
 $EXPLAIN8"
@@ -1153,6 +1212,576 @@ $(cat "$WORK/v1flag.out")"
 grep -q -- '--oracle-cmd is not permitted with policy' "$WORK/v1flag.out" \
   || fail "the decision-18 refusal is missing:
 $(cat "$WORK/v1flag.out")"
+
+# =====================================================================
+# M2b — THE ADAPTIVE SCHEDULER (docs/design/M2b-adaptive-scheduler.md §11).
+#
+# Seven steps, and none of them changes the shipped default. The block's
+# claim is narrow and worth pinning exactly: the scheduler decides WHAT
+# EVIDENCE TO BUY and `Decide` decides what the evidence means, so under an
+# unbounded budget the two arms are indistinguishable (5b), the trace is
+# recorded evidence rather than a recomputation (5a, 5d), a race that runs
+# out of money says so instead of blaming the candidates (5e), the spend
+# that influenced nothing is computable (5f), and none of it leaks into an
+# agent's prompt (5g). 5h is validation rule 25.
+# =====================================================================
+
+# --- 5a. the trace exists and is complete. Every phase-B receipt is
+# preceded by a schedule.step naming it as CHOSEN, every step's considered
+# set is non-empty, schedule.started and schedule.finished bracket them,
+# and `mvo audit` is OK with the new events present. ---
+INTENT_SCHED="$("$MVO" intent new --dir "$REPO" --title "m2b: adaptive trace")"
+[ -n "$INTENT_SCHED" ] || fail "mvo intent new (m2b trace intent) printed no digest"
+"$MVO" race "$INTENT_SCHED" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  || fail "the adaptive race failed"
+DEFAULT_POL_JSON="$("$MVO" policy show default --dir "$REPO" --json)"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT seq || '|' || type || '|' || cast(payload AS text) FROM events ORDER BY seq;" \
+  | INTENT="$INTENT_SCHED" POLJSON="$DEFAULT_POL_JSON" python3 -c '
+import json, os, sys
+
+intent = os.environ["INTENT"]
+pol = json.loads(os.environ["POLJSON"])
+kind_of = {o["name"]: o["kind"] for o in pol["oracles"]}
+
+rows = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    seq, typ, payload = line.split("|", 2)
+    rows.append((int(seq), typ, json.loads(payload)))
+
+# The race WINDOW: this intent alone. A trace assembled across two races
+# would describe an allocation nobody made.
+lo = max(s for s, t, p in rows if t == "race.started" and p.get("intent") == intent)
+hi = min((s for s, t, p in rows if t == "race.finished" and s > lo), default=10**9)
+win = [(s, t, p) for s, t, p in rows if lo < s < hi]
+
+started  = [(s, p) for s, t, p in win if t == "schedule.started"]
+steps    = [(s, p) for s, t, p in win if t == "schedule.step"]
+finished = [(s, p) for s, t, p in win if t == "schedule.finished"]
+receipts = [(s, p) for s, t, p in win if t == "receipt.recorded"]
+
+assert len(started) == 1, ("schedule.started count", len(started))
+assert len(finished) == 1, ("schedule.finished count", len(finished))
+assert steps, "the race recorded no schedule.step"
+assert receipts, "the race recorded no receipts"
+assert started[0][0] < min(s for s, _ in steps), "schedule.started does not precede the steps"
+assert max(s for s, _ in steps) < finished[0][0], "schedule.finished does not follow the steps"
+
+# schedule.started carries what makes the allocation auditable after the
+# fit moves: the budget, the arm, the constants and the cost-table snapshot.
+st = started[0][1]
+assert st["schedule"] == "adaptive", st
+assert st["budget"]["max_oracle_ms"] == 0, st
+assert st["constants"]["executor_bp"], st
+assert st["constants"]["redundancy_bp"], st
+assert isinstance(st["cost_table"], list), st
+
+# Every step considered something, and the considered set holds at most one
+# purchase per world (decision 2s frontier).
+for seq, step in steps:
+    assert step["considered"], ("empty considered set at step", step["step"])
+    seen = set()
+    for row in step["considered"]:
+        assert row["world"] not in seen, ("two frontier rows for one world", row["world"])
+        seen.add(row["world"])
+
+# EVERY receipt is preceded by a step that named it as chosen, and the
+# chosen set and the receipt set agree exactly, per (world, kind).
+chosen, chosen_seq = [], {}
+for seq, step in steps:
+    for c in step["chosen"]:
+        key = (c["world"], kind_of.get(c["oracle"], c["oracle"]))
+        chosen.append(key)
+        chosen_seq.setdefault(key, seq)
+bought = [(p["world"], p["oracle"]["id"]) for _, p in receipts]
+assert sorted(chosen) == sorted(bought), ("chosen != bought", sorted(chosen), sorted(bought))
+for seq, p in receipts:
+    key = (p["world"], p["oracle"]["id"])
+    assert chosen_seq[key] < seq, ("receipt recorded before it was chosen", key)
+
+fin = finished[0][1]
+assert fin["stop"] in ("S-ranking", "S-frontier", "S-budget", "S-empty"), fin
+assert fin["violation"] == "", ("the purchase-law assertion fired", fin["violation"])
+assert fin["bought"] == len(receipts), (fin["bought"], len(receipts))
+print("m2b 5a: %d steps, %d receipts, stop %s" % (len(steps), len(receipts), fin["stop"]))
+' || fail "5a: the allocation trace is missing, unbracketed, or does not name what was bought"
+"$MVO" audit --dir "$REPO" | grep -q '^OK:' \
+  || fail "5a: mvo audit is not OK with the schedule.* events present"
+
+# --- 5b. the null case is null (decision 13). Same intent, same patches,
+# unbounded budget, raced BOTH ways: the two arms buy the same rungs in the
+# same worlds and reach the same decision with the same rationale.
+#
+# "Byte-identical" is asserted MODULO WORLD DIGEST and nothing else, and the
+# reason is a fact about the artifact rather than a weakening: a world binds
+# the race that created it, so two races of one intent mint different world
+# digests for identical trees. The comparison therefore rewrites each
+# digest to the patch that produced it — content-addressed, stable across
+# races — and then demands equality byte for byte. ---
+INTENT_NULL="$("$MVO" intent new --dir "$REPO" --title "m2b: null case")"
+[ -n "$INTENT_NULL" ] || fail "mvo intent new (m2b null intent) printed no digest"
+"$MVO" race "$INTENT_NULL" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed \
+  || fail "5b: the fixed-arm race failed"
+NULL_FIXED="$("$MVO" explain "$INTENT_NULL" --dir "$REPO" --json)"
+"$MVO" race "$INTENT_NULL" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=adaptive \
+  || fail "5b: the adaptive-arm race failed"
+NULL_ADAPT="$("$MVO" explain "$INTENT_NULL" --dir "$REPO" --json)"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT type || '|' || payload_dig || '|' || cast(payload AS text) FROM events WHERE type='world.created' ORDER BY seq;" \
+  | FIXED="$NULL_FIXED" ADAPT="$NULL_ADAPT" INTENT="$INTENT_NULL" python3 -c '
+import json, os, sys
+
+intent = os.environ["INTENT"]
+worlds = {}   # world digest -> the patch CAS key that produced it
+for line in sys.stdin:
+    typ, dig, payload = line.rstrip("\n").split("|", 2)
+    p = json.loads(payload)
+    if p.get("intent") == intent:
+        worlds[dig] = p["patch"]
+
+def label(text):
+    # Rewrite every world digest to its patch CONTENT HASH: the identity
+    # that survives being raced twice. Everything else in the projection is
+    # a gate result, a metric or a key value, none of which may move.
+    for dig, patch in worlds.items():
+        text = text.replace(dig, "world<%s>" % patch)
+    return text
+
+def projection(doc):
+    # Everything that is a JUDGEMENT, and nothing that is a stopwatch. The
+    # receipt digests and duration_ms of two runs of the same suite differ
+    # by construction and say nothing about allocation; the gate results,
+    # the key VALUES, the comparison walk and the rationale are what the two
+    # arms must agree on, and the receipt SETS are compared separately below
+    # against the ledger itself.
+    return {
+        "type": doc["type"],
+        "rationale": doc["rationale"],
+        "escalation": doc.get("escalation", {}),
+        "candidates": [{
+            "world": c["world"], "pass": c["pass"], "outcome": c["outcome"],
+            "rank": c["rank"], "ordinal": c["ordinal"],
+            "gates": [(g["label"], g["result"], g["detail"]) for g in c["gates"]],
+            "keys": [(k["key"], k["known"], k["text"]) for k in c["keys"]
+                     if k["key"] != "wall_ms_asc"],
+        } for c in doc["candidates"]],
+        "trace": doc.get("trace", []),
+    }
+
+fixed, adapt = json.loads(os.environ["FIXED"]), json.loads(os.environ["ADAPT"])
+a = label(json.dumps(projection(fixed), sort_keys=True))
+b = label(json.dumps(projection(adapt), sort_keys=True))
+assert a == b, "the two arms do not agree:\nfixed:    %s\nadaptive: %s" % (a[:600], b[:600])
+assert fixed["type"] == "SELECT", fixed["type"]
+print("m2b 5b: the arms are indistinguishable under an unbounded budget (%s)" % fixed["type"])
+' || fail "5b: the adaptive scheduler is not inert under an unbounded budget"
+
+# The receipt SETS must match too, world by world and rung by rung — the
+# explain report is a view, and this is the evidence itself.
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT json_object('seq', seq, 'type', type, 'dig', coalesce(payload_dig,''), 'payload', cast(payload AS text))
+     FROM events WHERE type IN ('race.started','world.created','receipt.recorded') ORDER BY seq;" \
+  | INTENT="$INTENT_NULL" python3 -c '
+import json, os, sys
+
+# One JSON object per row rather than a delimiter-joined line: a payload is
+# arbitrary bytes and any separator we picked could appear inside one.
+intent = os.environ["INTENT"]
+rows = []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    rows.append((int(r["seq"]), r["type"], r["dig"], json.loads(r["payload"])))
+
+starts = [s for s, t, d, p in rows if t == "race.started" and p.get("intent") == intent]
+assert len(starts) == 2, ("want two races of the null intent", len(starts))
+patch_of = {d: p["patch"] for s, t, d, p in rows if t == "world.created" and p.get("intent") == intent}
+
+def rungs(lo, hi):
+    out = []
+    for s, t, d, p in rows:
+        if t != "receipt.recorded" or not (lo < s < hi):
+            continue
+        out.append((patch_of[p["world"]], p["oracle"]["id"], p["result"]["status"]))
+    return sorted(out)
+
+first = rungs(starts[0], starts[1])
+second = rungs(starts[1], 10**9)
+assert first and second, (len(first), len(second))
+assert first == second, ("the arms bought different evidence", first, second)
+print("m2b 5b: both arms bought the same %d receipts" % len(first))
+' || fail "5b: the two arms bought different receipts under an unbounded budget"
+
+# --- 5d. the trace is RECORDED, not recomputed. The cost table is fitted
+# from the workspace's own receipts and it has moved since 5a (5b added six
+# more). If `mvo explain --schedule` recomputed anything it would render
+# differently now; it renders byte-identically, because every number came
+# off the ledger. ---
+SCHED_RENDER_A="$("$MVO" explain "$INTENT_SCHED" --dir "$REPO" --schedule)"
+INTENT_MOVE="$("$MVO" intent new --dir "$REPO" --title "m2b: move the cost table")"
+"$MVO" race "$INTENT_MOVE" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  || fail "5d: the cost-table-moving race failed"
+SCHED_RENDER_B="$("$MVO" explain "$INTENT_SCHED" --dir "$REPO" --schedule)"
+[ "$SCHED_RENDER_A" = "$SCHED_RENDER_B" ] \
+  || fail "5d: explain --schedule re-renders after the cost table moved; the trace is being recomputed, not read
+--- before ---
+$SCHED_RENDER_A
+--- after ---
+$SCHED_RENDER_B"
+# And an unmeasured kind never renders like a measured one, in the allocator
+# exactly as in the menu: a declared-rank row prints NO millisecond figure.
+"$MVO" explain "$INTENT_SCHED" --dir "$REPO" --json --schedule | python3 -c '
+import json, sys
+sched = json.load(sys.stdin)["schedule"]
+assert sched["recorded"] is True, sched
+for row in sched["cost_model"]:
+    if row["measured"]:
+        assert row["n"] >= 3, row
+    else:
+        assert row["basis"] == "declared-rank", row
+        assert row["fixed_ms"] == 0 and row["per_unit_micro_ms"] == 0, row
+print("m2b 5d: %d cost rows, none of them an unmeasured kind wearing a measured kinds clothes" % len(sched["cost_model"]))
+' || fail "5d: the recorded cost model renders a millisecond figure for a kind nobody measured"
+
+# --- 5e. the starved stop ESCALATES instead of rejecting, and the control
+# shows the rule is what did it.
+#
+# M2a claimed "a scheduler that runs out of budget produces an ESCALATE".
+# That was false against the shipped machineryFailure: a COMPLETED world
+# that passed everything it bought and never bought the rest has no failing
+# receipt and a first gate that did produce one, so the race recorded
+# REJECT — "these candidates are bad" — about evidence nobody purchased.
+# on_evidence_incomplete (M2b decision 14) is the fix, and it ships OFF. ---
+cp "$ROOT/testdata/toyrepo/policies/schedule.json" "$REPO/.multiverso/policies/schedule.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/schedule.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "5e: the M2b schedule fixture policy does not validate"
+# Captured, not piped: `policy show` prints the policy's canonical bytes
+# after the human table, `grep -q` exits on its first match, and under
+# `set -o pipefail` the writer's EPIPE would fail the script on a hit.
+SCHED_SHOW="$("$MVO" policy show schedule --dir "$REPO")"
+printf '%s' "$SCHED_SHOW" | grep -q 'on_evidence_incomplete' \
+  || fail "5e: the fixture policy does not declare on_evidence_incomplete:
+$SCHED_SHOW"
+"$MVO" policy use schedule --dir "$REPO" >/dev/null || fail "5e: policy use schedule failed"
+
+# The reference race, unbounded, which is also 5f's subject. Its receipts
+# are what the starving budget is DERIVED from: a hard-coded millisecond
+# figure is a guess about this machine, and the two ways it can be wrong are
+# both silent — too small and no world buys its first rung (machinery
+# failure, a different sentence entirely), too large and nothing starves.
+INTENT_FULL="$("$MVO" intent new --dir "$REPO" --title "m2b: schedule ladder, unbounded")"
+"$MVO" race "$INTENT_FULL" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  || fail "5e: the unbounded reference race failed"
+CHEAP_MS="$(sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT json_object('type', type, 'payload', cast(payload AS text))
+     FROM events WHERE type IN ('race.started','receipt.recorded') ORDER BY seq;" \
+  | INTENT="$INTENT_FULL" python3 -c '
+import json, os, sys
+
+# BOTH worlds guards plus ONE collect, plus a hair. Both bounds matter and
+# both are derived rather than guessed.
+#
+#   - Every world must be able to buy its FIRST rung, or the race is
+#     machinery-failed (`no receipt` on gate 1) and rule 1 fires instead of
+#     rule 1a — a different sentence about a different situation.
+#   - The bound must be small against the WHOLE ladder, because a purchase
+#     the cost model cannot price is affordable while any budget remains: the
+#     pool empties by ACTUAL spend, so a budget close to the ladders total
+#     cost is a race between "exhausted" and "finished" and the winner is
+#     whatever the machine felt like that second.
+#
+# Guards cost single-digit milliseconds and a collect costs hundreds, so this
+# is roughly a quarter of the ladder and starves it four purchases in.
+intent, live = os.environ["INTENT"], False
+guards, collects = 0, [0]
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    p = json.loads(r["payload"])
+    if r["type"] == "race.started":
+        live = p.get("intent") == intent
+        continue
+    if not live:
+        continue
+    ms = int(p.get("cost", {}).get("wall_ms", 0))
+    if p["oracle"]["id"] == "tree-guard":
+        guards += ms
+    elif p["oracle"]["id"] == "pytest-collect":
+        collects.append(ms)
+print(guards + max(collects) + 20)
+')"
+[ "$CHEAP_MS" -gt 50 ] 2>/dev/null \
+  || fail "5e: could not derive a starving budget from the reference race (got '$CHEAP_MS')"
+
+INTENT_STARVE="$("$MVO" intent new --dir "$REPO" --title "m2b: starved" --budget-oracle-ms "$CHEAP_MS")"
+"$MVO" race "$INTENT_STARVE" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  || fail "5e: the starved race failed"
+STARVED="$("$MVO" explain "$INTENT_STARVE" --dir "$REPO" --schedule)"
+echo "$STARVED" | grep -q '^type: *ESCALATE$' \
+  || fail "5e: a starved race did not ESCALATE:
+$STARVED"
+echo "$STARVED" | grep -q '^escalation: on_evidence_incomplete$' \
+  || fail "5e: the starved race escalated for the wrong reason:
+$STARVED"
+echo "$STARVED" | grep -q 'hard gate(s) were never purchased for the leading world (first unpurchased: ' \
+  || fail "5e: the escalation does not name the gate nobody bought:
+$STARVED"
+echo "$STARVED" | grep -q 'stopped: S-budget' \
+  || fail "5e: the starved race did not record the STARVED stop clause:
+$STARVED"
+# THE CONTROL. The same rungs, the same derived budget, under a policy that
+# does NOT declare the rule: the M2a-era behaviour, REJECT, unchanged.
+# Without this the rule's effect would be assumed rather than shown.
+cp "$ROOT/testdata/toyrepo/policies/differential.json" "$REPO/.multiverso/policies/differential.json"
+"$MVO" policy use differential --dir "$REPO" >/dev/null || fail "5e: policy use differential failed"
+INTENT_STARVE2="$("$MVO" intent new --dir "$REPO" --title "m2b: starved control" --budget-oracle-ms "$CHEAP_MS")"
+"$MVO" race "$INTENT_STARVE2" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  || fail "5e: the control race failed"
+STARVED2="$("$MVO" explain "$INTENT_STARVE2" --dir "$REPO" --schedule)"
+echo "$STARVED2" | grep -q '^type: *REJECT$' \
+  || fail "5e: the control race (no on_evidence_incomplete) did not REJECT, so the rule's effect is not attributable:
+$STARVED2"
+echo "$STARVED2" | grep -q 'stopped: S-budget' \
+  || fail "5e: the control race did not starve, so it is not a control:
+$STARVED2"
+
+# --- 5f. evidence waste is computed, and research purchases are excluded
+# from it BY CONSTRUCTION (decision 11/18). --collect-inert buys the rungs
+# nothing reads — the mutation and property metrics M2a ships unranked,
+# which M2d must correlate against ground truth before anyone ranks by them
+# — and a purchase whose stated purpose is to influence no decision is 100%
+# waste under PRD §11's definition, so counting it would make the metric
+# meaningless. ---
+"$MVO" policy use schedule --dir "$REPO" >/dev/null || fail "5f: policy use schedule failed"
+"$MVO" explain "$INTENT_FULL" --dir "$REPO" --json --schedule | python3 -c '
+import json, sys
+sched = json.load(sys.stdin)["schedule"]
+waste = sched["waste"]
+assert waste["available"] is True, waste
+assert waste["spent_ms"] > 0, waste
+# The two numbers of decision 18, and the invariant between them: greedy
+# substitution can only find MORE waste than single-receipt substitution,
+# because it is the same test applied to a set rather than to one row.
+assert 0 <= waste["waste_ms"] <= waste["spent_ms"], waste
+assert waste["greedy_ms"] >= waste["waste_ms"], waste
+assert waste["waste_bp"] == (waste["waste_ms"] * 10000) // waste["spent_ms"], waste
+# A receipt is influential or it is waste. Never both, never neither.
+assert len(waste["rows"]) >= len(waste["wasted"]), waste
+for row in waste["wasted"]:
+    assert row["reason"], row
+print("m2b 5f: waste %d of %d ms, greedy %d ms" % (waste["waste_ms"], waste["spent_ms"], waste["greedy_ms"]))
+' || fail "5f: evidence waste is not computable from the recorded trace"
+# The research mode, on the policy that has an inert rung to buy.
+cp "$ROOT/testdata/toyrepo/policies/menu.json" "$REPO/.multiverso/policies/menu.json"
+INERT_SKIP=""
+[ -z "$HAS_HYP" ] && INERT_SKIP="hypothesis"
+[ -z "$MUT_TOOL" ] && INERT_SKIP="${INERT_SKIP:+$INERT_SKIP and }a mutation toolchain"
+if [ -n "$INERT_SKIP" ]; then
+  echo "SKIP 5f (research half): $INERT_SKIP is not importable here, so the inert rungs M2a ships unranked cannot be bought"
+else
+  cp "$ROOT/testdata/toyrepo/policies/inert.json" "$REPO/.multiverso/policies/inert.json"
+  "$MVO" policy validate "$REPO/.multiverso/policies/inert.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+    || fail "5f: the inert-rung fixture policy does not validate"
+  "$MVO" policy use inert --dir "$REPO" >/dev/null || fail "5f: policy use inert failed"
+  INTENT_INERT="$("$MVO" intent new --dir "$REPO" --title "m2b: collect-inert")"
+  "$MVO" race "$INTENT_INERT" --dir "$REPO" --agent script --patches "$REPO/patches" --collect-inert \
+    || fail "5f: the --collect-inert race failed"
+  "$MVO" explain "$INTENT_INERT" --dir "$REPO" --json --schedule | python3 -c '
+import json, sys
+sched = json.load(sys.stdin)["schedule"]
+assert sched["collect_inert"] is True, sched["mode"]
+research = [r for r in sched["steps"] if r["basis"] == "research"]
+assert research, "--collect-inert considered no research rung; the mode is inert itself"
+for r in research:
+    # A research row is decision-inert BY DEFINITION — that is what makes it
+    # research — and it may still be declined for one batch before its turn
+    # comes, exactly like any other frontier row.
+    assert r["value_bp"] == 0, r
+    assert r["declined"] in ("", "not this batch"), r
+bought = [r for r in research if r["bought"]]
+assert bought, "--collect-inert considered the inert rungs and bought none of them"
+waste = sched["waste"]
+assert waste["available"] is True, waste
+# Decision 11, byte for byte: the research spend is reported SEPARATELY and
+# is excluded from the waste total.
+assert waste["research_ms"] > 0, waste
+# spent_ms is the DECISION spend: the research purchases are not in it, so
+# the exclusion is structural rather than a subtraction somebody could
+# forget. waste is a fraction of what was spent to decide, and nothing else.
+assert waste["waste_ms"] <= waste["spent_ms"], waste
+decision_ms = sum(r["cost_ms"] for r in waste["rows"] if r["basis"] != "research")
+research_ms = sum(r["cost_ms"] for r in waste["rows"] if r["basis"] == "research")
+assert decision_ms == waste["spent_ms"], (decision_ms, waste["spent_ms"])
+assert research_ms == waste["research_ms"], (research_ms, waste["research_ms"])
+for row in waste["rows"]:
+    if row["basis"] == "research":
+        assert "excluded from the waste metric" in row["reason"], row
+for row in waste["wasted"]:
+    assert row["basis"] != "research", row
+print("m2b 5f: research spend %d ms, excluded from waste %d ms" % (waste["research_ms"], waste["waste_ms"]))
+' || fail "5f: --collect-inert did not buy a research rung, or the waste metric counted one"
+fi
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "5f: policy use default (restore) failed"
+
+# --- 5g. AG-7 under a LIVE race, which is where a leak would actually
+# arrive. No schedule.* payload key, budget figure, score, coefficient,
+# stop clause, declared oracle NAME or sibling world digest appears in any
+# world's captured agent context or transcript. ---
+INTENT_AG7="$("$MVO" intent new --dir "$REPO" --title "m2b: ag-7 under a live race")"
+PATH="$ROOT/testdata/fakeagent:$PATH" FAKE_AGENT_MODE=happy \
+  "$MVO" race "$INTENT_AG7" --dir "$REPO" --agent claude-code --candidates 2 \
+    --model fake-model --max-usd 0.25 --max-turns 8 --max-wall-ms 60000 \
+    --agent-env FAKE_AGENT_MODE \
+  || fail "5g: the AG-7 race failed"
+sqlite3 "$REPO/.multiverso/ledger.db" \
+  "SELECT payload_dig || '|' || cast(payload AS text) FROM events WHERE type='world.created';" \
+  | INTENT="$INTENT_AG7" CASDIR="$REPO/.multiverso/cas" python3 -c '
+import json, os, sys
+
+intent, casdir = os.environ["INTENT"], os.environ["CASDIR"]
+mine = []
+for line in sys.stdin:
+    dig, payload = line.rstrip("\n").split("|", 1)
+    p = json.loads(payload)
+    if p.get("intent") == intent:
+        mine.append((dig, p))
+assert len(mine) == 2, ("want 2 AG-7 worlds", len(mine))
+
+def blob(key):
+    hexs = key.split(":", 1)[1]
+    with open(os.path.join(casdir, "sha256", hexs[:2], hexs[2:]), "rb") as fh:
+        return fh.read().decode("utf-8", "replace")
+
+# The forbidden set: every schedule.* payload key, the scheduler vocabulary,
+# the compiled constants, and every DECLARED ORACLE NAME. A prompt that
+# named the ladder would let a generator condition on the protocol.
+forbidden = [
+    "schedule.started", "schedule.step", "schedule.finished", "oracle.skipped",
+    "score_bpps", "value_bp", "discount_bp", "executor_bp", "cost_basis",
+    "flip_outcomes", "max_oracle_ms", "declared-rank", "theil-sen",
+    "S-frontier", "S-budget", "S-ranking", "S-empty",
+    "collect-inert", "paths-unmodified", "collect-nonempty", "status-pass",
+    "tree-guard", "pytest-collect", "pytest-suite", "wall_ms_asc",
+]
+digests = [dig for dig, _ in mine]
+for dig, p in mine:
+    for field in ("context", "trace"):
+        text = blob(p[field])
+        for token in forbidden:
+            assert token not in text, (dig, field, token)
+        # And no SIBLING world digest: a generator must not learn that it
+        # has siblings, let alone which.
+        for other in digests:
+            if other != dig:
+                assert other not in text, (dig, field, "sibling digest")
+print("m2b 5g: 2 worlds, %d forbidden tokens, none present in context or transcript" % len(forbidden))
+' || fail "5g: scheduler state leaked into an agent context or transcript (AG-7)"
+
+# --- 5h. VALIDATION RULE 25 (decision 15), and BOTH halves of its
+# definition. A key is allocation-sensitive iff its value can change when a
+# receipt is withheld from a world THAT STILL PASSES EVERY HARD GATE — so
+# `wall_ms_asc` over a policy whose every counted selector is hard-gated is
+# NOT refusable (withholding drops the world out of the pass set, where no
+# key compares it), and `wall_ms_asc` beside evidence no gate backs is. The
+# refusal names the key, names both outs, and leaves the ledger untouched. ---
+cp "$ROOT/testdata/toyrepo/policies/schedule-wall.json" "$REPO/.multiverso/policies/schedule-wall.json"
+"$MVO" policy validate "$REPO/.multiverso/policies/schedule-wall.json" --dir "$REPO" | grep -q '^OK: policy valid$' \
+  || fail "5h: the rule-25 fixture policy does not validate (it must be a LEGAL policy that only the adaptive arm refuses)"
+INTENT_R25="$("$MVO" intent new --dir "$REPO" --title "m2b: rule 25" --policy schedule-wall)"
+[ -n "$INTENT_R25" ] || fail "5h: mvo intent new --policy schedule-wall printed no digest"
+EVENTS_BEFORE="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+set +e
+"$MVO" race "$INTENT_R25" --dir "$REPO" --agent script --patches "$REPO/patches" >"$WORK/r25.out" 2>&1
+R25_CODE=$?
+set -e
+[ "$R25_CODE" = "2" ] \
+  || fail "5h: an allocation-sensitive policy raced adaptively exited $R25_CODE, want 2 (usage):
+$(cat "$WORK/r25.out")"
+grep -q 'wall_ms_asc' "$WORK/r25.out" || fail "5h: the rule-25 refusal does not name the key:
+$(cat "$WORK/r25.out")"
+grep -q 'validation rule 25' "$WORK/r25.out" || fail "5h: the refusal does not cite the rule:
+$(cat "$WORK/r25.out")"
+grep -q -- '--schedule=fixed' "$WORK/r25.out" || fail "5h: the refusal does not offer the exhaustive ladder as an out:
+$(cat "$WORK/r25.out")"
+grep -q "remove wall_ms_asc" "$WORK/r25.out" || fail "5h: the refusal does not offer removing the key as an out:
+$(cat "$WORK/r25.out")"
+EVENTS_AFTER="$(sqlite3 "$REPO/.multiverso/ledger.db" "SELECT count(*) FROM events;")"
+[ "$EVENTS_BEFORE" = "$EVENTS_AFTER" ] \
+  || fail "5h: a pre-flight refusal wrote $((EVENTS_AFTER - EVENTS_BEFORE)) ledger event(s); the ledger must be untouched"
+# The second out works, and it is the arm M1 always had.
+"$MVO" race "$INTENT_R25" --dir "$REPO" --agent script --patches "$REPO/patches" --schedule=fixed \
+  || fail "5h: the documented out (--schedule=fixed) does not race the policy rule 25 refused"
+R25_EXPLAIN="$("$MVO" explain "$INTENT_R25" --dir "$REPO" --schedule)"
+printf '%s' "$R25_EXPLAIN" | grep -q 'no allocation trace recorded' \
+  || fail "5h: a fixed-ladder race renders an allocation trace it never produced:
+$R25_EXPLAIN"
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "5h: policy use default (restore) failed"
+
+# --- 5c. replay is exact, in both directions. An M2a-era ledger — bytes
+# written before the scheduler existed — replays byte-for-byte under this
+# binary, and a new M2b race replays with the schedule.* events PRESENT and
+# IGNORED. The second half is the one the design rests on: observational
+# events reach Decide never, so the scheduler can be rewritten, retuned or
+# replaced without invalidating a single recorded decision. ---
+"$MVO" audit --dir "$REPO" --require-decisions 1 --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["chain_ok"] is True, r
+assert r["replay_identical"] is True, r
+assert r["mismatches"] == [], r["mismatches"]
+assert r["cas_missing"] == [] and r["cas_corrupt"] == [], r
+assert r["decisions"] >= 8, r
+print("m2b 5c: %d events, %d decisions replayed with the trace present and ignored" % (r["events"], r["decisions"]))
+' || fail "5c: a workspace carrying allocation traces does not replay identically"
+M2A_COMMIT="$(git -C "$ROOT" rev-list -1 --grep '^M2a:' HEAD 2>/dev/null || true)"
+if [ -z "$M2A_COMMIT" ]; then
+  echo "SKIP 5c (pre-M2b half): no M2a commit reachable from HEAD in $ROOT; the byte-for-byte replay of PRE-SCHEDULER ledger bytes cannot be built here"
+else
+  M2ATREE="$WORK/m2a-src"
+  git -C "$ROOT" worktree add -q --detach "$M2ATREE" "$M2A_COMMIT" \
+    || fail "5c: could not check out the M2a commit $M2A_COMMIT"
+  M2AMVO="$WORK/mvo-m2a"
+  (cd "$M2ATREE" && go build -o "$M2AMVO" ./cmd/mvo) \
+    || fail "5c: the M2a binary does not build from $M2A_COMMIT"
+  M2AREPO="$WORK/m2a-repo"
+  mkdir -p "$M2AREPO"
+  cp -R "$M2ATREE/testdata/toyrepo/." "$M2AREPO/"
+  rm -rf "$M2AREPO/__pycache__" "$M2AREPO/.pytest_cache"
+  $GIT -C "$M2AREPO" init -q -b main
+  $GIT -C "$M2AREPO" add -A
+  $GIT -C "$M2AREPO" commit -qm "m2a-era baseline"
+  "$M2AMVO" init --dir "$M2AREPO" >/dev/null || fail "5c: the M2a binary could not init a workspace"
+  M2A_INTENT="$("$M2AMVO" intent new --dir "$M2AREPO" --title "m2a-era race")"
+  "$M2AMVO" race "$M2A_INTENT" --dir "$M2AREPO" --agent script --patches "$M2AREPO/patches" >/dev/null \
+    || fail "5c: the M2a binary could not race its own fixture"
+  M2A_RATIONALE="$("$M2AMVO" explain "$M2A_INTENT" --dir "$M2AREPO" | grep '^rationale:')"
+  "$MVO" audit --dir "$M2AREPO" --require-decisions 1 --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["chain_ok"] is True, r
+assert r["replay_identical"] is True, r
+' || fail "5c: an M2a-era ledger does not replay identically under the M2b binary"
+  M2B_RATIONALE="$("$MVO" explain "$M2A_INTENT" --dir "$M2AREPO" | grep '^rationale:')"
+  [ "$M2A_RATIONALE" = "$M2B_RATIONALE" ] \
+    || fail "5c: the M2b binary renders an M2a-era decision differently:
+M2a: $M2A_RATIONALE
+M2b: $M2B_RATIONALE"
+  # A race that recorded no trace says so, rather than rendering an empty
+  # table that reads like "the scheduler considered nothing".
+  # Captured, not piped: `grep -q` exits on its first match and the sentence
+  # is printed mid-report, so under `set -o pipefail` the writer's EPIPE
+  # would turn a HIT into a failure.
+  M2A_SCHED="$("$MVO" explain "$M2A_INTENT" --dir "$M2AREPO" --schedule)"
+  printf '%s' "$M2A_SCHED" | grep -q 'no allocation trace recorded for this race' \
+    || fail "5c: a pre-M2b race does not say that it has no allocation trace:
+$M2A_SCHED"
+  git -C "$ROOT" worktree remove --force "$M2ATREE" >/dev/null 2>&1 || true
+fi
 
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"

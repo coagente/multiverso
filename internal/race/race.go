@@ -19,6 +19,7 @@ import (
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/oracle"
 	"github.com/coagente/multiverso/internal/policy"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // Candidate is one world's generation spec (AG-5): the literal prompt, a
@@ -52,6 +53,19 @@ type Config struct {
 	// OracleTimeout is the fallback wall bound for policy-declared oracles
 	// that name none of their own; zero means the intent's max_wall_ms.
 	OracleTimeout time.Duration
+	// Schedule selects phase B's arm (M2b): "" and ScheduleAdaptive run the
+	// adaptive scheduler, ScheduleFixed runs the M1 exhaustive ladder. Under
+	// max_oracle_ms == 0 and a policy whose ranking is not
+	// allocation-sensitive the two buy the same receipts and decide
+	// identically (decision 13), which is a test rather than a claim.
+	Schedule string
+	// CollectInert is `mvo race --collect-inert` (M2b decision 11): buy the
+	// decision-inert rungs M2a ships unranked, labelled `research` in the
+	// trace and excluded from the waste metric. Off by default.
+	CollectInert bool
+	// ScheduleTrace records the allocation trace. Nil records nothing and
+	// changes no allocation: the scheduler's product is observational.
+	ScheduleTrace ScheduleTrace
 }
 
 // WorldRun is one world's trajectory through the race.
@@ -90,8 +104,16 @@ type raceRun struct {
 	ev evidenceSetup
 	// baseline is collected_delta's denominator, measured once on the base
 	// tree; oracle instances are built PER WORLD (M1f decision 18), so it
-	// is held here rather than baked into a shared ladder.
-	baseline      int64
+	// is held here rather than baked into a shared ladder. It is wired ONLY
+	// where a gate reads the delta, so that no recorded metric moves.
+	baseline int64
+	// collectedBase is the same measurement in its other role: the only
+	// control-plane number this race holds about the repository's size, and
+	// therefore the M2b scheduler's bracket ceiling for `tests_passed` and
+	// the clamp on candidate-authored cost units. Every policy that runs
+	// pytest gets one — a bound that exists only under `collected-not-below`
+	// is a bound the starvation and cost-poisoning vectors simply avoid.
+	collectedBase int64
 	oracleTimeout time.Duration
 	// corpusRoot is the race's control-plane corpus tree, outside the worlds
 	// directory entirely: <workspace>/corpora/<race>/, mode 0700, with one
@@ -396,7 +418,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	var base *baseWorld
-	if needsBaseWorld(pol) {
+	if needsBaseWorld(pol, cfg.CollectInert) {
 		base, err = r.openBaseWorld(raceCtx)
 		if err != nil {
 			r.dropEvidenceDirs()
@@ -406,7 +428,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		// Decision 15: a repo without pytest fails at pre-flight as
 		// machinery, never as a receipt — and the ledger stays empty of race
 		// events.
-		if err := preflight(raceCtx, pol, base.wh, execDesc(cfg.Backend), intent.Budget.MaxWallMS); err != nil {
+		if err := preflight(raceCtx, pol, cfg.CollectInert, base.wh, execDesc(cfg.Backend), intent.Budget.MaxWallMS); err != nil {
 			base.close(r)
 			r.dropEvidenceDirs()
 			os.Remove(r.raceDir)
@@ -443,7 +465,10 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// (decision 13). It runs after race.started, before phase A, and only
 	// when a collected-not-below gate makes the delta mean something.
 	if base != nil {
-		r.baseline, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
+		r.collectedBase, err = r.measureBaseline(raceCtx, pol, base, oracleTimeout)
+		if _, gated := pol.CollectOracle(); gated {
+			r.baseline = r.collectedBase
+		}
 		if err == nil {
 			// PHASE 0 — corpus materialization, on the same base worktree
 			// (one open, two measurements) and BEFORE phase A, so the
@@ -521,8 +546,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
-	// Phase B — verification, bounded at Parallel.
-	r.pool(completed, func(i int) error { return r.verify(raceCtx, i) })
+	// Phase B — verification. Under the adaptive arm the purchases are
+	// ALLOCATED (M2b): which world advances next, and whether it advances at
+	// all. Under the fixed arm it is M1's per-world ladder, unchanged.
+	if err := r.verifyAll(raceCtx, completed); err != nil {
+		return nil, err
+	}
 	if err := r.failed(); err != nil {
 		return nil, err
 	}
@@ -837,8 +866,14 @@ func (r *raceRun) buildLadder(s *slot) ([]ladderRung, error) {
 	if s.wh != nil {
 		tier = s.wh.Tier()
 	}
-	rungs := make([]ladderRung, 0, len(pol.Required))
-	for _, name := range pol.Required {
+	// The ladder is the policy's Required list, plus — under --collect-inert
+	// only — the declared world-stage instances nothing reads (M2b decision
+	// 11). schedule.LadderNames is the single source for both arms and for
+	// the pre-flight probe, so the rungs the scheduler prices and the rungs
+	// the orchestrator can actually run cannot drift apart.
+	names := schedule.LadderNames(pol, cfg.CollectInert)
+	rungs := make([]ladderRung, 0, len(names))
+	for _, name := range names {
 		spec, ok := pol.OracleByName(name)
 		if !ok {
 			// Unreachable: validation refused a gate, key or requirement
@@ -916,43 +951,16 @@ func (r *raceRun) verify(ctx context.Context, i int) error {
 		return err
 	}
 	for _, rung := range rungs {
-		var rec object.Receipt
-		var err error
-		if ob, ok := rung.oracle.(oracle.Observer); ok {
-			// The corpus rung yields its parsed observation as well as its
-			// receipt. Phase B2 needs the per-case FINGERPRINTS behind the
-			// counts, and re-deriving them from the stored stream would
-			// mean re-reading evidence after the fact — the one thing M1f
-			// removed.
-			// The delivered corpus is re-digested on the host either side of
-			// the replay. A mismatch aborts the RACE as machinery and never
-			// fails a world: the bytes are the control plane's, the digest
-			// is pinned in the ledger, and a world handed an altered file is
-			// a victim rather than a suspect.
-			if err := r.checkCorpusFile(s, "before"); err != nil {
-				return err
-			}
-			var obs oracle.Observation
-			rec, obs, err = ob.Observe(ctx, s.wh)
-			if err == nil {
-				s.obs, s.obsOK = obs, true
-				s.obsPass = rec.Result.Status == oracle.StatusPass
-			}
-			if cerr := r.checkCorpusFile(s, "after"); cerr != nil {
-				return cerr
-			}
-		} else {
-			rec, err = rung.oracle.Run(ctx, s.wh)
-		}
+		// One rung, run and bound exactly as the scheduled arm runs it —
+		// the corpus rung still yields its parsed observation for phase B2,
+		// and the delivered corpus is still re-digested either side of the
+		// replay (a mismatch aborts the RACE as machinery and never fails a
+		// world: the bytes are the control plane's and a world handed an
+		// altered file is a victim rather than a suspect).
+		rec, err := r.runRung(ctx, s, rung)
 		if err != nil {
-			return fmt.Errorf("race: oracle %s in %s: %w", rung.name, s.dir, err)
+			return err
 		}
-		// The orchestrator alone knows the world digest and tree the receipt
-		// attests to (valid_for = the world's exact {tree, env}: T1 receipts
-		// bind the image digest through valid_for.env with zero new
-		// plumbing).
-		rec.World = s.dig
-		rec.Freshness.ValidFor = object.ValidFor{Tree: s.world.Tree, Env: s.world.Env}
 		dig, err := r.recordObjectLocked("receipt.recorded", rec)
 		if err != nil {
 			return err
@@ -966,8 +974,11 @@ func (r *raceRun) verify(ctx context.Context, i int) error {
 }
 
 // ladderStops reports whether this world's ladder has reached its first
-// failed hard gate, walking pol.Gates in POLICY order over the receipts the
-// world has accumulated so far.
+// failed hard gate. It is ONE function with the scheduler's elimination rule
+// (schedule.LadderStops), not two that can drift: the fixed arm and the
+// adaptive arm must agree exactly on when a world is done, or the
+// compatibility claim of M2b decision 13 is a coincidence rather than a
+// property.
 //
 // Policy order is the whole point. Gates may interleave oracles, and
 // stopping merely because SOME gate naming the rung that just ran failed
@@ -978,35 +989,7 @@ func (r *raceRun) verify(ctx context.Context, i int) error {
 // `mvo worlds` GATE column. A gate whose oracle has produced no receipt yet
 // is not a failure; it is a rung still to climb.
 func ladderStops(pol policy.Policy, receipts []object.RecordedReceipt) bool {
-	for _, g := range pol.Gates {
-		rec := ladderReceipt(g.Sel, receipts)
-		if rec == nil {
-			return false
-		}
-		if ok, _ := g.Eval(rec); !ok {
-			return true
-		}
-	}
-	return false
-}
-
-// ladderReceipt picks a selector's receipt out of the ones a world has
-// accumulated: the smallest-digest match, the same order-independent
-// disambiguation Decide's counted receipt uses. Binding is not re-checked
-// here — the orchestrator sets valid_for from the world it just judged, so
-// every receipt in this slice is bound by construction.
-func ladderReceipt(sel policy.Selector, receipts []object.RecordedReceipt) *object.Receipt {
-	best := ""
-	var out *object.Receipt
-	for i := range receipts {
-		if !sel.Match(receipts[i].Receipt) {
-			continue
-		}
-		if best == "" || receipts[i].Digest < best {
-			best, out = receipts[i].Digest, &receipts[i].Receipt
-		}
-	}
-	return out
+	return schedule.LadderStops(pol, receipts)
 }
 
 // removeWorld removes one world worktree, falling back to plain directory

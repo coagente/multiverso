@@ -38,6 +38,25 @@ const (
 	// one that did the job; and a hard gate on divergence rejects the only
 	// correct candidate when it diverges from five wrong siblings.
 	RuleOnBehavioralSplit = "on_behavioral_split"
+	// RuleOnEvidenceIncomplete is M2b rule 1a, and it exists because M2a's
+	// "a scheduler that runs out of budget produces an ESCALATE" was FALSE
+	// against machineryFailure below: a COMPLETED world that bought and
+	// passed its cheap rungs and never bought the expensive one has no
+	// failing receipt and a first gate that did produce one, so rule 1 does
+	// not fire, PassCount is 0, and the race records REJECT — "these
+	// candidates are bad" — when the truth is "we never bought the
+	// evidence".
+	//
+	// It reads NO scheduler state and must not: "the budget ran out" is not
+	// a function of (policy, worlds, receipts), so routing it through Decide
+	// would break purity and replay at once. What IS such a function is
+	// "this world passed everything it paid for and never paid for gate Y",
+	// which is the honest sentence anyway. The rule reports the state, never
+	// the cause — M2a's purchase law is explicit that Decide has no way to
+	// distinguish "no receipt because we declined to buy" from "no receipt
+	// because the oracle crashed", nor should it, because the effect on the
+	// candidate is identical.
+	RuleOnEvidenceIncomplete = "on_evidence_incomplete"
 )
 
 // Comparison step results.
@@ -615,6 +634,38 @@ func escalate(pol policy.Policy, t *RaceTrace) EscalationResult {
 			}
 		}
 	}
+	// 1a. Nothing passed, and at least one world failed ONLY for want of a
+	//     receipt nobody bought. REJECT means "these candidates are bad";
+	//     saying so about a world whose every purchased gate passed, and
+	//     whose remaining gates were never purchased, is a statement about
+	//     our budget dressed up as a statement about the candidate.
+	//
+	//     It sits BELOW machinery failure — broken machinery and unbought
+	//     evidence are different statements, and the first is the more
+	//     fundamental — and ABOVE on_behavioral_split, which requires
+	//     PassCount >= 1 and therefore cannot collide with it. Inserting it
+	//     here changes no historical evaluation: no pre-M2b policy can
+	//     declare the field, so no pre-M2b policy can reach this branch
+	//     (M1f decision 11's argument, reused a third time).
+	//     AND IT DOES NOT REQUIRE PassCount == 0, which is the red team's
+	//     correction. The starved race that matters is the one that ADMITS:
+	//     one world bought its whole ladder, its rival's last hard gate was
+	//     never purchased, so the rival is not in the pass set, the tie that
+	//     would have escalated never materialises, and the race SELECTs with
+	//     PassCount == 1. Guarding the rule on PassCount == 0 made it
+	//     unfireable in exactly the case it was written for — measured, 5 of
+	//     5 races, admitted, trunk left buggy. The predicate itself is
+	//     unchanged and still pure over (pol, worlds, receipts): it reports
+	//     that a COMPLETED world passed everything it paid for and never
+	//     paid for gate Y, and it says nothing about why. It now replaces
+	//     SELECT as well as REJECT, which is the honest verdict in both:
+	//     "we did not buy enough evidence to rank these candidates" is the
+	//     same sentence as "…to reject them".
+	if esc.OnEvidenceIncomplete {
+		if res, fired := evidenceIncomplete(pol, t); fired {
+			return res
+		}
+	}
 	if t.PassCount == 0 {
 		return EscalationResult{}
 	}
@@ -709,6 +760,89 @@ func emitsAny(rec *object.Receipt, vocab []string) bool {
 		}
 	}
 	return false
+}
+
+// evidenceIncomplete is M2b rule 1a's predicate over the trace: at least one
+// COMPLETED world whose every hard gate that HAD evidence passed, and at
+// least one hard gate for which no counted receipt exists at all.
+//
+// The sentence names the LEADING such world — the first in ranked order —
+// because that is the world an operator would have to buy evidence about to
+// turn this race into a decision, and it names the first gate that world
+// never paid for so the next command is obvious.
+func evidenceIncomplete(pol policy.Policy, t *RaceTrace) (EscalationResult, bool) {
+	if len(pol.Gates) == 0 {
+		return EscalationResult{}, false
+	}
+	worlds, leadMissing := 0, 0
+	var leadFirst policy.Gate
+	for i := range t.Candidates {
+		missing, first, ok := unpurchasedGates(pol, &t.Candidates[i])
+		if !ok {
+			continue
+		}
+		if worlds == 0 {
+			leadMissing, leadFirst = missing, first
+		}
+		worlds++
+	}
+	if worlds == 0 {
+		return EscalationResult{}, false
+	}
+	// The closing clause names what the unbought evidence would have decided,
+	// and the two cases are different statements. With nothing passing, the
+	// race would have said "these candidates are bad" about evidence nobody
+	// purchased. With something passing, it would have ADMITTED one world
+	// while its rival's gate went unbought — the starved admission, which is
+	// the worse of the two because it lands a change.
+	verb := "reject these candidates"
+	if t.PassCount > 0 {
+		verb = "rank these candidates against each other"
+	}
+	return EscalationResult{
+		Rule: RuleOnEvidenceIncomplete,
+		Detail: fmt.Sprintf("%d worlds passed every gate their evidence could evaluate and "+
+			"%d hard gate(s) were never purchased for the leading world (first unpurchased: %s@%s); "+
+			"this race did not buy enough evidence to %s",
+			worlds, leadMissing, leadFirst.Predicate, leadFirst.Oracle, verb),
+	}, true
+}
+
+// unpurchasedGates counts the hard gates one candidate holds NO counted
+// receipt for, and reports whether every gate that did have evidence passed.
+//
+// It re-evaluates every gate INDEPENDENTLY rather than reading c.Gates,
+// because the ladder short-circuits: under the v1 dialect every gate after
+// the first failure is recorded `not-evaluated`, and "not evaluated" is
+// exactly the state this rule has to look through. Re-evaluating is free —
+// Gate.Eval is a pure function of (gate, receipt) — and it is the only
+// reading under which "every hard gate this world's evidence could evaluate
+// PASSED" means what it says.
+//
+// An UNBOUND receipt (produced, but attesting another tree or env) is not an
+// unpurchased gate: the evidence exists and does not apply, which is a
+// freshness failure and belongs to the machinery rule above. It falls through
+// to Eval(nil), fails, and disqualifies the world — which is correct.
+func unpurchasedGates(pol policy.Policy, c *CandidateTrace) (int, policy.Gate, bool) {
+	var first policy.Gate
+	if c.Outcome != object.OutcomeCompleted {
+		return 0, first, false
+	}
+	missing := 0
+	for _, g := range pol.Gates {
+		cr := c.counted[g.Sel]
+		if cr.rec == nil && cr.unbound == "" {
+			if missing == 0 {
+				first = g
+			}
+			missing++
+			continue
+		}
+		if ok, _ := g.Eval(cr.rec); !ok {
+			return 0, policy.Gate{}, false
+		}
+	}
+	return missing, first, missing > 0
 }
 
 // machineryFailure reports whether a candidate failed for want of working

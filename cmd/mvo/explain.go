@@ -86,7 +86,12 @@ type explainReport struct {
 	// distinguishing cases with their VALUES. It is nil — and the JSON key
 	// absent — under every policy that declares no differential, which is
 	// every policy predating M2a, so an M1-era report is unchanged.
-	Behavior        *explainBehavior `json:"behavior,omitempty"`
+	Behavior *explainBehavior `json:"behavior,omitempty"`
+	// Schedule is M2b's allocation trace: what the scheduler bought, what it
+	// considered and declined, and the derived evidence waste. It is nil —
+	// and the JSON key absent — unless --schedule was asked for, so every
+	// pre-M2b explain golden is unchanged, byte for byte.
+	Schedule        *explainSchedule `json:"schedule,omitempty"`
 	receiptByDigest map[string]object.Receipt
 }
 
@@ -106,6 +111,7 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 	dir := fs.String("dir", ".", "repository directory")
 	jsonOut := fs.Bool("json", false, "emit the machine-readable explain report")
 	diffs := fs.Int("diffs", 0, "append the top-N ranked candidates' captured patches")
+	sched := fs.Bool("schedule", false, "append the recorded allocation trace: what the scheduler bought, what it declined, and evidence waste")
 	if err := parseFlags(fs, rest); err != nil {
 		return err
 	}
@@ -180,6 +186,9 @@ func cmdExplain(args []string, stdout, stderr io.Writer) error {
 		rep.Escalation = tr.Escalation
 		if tr.Winner != "" {
 			rep.Winner = tr.Winner
+		}
+		if *sched {
+			rep.Schedule = scheduleBlock(st, found, pol, worlds, receipts)
 		}
 	}
 	for _, e := range dec.Evidence {
@@ -494,6 +503,7 @@ func writeExplain(w io.Writer, rep explainReport) {
 	}
 
 	writeBehavior(w, rep.Behavior)
+	writeSchedule(w, rep.Schedule)
 	if rep.Escalation.Rule != "" {
 		fmt.Fprintln(w, "")
 		fmt.Fprintf(w, "escalation: %s\n", rep.Escalation.Rule)

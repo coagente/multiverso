@@ -81,6 +81,7 @@ M1f moved the boundary. Today:
 | A cohort member that **shrinks the differential's comparison** without emptying it | **OPEN** — members that compare nothing are excluded and every member's contribution is recorded; a partial shrink is visible and not refused |
 | A candidate that **reads the corpus off the filesystem** at oracle time, at T0 | **OPEN at T0, STOPPED at T1** — the generating agent is never delivered the inputs (they are outside the worlds tree, 0700, and absent from every world-visible path during generation); at T0 an oracle-time process running as the invoking uid can still find them |
 | An adversary who patches the observer from inside the test process | **OPEN** — and said so in the threat model, three times, because it will be misread once |
+| A candidate that **burns the oracle budget** so a rival's last gate is never bought — and the race admits it | **OPEN under a binding budget** — a red team ran it and it landed. Withholding a hard-gate receipt takes a world out of the pass set, so the tie that would have escalated never happens; the scheduler can no longer *choose* that (a hard gate on a live world is always bought), but when the money genuinely runs out the residual stands. A policy declaring `on_evidence_incomplete` escalates instead of admitting (measured 4/4); the shipped default does not declare it yet. Every SELECT now names the rivals it never measured |
 
 Three mechanisms: a `tree-guard` oracle that compares two git trees the
 control plane holds and executes nothing; a control-plane-owned pytest plugin

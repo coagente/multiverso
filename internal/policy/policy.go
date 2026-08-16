@@ -154,6 +154,12 @@ type Escalation struct {
 	// ABOVE require_evidence (a detected behavioural ambiguity is a
 	// stronger reason to stop than a missing optional source).
 	OnBehavioralSplit int
+	// OnEvidenceIncomplete is M2b rule 1a, at precedence 1a: below
+	// on_all_worlds_failed_machinery (broken machinery is a different
+	// statement from unbought evidence) and above on_behavioral_split
+	// (which requires PassCount >= 1, so they cannot collide). It REPLACES
+	// REJECT, and it is the only rule besides rule 1 that can.
+	OnEvidenceIncomplete bool
 }
 
 // Requirement names an oracle whose evidence the winner must carry.
@@ -446,6 +452,34 @@ func (p Policy) CollectOracle() (Oracle, bool) {
 			continue
 		}
 		if o, ok := p.OracleByName(g.Oracle); ok {
+			return o, true
+		}
+	}
+	return Oracle{}, false
+}
+
+// BaselineCollectOracle is the instance the BASE-STATE collect measurement
+// runs, which is a wider question than CollectOracle's.
+//
+// CollectOracle answers "does a gate need this denominator". The base
+// measurement is also the only CONTROL-PLANE number the M2b scheduler holds
+// about a repository's size — the ceiling its bracket clamps `tests_passed`
+// to (M2b decision 3b) and the bound its cost fit clamps candidate-authored
+// units to (decision 7a) — and both of those are needed by any policy that
+// runs pytest at all, not only by one that declares collected-not-below.
+// Under a policy without that gate the ceiling was 0, which means UNMEASURED,
+// which fails open: vector 23's starvation clamp lapsed silently and the
+// §6 verdict was conditional on a policy shape it never named.
+//
+// So: the gate's instance when there is one, otherwise the first required
+// pytest-collect instance in ladder order. The gate DENOMINATOR is still
+// wired only where a gate reads it, so no recorded `collected_delta` moves.
+func (p Policy) BaselineCollectOracle() (Oracle, bool) {
+	if o, ok := p.CollectOracle(); ok {
+		return o, true
+	}
+	for _, name := range p.Required {
+		if o, ok := p.OracleByName(name); ok && o.Kind == KindPytestCollect {
 			return o, true
 		}
 	}

@@ -2,6 +2,204 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-15 — M2b: spending the next dollar of verification
+
+**The rule, in one sentence you can check against the code.** At every step,
+each still-alive world offers exactly one purchase — its next unbought rung,
+in the policy's own gate order, never reordered. For each of those the
+scheduler builds the *bracketing outcomes* the purchase could report (an
+error with no metrics; a minimal pass; the best pass a control-plane number
+can justify), completes that world's remaining ladder at the same extreme,
+and calls the real decision function on each. If some outcome moves the
+decision in type or subject, the purchase is **admissible**. Then it buys the
+admissible affordable purchases, cheapest-per-unit-value first, until nothing
+is admissible or the money runs out — and it records every row it looked at,
+what it thought each was worth, and why it declined the ones it declined.
+
+`flip` is not a probability and the document never calls it one. It is a
+reachability test over a pure function: *could this purchase matter at all?*
+We can afford to ask because `Decide` is pure and total — re-measured on this
+tree at **18.4 µs over six worlds** against a pytest rung's ~300 ms, so the
+metalevel costs about 0.1% of the object level. Purity was sold in M1e as a
+replay property. It turns out to be the thing that makes a scheduler
+computable at all.
+
+**What it provably cannot know yet, and does not pretend to.** There is no
+`P(this change is correct | receipts)` anywhere, because that needs labelled
+outcomes and there are none until M2d. All flips are worth the same: turning
+a REJECT into a SELECT and moving the subject between two passing worlds both
+count 1. The four redundancy tiers are read off M2a's discount rule by hand;
+nobody has measured whether two `value-behavior` receipts actually co-fail.
+`executor_bp = 5 000` — "a candidate-process receipt is worth half a
+control-plane one" — is a number with no evidence behind it, which is why it
+is a compiled constant recorded in the trace rather than a policy field an
+operator could tune before anyone knows what it does. And the scheduler never
+eliminates on rank: successive halving's whole efficiency win imports the
+assumption that cheap-rung rank predicts final rank, which research ch. 3
+flags as the one thing LLM evidence violates, so v0 defers a world and never
+prunes it. Every one of those is in the design doc's §8 with what would
+replace it.
+
+**The measured comparison, including where adaptive lost.** Under an
+unbounded budget on the shipped default the two arms are indistinguishable —
+same receipts, same decision, same rationale, byte for byte modulo world
+digest — which acceptance step 5b pins, because a scheduler that cannot be
+shown to be inert where it should be inert is an artifact of its harness. At
+a *binding* budget, `scripts/schedule-compare.sh --policy schedule` on the
+same fixture: fixed **SELECT**, 8 receipts, 1 216 ms; adaptive **ESCALATE**,
+6 receipts, 1 225 ms, stopped `S-budget`, the last `observe` refused with
+`0 ms remain`. **Adaptive lost that one.** It is a false rejection, which
+decision 4 names as adaptivity's real risk and which only labelled outcomes
+can price — and it is the honest shape of the loss: the arm that runs out of
+money says "I did not buy enough evidence to rank these" instead of picking a
+winner it cannot justify. Evidence waste on that race: 619 ms of 1 225
+(50.5%), greedy 1 225 ms — computable for the first time, and the gap between
+the two numbers is itself the measurement.
+
+**Two caveats that decide how much the comparison above is worth, stated
+before anyone quotes it.**
+
+*The head-to-head CP-4 actually asks for cannot be run today.* `--schedule=fixed`
+is the **unbudgeted** exhaustive M1 ladder: it ignores `max_oracle_ms` entirely.
+So every "matched budget" figure in this entry compares *adaptive under B*
+against *exhaustive, unbudgeted* — not against a fixed ladder given the same
+money. The budget-truncated fixed numbers below are labelled arithmetic over a
+recorded ledger, not a race that was run. A budget-truncated fixed arm is the
+single highest-value thing this harness still needs, and until it exists no
+number here settles the thesis in either direction.
+
+*And with that arithmetic, adaptive loses worse than the escalation above
+suggests.* The frontier is one rung per alive world, so on symmetric worlds
+every score ties, the tie-break falls to world digest, and allocation
+degenerates to **round robin**: it advances every world one rung and completes
+none. A budget-truncated fixed ladder is depth-first and completes one. Replayed
+over a recorded fixed-arm ledger at 71 % of the exhaustive budget, adaptive
+bought 4 receipts for 990 ms with **zero** complete worlds and escalated, where
+the truncated ladder bought 5 for 642 ms and had one world holding every gate
+rung — decidable. **Adaptive spent 54 % more and decided less.** The honest
+reading cuts both ways: adaptive's failure there is *structural* (round robin is
+what the rule does on ties), while the fixed ladder's success is *luck* — it is
+depth-first in world-digest order, digests are not stable across runs, and
+whether it completes the *winning* world is a coin flip. Neither arm is good on
+that fixture. That is the result, and it is a finding about our rule, not a
+detail of the harness.
+
+**What the red team broke.** Four things, and the first one broke the
+strongest claim in the block.
+
+*`FAR(adaptive) ≤ FAR(exhaustive)` was false.* The proof says withholding a
+receipt can only shrink the pass set. That part is true. What does not follow
+is the FAR claim, because **`SELECT` is not monotone in the pass set**: every
+escalation that needs a *second* passing world — `on_ranking_tie`,
+`min_candidates_passing`, `on_behavioral_split` — is disarmed by withholding.
+Starve one world's last gate and the tie that would have asked a human simply
+never happens. Measured on the adversarial fixture at a binding budget:
+**8 of 8 adaptive races SELECT and admit, against 3 of 3 ESCALATE under
+`--schedule=fixed` at the same budget**, and 5 of the 8 admitted the cheat and
+left trunk buggy with `mvo verify HEAD` printing OK. Which candidate survived
+was decided by the `world_digest_asc` tie-break — a coin flip over
+candidate-authored bytes.
+
+*The same hole had two more doors, and both were ours.* The correlation
+discount reaches `red_bp = 10 000` for two hard-gated instances of one kind,
+`value_bp` goes to zero, and the first rule refused every zero-valued
+purchase — so a **gate the policy declared** was never bought and the adaptive
+arm recorded REJECT where fixed recorded SELECT. And decision 3b's clamp,
+which caps a rival's `tests_passed` at the base tree's count so a forged
+self-report cannot starve anyone, also caps the honest candidate that *adds*
+two regression tests: it ties the incumbent it should beat, loses the digest
+tie-break, scores `flip = 0`, and is dropped — at an **unbounded** budget,
+where decision 13 promises the M1 ladder exactly. 3 of 6 races admitted the
+cheat. The fix is one line of policy: **an ordering term may never refuse a
+hard gate.** `flip` still orders the queue and is still the research signal;
+a rung a hard gate reads is bought on any live world the budget can pay for.
+Re-measured after it: the clamp attack goes 4 of 4 to the honest fix with all
+6 receipts, identical to the fixed arm. The document now says out loud what
+that costs — under a policy whose every rung is hard-gated, adaptive buys what
+fixed buys, and the remaining adaptivity is order plus the ungated rungs.
+
+*The escalation rule written for the starved race could not fire in the
+starved race.* `on_evidence_incomplete` was guarded on `passCount == 0`. The
+race that matters has `passCount == 1` by construction — that is what a
+starved admission *is*. The guard is gone; the predicate is untouched and
+still pure over `(pol, worlds, receipts)`; it now replaces SELECT as well as
+REJECT, and its sentence changes with the case. Measured: **4 of 4 ESCALATE**
+where the same fixture and budget previously admitted. For the policies that
+do not declare it — including the shipped default, which waits on M2d to
+measure the base rate — the SELECT rationale now names every rival it never
+measured, because *"sole world passing all hard gates"* said the others were
+measured and lost, and they were not.
+
+*And the trace was lying in three places.* Every zero-valued row recorded
+`decision-inert: no gate, ranking key or escalation rule reads pytest-suite`
+— under a policy whose gates named `pytest-suite` — and `oracle.skipped`
+carried that sentence into the ledger permanently, where `mvo explain` renders
+it. `schedule.finished.ranking_incomplete` was `false` in every real race
+because `Finish()` never set it, so decision 4's one admitted caveat was
+reported by a warning nothing could trigger. And the calibration residual
+divided a sum over *priced* rows by a sum over *all* receipts, printing
+`predicted 2 ms, actual 2073 ms (+103550.0%)` for a number sold as the thing
+M2d needs. All three are derived from their actual cause now, and a test
+asserts a `hard_gate: true` row can never carry the inert sentence.
+
+**Two corrections to the cost model, one of which is why the budget ever
+binds.** Theil–Sen needs two samples with distinct unit counts, and the unit
+for both pytest kinds is the repository's test count — constant within a
+workspace. So the two kinds whose cost dominates were priced `declared-rank`
+forever, an unpriced purchase is affordable while any pool remains, and
+`max_oracle_ms` did not bind at all on a single-repo workspace. A population
+with no unit variance now fits **fixed = median(wall_ms), per-unit absent**,
+labelled `median-fixed`, with the missing coefficient stated rather than
+printed as a measured zero. And `score_bpps` was an argmax over two units:
+milliseconds for fitted rows, ordinal rank 1–7 for unfitted ones, under one
+field name. Two fields now, ordered in two passes, priced first — which is
+also the cheapest thing that reduces the overrun.
+
+**Still open, and written down as open** in the design doc, `docs/concepts.md`
+and the README. A world that burns the pool starves its siblings: decision 8
+claimed "a world that burns its budget starves only itself" and the code has
+no per-world spend account at all. Measured against the shipped default: a
+conformity cheat sleeping 3 s inside its own last rung spent **4 963 ms of a
+2 000 ms budget**, its rival's suite was refused, and the race admitted it.
+The per-world cap that would fix it was implemented, measured and reverted
+before the red team arrived — at matched budget it manufactured a false
+ESCALATE by refusing a 33 ms rung the remaining 38 ms could afford — and that
+trade has not improved, so v0 ships the mitigations (real prices, priced rows
+first, `BUDGET EXCEEDED by N ms` in the header) and names the residual instead
+of quietly patching it. 3 of 4 races now escalate; 1 of 4 still admits the
+burner on a fresh workspace, where by construction nothing has been measured.
+The clean close is the deadline dispatch §6 already promised and the code
+never implemented — run an unpriced rung under a timeout equal to its world's
+remaining share so it self-eliminates through an errored receipt — which needs
+`internal/oracle`'s timeout path to produce a receipt rather than an error
+return. That is a contract change, so it is named rather than half-done.
+
+**And one feature the design declared IN is not in.** `corpus-differential`
+was specified as a dependent purchase that closes the cohort and records its
+membership. It is not scheduled at all: `Ladder()` enumerates `pol.Required`,
+which is built from what gates, keys, invariants and `require_evidence` read,
+and a reducer named only by `on_behavioral_split` is in none of them — so it
+runs in phase B2 as an unscheduled barrier, in both arms, charged to no
+budget. The design doc's §1, §2.2 and §10 are corrected to say so, the dead
+`ReasonCohortClose` constant is deleted, and `mvo explain --schedule` prints
+B2's receipts under a **"not scheduled"** heading with their spend, so the
+trace stops implying a completeness it does not have. §11's fixture claims are
+corrected the same way: `testdata/schedule/` never existed, `schedule.json` has
+no `props` rung, and `max_oracle_ms` is an intent field, not a policy one.
+
+Compatibility, proved rather than claimed: the shipped default policy still
+does not move (`mv0:f207c3fa…`), `on_evidence_incomplete` still ships off so no
+pre-M2b policy can reach it, the SELECT rationale's new clause is unreachable
+under the exhaustive ladder (a COMPLETED world buys its whole ladder unless a
+gate *failed*, and a failed gate excludes it), and every M0–M2a ledger replays
+byte-for-byte with the `schedule.*` events present and ignored.
+
+**Numbers:** 1 new package, 3 new observational event types, 1 escalation rule
+amended, 0 new receipt fields, 0 new ranking keys, 22 adversarial vectors,
+`scripts/accept.sh` at 7 new steps. `gofmt -l`, `go vet ./...`,
+`go test -count=1 ./...`, `accept.sh`, `m0-accept.sh` and `adversarial.sh` all
+green.
+
 ## 2026-08-15 — M2a: an oracle menu worth scheduling over
 
 **M2's thesis is an adaptive scheduler, and before this block there was

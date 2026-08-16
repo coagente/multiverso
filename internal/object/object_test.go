@@ -70,8 +70,16 @@ func TestDigestGolden(t *testing.T) {
 				// immutable records of what happened.
 				CreatedAt: "2026-01-02T03:04:05Z",
 			},
-			wantCanon: `{"base":{"commit":"3f786850e387550fdab836ed7e6dc881de23001b","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"},"budget":{"max_candidates":2,"max_wall_ms":600000},"created_at":"2026-01-02T03:04:05Z","policy":"mv0:` + strings.Repeat("0", 64) + `","schema":"multiverso.dev/intent/v0","spec":{"description":"","title":"Fix núcleo — 修复"}}`,
-			wantDig:   "mv0:2ddec07fc097fe911028cb010dd293a0b042ab56618febe5567fb286ef39464c",
+			// M2b decision 12: budget.max_oracle_ms is ADDITIVE and always
+			// serialized, so a NEW intent's bytes carry it and its digest
+			// moves — accepted in writing, exactly as M1b/M1c/M1e/M1f
+			// accepted it for the receipt envelope. Nothing recorded moves:
+			// M1e decision 1 pairs every recorded object with the digest it
+			// was recorded under and never re-serializes, so an M1-era
+			// intent decodes with the field absent ⇒ 0 ⇒ unbounded ⇒ the
+			// exhaustive ladder, and keeps racing exactly as it did.
+			wantCanon: `{"base":{"commit":"3f786850e387550fdab836ed7e6dc881de23001b","tree":"git:89e6c98d92887913cadf06b2adb97f26cde4849b"},"budget":{"max_candidates":2,"max_oracle_ms":0,"max_wall_ms":600000},"created_at":"2026-01-02T03:04:05Z","policy":"mv0:` + strings.Repeat("0", 64) + `","schema":"multiverso.dev/intent/v0","spec":{"description":"","title":"Fix núcleo — 修复"}}`,
+			wantDig:   "mv0:4fe3d5314bd2c998795a42cade03332e3b923d5f8b44288659c5f64805cec64e",
 		},
 		{
 			// M1c: execution.isolation_caps is always serialized (XP-2; no

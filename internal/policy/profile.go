@@ -71,6 +71,19 @@ const (
 	UnitMutants    = "mutants"
 )
 
+// Unit authority (M2b decision 7a, amendment A to M2a): WHO AUTHORS the
+// cost.units denominator that makes wall_ms learnable. M2a decision 22 gave
+// receipts cost.units and never asked. For the pytest kinds it is a STREAMED
+// metric — candidate-authorable — and M2a's own M1f-derived rule is that
+// nothing the scheduler consumes may be authored by a candidate. Declared
+// per kind, where the rest of the profile already lives; NO RECEIPT FIELD
+// MOVES. A `candidate`-authority unit count is clamped by the scheduler at
+// fit time to a control-plane measurement the candidate did not author.
+const (
+	AuthorityControlPlane = "control-plane"
+	AuthorityCandidate    = "candidate"
+)
+
 // OracleProfile is the DECLARED shape of a kind's cost and of the
 // correlation structure of its evidence.
 type OracleProfile struct {
@@ -80,7 +93,11 @@ type OracleProfile struct {
 	Cap          string // the policy field that bounds it; "" = unbounded
 	Amortized    bool   // the cost is per RACE, not per world
 	Discriminate string // DiscriminateVerdict | Ordinal | Partition | None
-	Corr         object.Correlation
+	// UnitAuthority names who authors cost.units for this kind:
+	// AuthorityControlPlane | AuthorityCandidate. It is scheduler metadata
+	// and never enters Decide.
+	UnitAuthority string
+	Corr          object.Correlation
 }
 
 // profiles is TOTAL over the registry's kinds: a switch test asserts every
@@ -89,6 +106,10 @@ type OracleProfile struct {
 var profiles = map[string]OracleProfile{
 	KindCommand: {
 		Stage: StageWorld, Dominant: "process-run", Unit: "", Discriminate: DiscriminateVerdict,
+		// It records no unit at all, so nothing is fitted from it — and an
+		// unclassified author is treated as the candidate everywhere, which is
+		// the direction that cannot be exploited.
+		UnitAuthority: AuthorityCandidate,
 		// A command oracle runs an operator-authored command inside the
 		// candidate's process. Its SIGNAL is unknown to us — that is what
 		// "command" means — and "" is the honest record of an unknown, not
@@ -97,24 +118,34 @@ var profiles = map[string]OracleProfile{
 	},
 	KindTreeGuard: {
 		Stage: StageWorld, Dominant: "tree-walk", Unit: UnitPaths, Discriminate: DiscriminateVerdict,
+		// paths_examined is derived from two git trees the control plane
+		// holds: no candidate authors it in any regime.
+		UnitAuthority: AuthorityControlPlane,
 		Corr: object.Correlation{
 			Signal: SignalTreeBytes, Generator: GeneratorControlPlane, Executor: ExecutorControlPlane,
 		},
 	},
 	KindPytestCollect: {
 		Stage: StageWorld, Dominant: "interpreter-start", Unit: UnitTests, Discriminate: DiscriminateVerdict,
+		UnitAuthority: AuthorityCandidate,
 		Corr: object.Correlation{
 			Signal: SignalTestIdentity, Generator: GeneratorRepo, Executor: ExecutorCandidateProcess,
 		},
 	},
 	KindPytestSuite: {
 		Stage: StageWorld, Dominant: "suite-run", Unit: UnitTests, Discriminate: DiscriminateVerdict,
+		// tests_total is streamed, and streamed means forgeable by an
+		// adversary already executing in the process: the scheduler clamps it.
+		UnitAuthority: AuthorityCandidate,
 		Corr: object.Correlation{
 			Signal: SignalTestOutcomes, Generator: GeneratorRepo, Executor: ExecutorCandidateProcess,
 		},
 	},
 	KindCorpusObserve: {
 		Stage: StageWorld, Dominant: "case-replay", Unit: UnitCases, Cap: "corpus.cases_max",
+		// The denominator is the CORPUS OBJECT's case count, materialized on
+		// the base tree before any candidate existed.
+		UnitAuthority: AuthorityControlPlane,
 		// A raw observation discriminates NOTHING on its own: it is the
 		// input the reducer partitions. Saying "verdict" here would invite
 		// a scheduler to buy it as if it decided something.
@@ -125,6 +156,7 @@ var profiles = map[string]OracleProfile{
 	},
 	KindCorpusDifferential: {
 		Stage: StageCohort, Dominant: "hashing", Unit: UnitWorldCases, Discriminate: DiscriminatePartition,
+		UnitAuthority: AuthorityControlPlane,
 		Corr: object.Correlation{
 			Signal: SignalValueBehavior, Generator: GeneratorBaseTree, Executor: ExecutorControlPlane,
 		},
@@ -132,6 +164,9 @@ var profiles = map[string]OracleProfile{
 	KindProperties: {
 		Stage: StageWorld, Dominant: "case-replay", Unit: UnitCases, Cap: "corpus.cases_max",
 		Discriminate: DiscriminateVerdict,
+		// property_cases_total is stream-derived per run, so the count a
+		// receipt records is the candidate process's report of it.
+		UnitAuthority: AuthorityCandidate,
 		// The properties come from the REPOSITORY's own @given tests plus
 		// the policy-declared module, so the generator is repo+policy and
 		// the discount rule reads it as strongly correlated with the
@@ -142,6 +177,9 @@ var profiles = map[string]OracleProfile{
 	},
 	KindMutationDiff: {
 		Stage: StageWorld, Dominant: "suite-run-per-mutant", Unit: UnitMutants, Cap: "mutation.max_mutants",
+		// The mutants are enumerated by the control plane from the captured
+		// patch, so the denominator is its selection, not the candidate's.
+		UnitAuthority: AuthorityControlPlane,
 		// Ordinal, and RECORDED rather than ranked: every candidate-
 		// comparing key derivable from it is signed by something the
 		// candidate chooses (decision 8).

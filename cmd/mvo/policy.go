@@ -401,6 +401,13 @@ func escalationRules(e policy.Escalation) []string {
 	if e.OnAllWorldsFailedMachinery {
 		out = append(out, "on_all_worlds_failed_machinery")
 	}
+	// Rule 1a (M2b): below machinery failure, above rule 1b. It is the only
+	// other rule that replaces REJECT, so an operator reading this line
+	// learns whether a starved race will say "these candidates are bad" or
+	// "we never bought the evidence".
+	if e.OnEvidenceIncomplete {
+		out = append(out, "on_evidence_incomplete")
+	}
 	// Rule 1b (M2a): below machinery failure, above require_evidence. It
 	// carries its parameter because the parameter IS the rule — "escalate
 	// at 2 classes" and "escalate at 6" are different products, and a

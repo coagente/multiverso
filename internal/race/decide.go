@@ -77,12 +77,26 @@ func rationale(pol policy.Policy, t *RaceTrace, base string) string {
 func rationaleV1(pol policy.Policy, t *RaceTrace, base string) string {
 	gates := strings.Join(t.Gates, ",")
 	keys := strings.Join(t.Keys, ",")
+	unbought := unboughtClause(pol, t)
 	switch {
 	case base == TypeSelect && t.PassCount >= 2:
 		c := t.Comparisons[0]
 		return fmt.Sprintf(
-			"%d/%d worlds passed hard gates [%s]; selected %s over %s at ranking key %d %s (%s); ranking [%s]",
-			t.PassCount, len(t.Candidates), gates, t.Winner, c.Other, c.DecidedAt, c.Key, c.Text, keys)
+			"%d/%d worlds passed hard gates [%s]; selected %s over %s at ranking key %d %s (%s)%s; ranking [%s]",
+			t.PassCount, len(t.Candidates), gates, t.Winner, c.Other, c.DecidedAt, c.Key, c.Text, unbought, keys)
+	case base == TypeSelect && unbought != "":
+		// The over-claim this project exists to remove, arriving through the
+		// front door of its own scheduler: "sole world passing all hard
+		// gates" says the rivals were measured and lost. When a rival's gate
+		// was never PURCHASED, it says something that did not happen — so
+		// the sentence names what was bought instead, and names what was
+		// not. Unreachable under the exhaustive ladder (a COMPLETED world
+		// buys its whole ladder unless a gate failed, and a failed gate
+		// disqualifies it from this clause), so no historical rationale
+		// moves.
+		return fmt.Sprintf(
+			"%d/%d worlds passed hard gates [%s]; selected %s (the only world holding a passing receipt for every hard gate)%s; ranking [%s]",
+			t.PassCount, len(t.Candidates), gates, t.Winner, unbought, keys)
 	case base == TypeSelect:
 		return fmt.Sprintf(
 			"%d/%d worlds passed hard gates [%s]; selected %s (sole world passing all hard gates); ranking [%s]",
@@ -112,6 +126,39 @@ func rationaleV1(pol policy.Policy, t *RaceTrace, base string) string {
 		return fmt.Sprintf("0/%d worlds passed hard gates [%s]; %s",
 			len(t.Candidates), gates, strings.Join(details, "; "))
 	}
+}
+
+// unboughtClause names every COMPLETED world that passed every hard gate its
+// evidence could evaluate and holds NO receipt at all for some other hard
+// gate — the starved rival. It is the same predicate `on_evidence_incomplete`
+// reads (M2b decision 14), rendered for the policies that do not declare the
+// rule, because a SELECT that does not mention the rival it never measured is
+// a decision claiming more than its evidence.
+//
+// It is empty in every race the exhaustive ladder can produce, so it changes
+// no recorded rationale: under exhaustion a COMPLETED world climbs its whole
+// ladder unless a gate FAILED, and a failed gate takes it out of this clause.
+func unboughtClause(pol policy.Policy, t *RaceTrace) string {
+	if len(pol.Gates) == 0 {
+		return ""
+	}
+	var parts []string
+	for i := range t.Candidates {
+		c := &t.Candidates[i]
+		if c.World == t.Winner {
+			continue
+		}
+		missing, first, ok := unpurchasedGates(pol, c)
+		if !ok {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s was not measured against %d hard gate(s) (first unpurchased: %s@%s)",
+			c.World, missing, first.Predicate, first.Oracle))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "; evidence incomplete: " + strings.Join(parts, ", ")
 }
 
 // rationaleV0 reproduces M0's two format strings character for character.

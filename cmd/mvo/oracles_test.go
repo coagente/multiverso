@@ -7,6 +7,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/object"
 	"github.com/coagente/multiverso/internal/policy"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // mkReceipts builds n receipts for one oracle config with the given
@@ -97,23 +98,36 @@ func TestOracleMenuRefusesATwoPointFit(t *testing.T) {
 	}
 }
 
-// A COLUMN OF POINTS IS NOT A LINE. Three receipts that all scaled by the
-// same unit count admit infinitely many (fixed, per-unit) pairs, so any pair
-// we printed would be invented — and inventing a per-unit coefficient is
-// exactly how a scheduler learns a repository is cheap when it is not.
-func TestOracleMenuRefusesAFitWithNoUnitVariance(t *testing.T) {
+// A COLUMN OF POINTS IS NOT A LINE — BUT IT IS A MEASUREMENT. Three receipts
+// that all scaled by the same unit count admit infinitely many (fixed,
+// per-unit) pairs, so no SLOPE may be printed: inventing a per-unit
+// coefficient is exactly how a scheduler learns a repository is cheap when it
+// is not. The FIXED cost, though, was measured three times, and calling that
+// "no local measurement" is the honesty rule pointed backwards — it is what
+// left pytest-collect and pytest-suite, the two kinds whose cost dominates,
+// priced `declared-rank` forever on every single-repo workspace.
+func TestOracleMenuFitsFixedCostOnlyWithNoUnitVariance(t *testing.T) {
 	cfg := "mv0:" + strings.Repeat("2", 64)
 	kinds := map[string]attribution{cfg: {Kind: policy.KindPytestCollect, Autoload: policy.AutoloadOff}}
 	rows := menuRows(mkReceipts(cfg, [2]int64{8, 400}, [2]int64{8, 402}, [2]int64{8, 397}), kinds, nil)
 	r := rowFor(t, rows, policy.KindPytestCollect)
-	if r.Measurement != nil {
-		t.Fatalf("a zero-variance sample produced a fit %+v", *r.Measurement)
+	if r.Measurement == nil {
+		t.Fatalf("three timed receipts produced no measurement at all: note %q", r.Note)
+	}
+	if r.Measurement.Estimator != schedule.EstimatorMedianFixed {
+		t.Errorf("estimator = %q, want %q", r.Measurement.Estimator, schedule.EstimatorMedianFixed)
+	}
+	if r.Measurement.FixedMS != 400 {
+		t.Errorf("fixed = %v ms, want the median 400", r.Measurement.FixedMS)
+	}
+	if r.Measurement.PerUnit != 0 {
+		t.Errorf("per-unit = %v, want none: no pair of samples could measure a slope", r.Measurement.PerUnit)
 	}
 	if r.SampleN != 3 {
 		t.Errorf("SampleN = %d, want 3", r.SampleN)
 	}
-	if !strings.Contains(r.Note, "units do not vary") {
-		t.Errorf("note = %q, want it to name the zero variance", r.Note)
+	if !strings.Contains(r.Note, "units do not vary") || !strings.Contains(r.Note, "fixed cost only") {
+		t.Errorf("note = %q, want it to name the zero variance AND what was measured anyway", r.Note)
 	}
 }
 
@@ -140,6 +154,41 @@ func TestOracleMenuFitsWhatItCan(t *testing.T) {
 	}
 	if r.Note != "" {
 		t.Errorf("a measured kind also carried a note: %q", r.Note)
+	}
+}
+
+// THE ESTIMATOR MOVED AND THE NUMBER'S UNITS DID NOT (M2b amendment B).
+// M2a fitted by least squares, which one poisoned sample drags arbitrarily
+// far — and `cost.units` is candidate-authorable for the pytest kinds, so the
+// estimator was a write primitive on every future race's cost model. The
+// median of pairwise slopes holds. Both halves are asserted: that the
+// coefficient survives the poison, and that the wire says WHICH fit produced
+// it, because a reader cannot tell the two apart by looking at the value.
+func TestOracleMenuFitsByTheilSenAndSaysSo(t *testing.T) {
+	cfg := "mv0:" + strings.Repeat("7", 64)
+	kinds := map[string]attribution{cfg: {Kind: policy.KindPytestSuite, Autoload: policy.AutoloadOff}}
+	// wall = 400 + 3·units on five honest points, plus one receipt claiming
+	// 5 000 units against 410 ms: the vector-22 shape, at fit time.
+	clean := [][2]int64{{8, 424}, {16, 448}, {24, 472}, {32, 496}, {40, 520}}
+	honest := mkReceipts(cfg, clean...)
+	poisoned := mkReceipts(cfg, append(append([][2]int64{}, clean...), [2]int64{5000, 410})...)
+
+	h := rowFor(t, menuRows(honest, kinds, nil), policy.KindPytestSuite)
+	p := rowFor(t, menuRows(poisoned, kinds, nil), policy.KindPytestSuite)
+	if h.Measurement == nil || p.Measurement == nil {
+		t.Fatalf("no fit: honest %q poisoned %q", h.Note, p.Note)
+	}
+	if h.Measurement.Estimator != "theil-sen" {
+		t.Errorf("estimator = %q, want theil-sen on the wire", h.Measurement.Estimator)
+	}
+	if got := h.Measurement.PerUnit; got < 2.99 || got > 3.01 {
+		t.Errorf("clean per-unit = %v, want 3", got)
+	}
+	// The median of pairwise slopes moves; it does not collapse. Least
+	// squares on this sample lands near 0.002 ms/test — two orders of
+	// magnitude cheap, which is the whole attack.
+	if got := p.Measurement.PerUnit; got < 2.0 || got > 3.5 {
+		t.Errorf("poisoned per-unit = %v, want the median to hold near 3 ms/test", got)
 	}
 }
 

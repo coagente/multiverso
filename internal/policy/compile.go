@@ -844,6 +844,7 @@ func Compile(dig string, p object.PolicyV1) (Policy, error) {
 		OnAllWorldsFailedMachinery: p.Escalation.OnAllWorldsFailedMachinery,
 		OnInvariantViolation:       p.Escalation.OnInvariantViolation,
 		OnBehavioralSplit:          p.Escalation.OnBehavioralSplit,
+		OnEvidenceIncomplete:       p.Escalation.OnEvidenceIncomplete,
 	}
 	reqNames := append([]string{}, p.Escalation.RequireEvidence...)
 	sort.Strings(reqNames)

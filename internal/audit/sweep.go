@@ -79,6 +79,9 @@ func (r Report) OK() bool { return len(r.Missing) == 0 && len(r.Corrupt) == 0 }
 //	                        inputs[*] where the value is a digest
 //	corpus.recorded         corpus, base_observation, observer, stdout, stderr
 //	oracle.skipped          — (observational, no payload digests)
+//	schedule.started        — (observational, no payload digests)
+//	schedule.step           — (observational, no payload digests)
+//	schedule.finished       — (observational, no payload digests)
 //	decision.recorded       evidence[*], policy, subject[*], intent
 //	intent.created          policy
 //	baseline.recorded       stdout, stderr, probe, evidence_stream
@@ -87,8 +90,11 @@ func (r Report) OK() bool { return len(r.Missing) == 0 && len(r.Corrupt) == 0 }
 //	policy.created          the payload's own digest
 //
 // Observational events whose payloads are not content-addressed
-// (race.started, admission.*) contribute nothing: they are covered by the
-// ledger's hash chain, which audit verifies separately. agent.finished is
+// (race.started, admission.*, and M2b's three schedule.* rows) contribute
+// nothing: they are covered by the ledger's hash chain, which audit verifies
+// separately. The allocation trace names no CAS object BY DESIGN — decision
+// 17 keeps exactly one copy of it, in the ledger, because a second copy in
+// CAS would be a source that could disagree with the first. agent.finished is
 // observational too, but it NAMES CAS blobs — and `stderr` is the only
 // place a CONFIG_ERROR world's reason survives, so a sweep that skipped it
 // would let the one record an operator needs be deleted under an `OK`.

@@ -198,7 +198,9 @@ $ echo "$INTENT"
 mv0:223b311241502607f2114f0c8c6859a84ff5c328292fa849aebff67db1e9374c
 ```
 
-The intent captures `HEAD` as its base commit and tree, pins the workspace's default policy digest, and takes a budget (`--budget-candidates`, default 2; `--budget-wall-ms`, default 600000). It prints one line: the digest, which is the handle for everything that follows.
+The intent captures `HEAD` as its base commit and tree, pins the workspace's default policy digest, and takes a budget (`--budget-candidates`, default 2; `--budget-wall-ms`, default 600000; `--budget-oracle-ms`, default 0). It prints one line: the digest, which is the handle for everything that follows.
+
+`--budget-oracle-ms` is the M2b adaptive scheduler's pool: the total oracle milliseconds a race may spend, summed across worlds. **`0` means unbounded, which is the M1 ladder** — every rung of every world that is still alive gets bought — so an intent recorded before M2b races exactly as it always did. Give it a positive value and the scheduler starts declining purchases, and `mvo explain --schedule` shows which and why.
 
 That digest is now a permanent statement of intent — the rules that will judge this work were fixed before any candidate existed.
 
@@ -966,6 +968,7 @@ Be precise about this, because the names promise more than the mechanism deliver
 | `--max-usd` | the CLI's own `--max-budget-usd` | claude-code only. **For codex there is no dollar cap at all** — a codex world can spend up to the wall clock. |
 | `--candidates` | mvo | Capped by the intent's `budget.max_candidates`; exceeding it is a usage error. |
 | intent `--budget-wall-ms` | mvo | Bounds the whole race. On expiry, worlds are killed and the race records an ordinary REJECT — **it does not say "budget exhausted"**. |
+| intent `--budget-oracle-ms` | mvo's scheduler | Bounds the ORACLE spend, additively across worlds. Real, with one honest limit: a purchase is committed against a PREDICTED cost and charged its ACTUAL one, so the bound is overrun by at most the last batch — and on a workspace that has fitted no coefficient yet (`mvo oracles` says `no local measurement`) the prediction is rank-only, so that last batch is the whole overrun. `mvo explain --schedule` prints spent against budget, so the overrun is visible rather than hidden. A race that stops here records the `S-budget` stop clause; whether that becomes a REJECT or an ESCALATE is the pinned policy's `on_evidence_incomplete`. |
 
 There is no aggregate dollar ceiling across worlds. Nothing sums the per-world cost against a limit. If you want a hard cap on a race, the honest lever today is `--candidates` × `--max-usd` on claude-code, and the wall clock everywhere else.
 

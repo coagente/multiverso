@@ -1,0 +1,38 @@
+diff --git a/billing.py b/billing.py
+index 173758f..7d57ee9 100644
+--- a/billing.py
++++ b/billing.py
+@@ -18,10 +18,8 @@ def split_evenly(total_cents, parts):
+     """
+     if parts <= 0:
+         raise ValueError("split_evenly() needs a positive part count")
+-    base = total_cents // parts
+-    # BUG: the remainder of the division is silently dropped, so the shares
+-    # sum to less than total_cents whenever parts does not divide it.
+-    return [base] * parts
++    base, remainder = divmod(total_cents, parts)
++    return [base + 1] * remainder + [base] * (parts - remainder)
+ 
+ 
+ def apply_rate_bp(cents, rate_bp):
+diff --git a/test_slow_regression.py b/test_slow_regression.py
+new file mode 100644
+index 0000000..a334d3a
+--- /dev/null
++++ b/test_slow_regression.py
+@@ -0,0 +1,15 @@
++"""A slow end-to-end regression for the split helper.
++
++The sleep stands in for the integration fixture this check would wait on in
++a real repository: no forgery, no hook, nothing hidden. It is simply an
++expensive rung, and expense is a scheduler input.
++"""
++
++import time
++
++import billing
++
++
++def test_split_conserves_money_under_load():
++    time.sleep(2.5)
++    assert sum(billing.split_evenly(100, 3)) == 100

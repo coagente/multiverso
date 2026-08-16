@@ -76,9 +76,24 @@ type Spec struct {
 }
 
 // Budget bounds a race.
+//
+// MaxOracleMS is M2b decision 12's ONE additive field: the ADDITIVE oracle
+// spend bound the adaptive scheduler allocates, distinct from MaxWallMS,
+// which bounds the race's clock and is not additive under parallelism. It
+// belongs on the intent because CP-2 puts budget there, because it is pinned
+// at creation (which is exactly what PRD §11's three-budget-levels protocol
+// needs — three intents differing only in this integer), and because it is
+// NOT a gate: CP-5 says the pinned policy determines the gate.
+//
+// 0 ⇒ UNBOUNDED ⇒ M1 SEMANTICS. An M1-era intent decodes with the field
+// absent ⇒ 0 ⇒ the exhaustive ladder, so every recorded intent keeps racing
+// exactly as it did. Forward incompatibility is accepted, as in M1f decision
+// 3: an M1 binary refuses an M2b intent at decode, which is the correct
+// failure.
 type Budget struct {
 	MaxCandidates int   `json:"max_candidates"`
 	MaxWallMS     int64 `json:"max_wall_ms"`
+	MaxOracleMS   int64 `json:"max_oracle_ms"`
 }
 
 // Intent is a request for change against a base tree.
@@ -533,6 +548,30 @@ type EscalationSpec struct {
 	// stop reading. We do not know the rate; shipping it on would be
 	// guessing with somebody else's attention.
 	OnBehavioralSplit int `json:"on_behavioral_split,omitempty"`
+	// OnEvidenceIncomplete is M2b rule 1a (decision 14), and it exists
+	// because M2a's claim that "a scheduler which runs out of budget
+	// produces an ESCALATE" was FALSE against the shipped machineryFailure:
+	// a COMPLETED world that bought guard and collect, passed both, and
+	// never bought suite has no failing receipt and a first gate that did
+	// produce one, so rule 1 does not fire and the race records REJECT —
+	// "these candidates are bad" — when the truth is "we never bought the
+	// evidence". That is the over-claim this project exists to remove,
+	// arriving through the front door of its own scheduler.
+	//
+	// It is a PURE PREDICATE over inputs Decide already holds: "this world
+	// passed everything it paid for and never paid for gate Y". It reads no
+	// scheduler state and must not — "the budget ran out" is not a function
+	// of (policy, worlds, receipts), so routing it through Decide would
+	// break purity and replay at once. The rule reports the STATE, never
+	// the cause; the purchase law says Decide cannot distinguish "no
+	// receipt because we declined to buy" from "no receipt because the
+	// oracle crashed", nor should it.
+	//
+	// It ships OFF: bool zero ⇒ off ⇒ every pre-M2b policy's semantics
+	// reproduced exactly (M1f decision 3), and no pre-M2b policy can
+	// declare it, so no historical evaluation moves. Promoting it to the
+	// shipped default waits on M2d measuring the base rate.
+	OnEvidenceIncomplete bool `json:"on_evidence_incomplete,omitempty"`
 }
 
 // RecordedWorld and RecordedReceipt are the identity-carrying forms of a
