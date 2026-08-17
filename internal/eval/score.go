@@ -132,8 +132,12 @@ func NewScorer(inst Instance, h HiddenOracle, hiddenBytes []byte, repo, root, py
 		return nil, fmt.Errorf("eval: scorer root %s is inside the workspace %s: "+
 			"the reconstruction must live where no race could see it", abs, wsAbs)
 	}
+	interp, err := ResolveInterpreter(python)
+	if err != nil {
+		return nil, err
+	}
 	s := &Scorer{Instance: inst, Hidden: h, HiddenBytes: hiddenBytes,
-		Repo: repo, Root: abs, Python: python}
+		Repo: repo, Root: abs, Python: interp}
 	// The hidden suite gets its OWN top-level temp directory with an
 	// unguessable name: see HiddenDirPrefix for why a sibling of the
 	// reconstruction is not good enough.
@@ -771,3 +775,93 @@ func EnvDigestOf(w object.World) string {
 	}
 	return object.CASKeyBytes([]byte(strings.Join(HiddenEnv(), "\n")))
 }
+
+// ResolveInterpreter turns an interpreter name into the absolute real path of
+// the binary, resolved against the AMBIENT PATH, and checks that it can import
+// what the hardened scripts need under the flags and closed environment they
+// actually run with.
+//
+// Both halves are load-bearing, and CI taught us each one separately. The
+// labeller's environment is closed by design (HiddenEnv), so a variable a
+// developer exported cannot move a label — but a closed PATH also means a bare
+// name like "python3" resolves to whatever sits in /usr/bin on the host. On a
+// GitHub runner that is a build whose stdlib is not where a prefix computed
+// from that path expects it, so `python3 -S` loses every extension module in
+// lib-dynload: json, os and sys are frozen and import fine, while binascii and
+// _posixsubprocess do not. The runner then dies before writing a report, and
+// two CI cycles were spent learning that from "empty report".
+//
+// Resolving against the ambient PATH picks the interpreter the developer or
+// the CI image actually installed; passing its absolute real path lets CPython
+// compute its own prefix correctly; and the import probe fails here, by name,
+// instead of three layers down as a missing report.
+// It tries the candidates in order and takes the FIRST that passes the probe,
+// because neither candidate is reliably the right one: a tool-cache build may
+// be a shared-library install that cannot start without the LD_LIBRARY_PATH
+// the closed environment deliberately withholds, and the system build may be
+// the one whose stdlib the closed PATH cannot reach. Whichever actually works
+// under the real flags is the correct answer, and if none does the error names
+// every candidate with the reason it was rejected rather than failing three
+// layers down as a missing report.
+func ResolveInterpreter(python string) (string, error) {
+	if python == "" {
+		python = "python3"
+	}
+	var cands []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			p = real
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		for _, c := range cands {
+			if c == p {
+				return
+			}
+		}
+		cands = append(cands, p)
+	}
+	if filepath.IsAbs(python) {
+		add(python)
+	} else if found, err := exec.LookPath(python); err == nil {
+		add(found)
+	}
+	// The closed PATH's own answer, and the usual system location, so a
+	// tool-cache interpreter that cannot start is not the only thing tried.
+	for _, dir := range []string{"/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin"} {
+		add(filepath.Join(dir, filepath.Base(python)))
+	}
+
+	var why []string
+	for _, c := range cands {
+		if _, err := os.Stat(c); err != nil {
+			continue
+		}
+		probe := exec.Command(c, "-S", "-B", "-c", HardenedProbeImports)
+		probe.Env = HiddenEnv()
+		out, perr := probe.CombinedOutput()
+		if perr == nil {
+			return c, nil
+		}
+		why = append(why, fmt.Sprintf("  %s: %v: %s", c, perr, lastLine(string(out))))
+	}
+	if len(why) == 0 {
+		return "", fmt.Errorf("eval: no interpreter named %q exists on any candidate path", python)
+	}
+	return "", fmt.Errorf("eval: no interpreter can import what the hardened runner needs under -S with the labeller's closed environment; tried:\n%s",
+		strings.Join(why, "\n"))
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// HardenedProbeImports is the import line the probe runs. It names every
+// module the embedded scripts import; TestHardenedScriptsImportOnlyWhatThis...
+// recovers that set from this package's sources and fails if the two drift.
+const HardenedProbeImports = "import json, os, shutil, subprocess, sys, tempfile, traceback; import xml.sax.saxutils"

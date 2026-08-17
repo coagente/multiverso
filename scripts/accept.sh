@@ -2096,14 +2096,20 @@ set -e
 # R >= 3 and refuses to print a verdict below it: a single run at a budget
 # level is an anecdote, and the rule is enforced by the harness rather than by
 # discipline. Every number M2b's own BUILDLOG quotes was produced at R = 1. ---
+# Five are requested, not three: a replicate can legitimately be dropped (a
+# host probe outside tolerance under load), and asserting "exactly 3 requested
+# and all 3 kept" turned a correct refusal into an acceptance failure whenever
+# this step ran beside a busy test suite. The assertion that carries the
+# meaning is "a verdict was produced at or above the documented floor".
 COMPARE_R3="$WORK/compare-r3.json"
-if bash "$ROOT/scripts/schedule-compare.sh" --replicates 3 --level B2 --warmup 1 --json >"$COMPARE_R3" 2>"$WORK/compare-r3.err"; then
+if bash "$ROOT/scripts/schedule-compare.sh" --replicates 5 --level B2 --warmup 1 --json >"$COMPARE_R3" 2>"$WORK/compare-r3.err"; then
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 v = d["verdict"]
 assert v["verdict_available"] is True, v
-assert v["replicates"] == 3, v
+assert v["replicates"] == 5, v
+assert v["kept"] >= 3, v
 assert d["a"]["selector"] != d["b"]["selector"], (d["a"]["selector"], d["b"]["selector"])
 # Dispersion, not a mean alone: median + IQR + min/max per arm.
 for arm in ("a", "b"):
