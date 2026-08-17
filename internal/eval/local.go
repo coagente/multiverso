@@ -878,7 +878,6 @@ It runs under ` + "`python3 -S -B`" + `: no site, so no sitecustomize.py from a
 candidate tree is imported, and no bytecode is written into the tree it judges.
 """
 
-import binascii
 import json
 import os
 import shutil
@@ -930,7 +929,12 @@ def _probe(repo, timeout_s):
         fd, path = tempfile.mkstemp(prefix="mvo-probe-out-")
         os.unlink(path)
         try:
-            token = binascii.hexlify(os.urandom(16)).decode("ascii")
+            # bytes.hex(), not binascii.hexlify: binascii is an extension
+            # module in lib-dynload and is not importable under -S on every
+            # interpreter this runs on (it is absent on the CI image). A
+            # hardened runner must lean on builtins only, which is the point
+            # of running it with no site.
+            token = os.urandom(16).hex()
             spec = json.dumps({
                 "out_fd": fd,
                 "token": token,
