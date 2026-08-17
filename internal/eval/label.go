@@ -324,6 +324,23 @@ func (c ControlOutcome) OK() bool {
 // counts kept. That is not ceremony: automated curation leaves task-validity
 // noise, and dropping invalid instances is the only defence available without
 // humans.
+// whyNoReport renders what the runner itself said, so a control failure names
+// its cause instead of only its symptom. "empty report" alone was the whole
+// diagnosis of a child that never started, which cost a CI cycle to work out.
+func whyNoReport(o Observation) string {
+	var parts []string
+	if o.RunnerErr != "" {
+		parts = append(parts, o.RunnerErr)
+	}
+	if o.TimedOut {
+		parts = append(parts, "runner timed out")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
+}
+
 func CheckControls(h HiddenOracle, base, gold Observation) ControlOutcome {
 	out := ControlOutcome{}
 	var details []string
@@ -332,7 +349,7 @@ func CheckControls(h HiddenOracle, base, gold Observation) ControlOutcome {
 		rep := ParseSuiteReport(base.ReportXML)
 		switch {
 		case !rep.Parsed:
-			details = append(details, "negative control report did not parse: "+rep.ParseError)
+			details = append(details, "negative control report did not parse: "+rep.ParseError+whyNoReport(base))
 		case base.Nonce != "" && rep.Nonce != base.Nonce:
 			details = append(details, "negative control report did not echo the nonce")
 		default:
@@ -363,7 +380,7 @@ func CheckControls(h HiddenOracle, base, gold Observation) ControlOutcome {
 		rep := ParseSuiteReport(gold.ReportXML)
 		switch {
 		case !rep.Parsed:
-			details = append(details, "positive control report did not parse: "+rep.ParseError)
+			details = append(details, "positive control report did not parse: "+rep.ParseError+whyNoReport(gold))
 		case gold.Nonce != "" && rep.Nonce != gold.Nonce:
 			details = append(details, "positive control report did not echo the nonce")
 		default:

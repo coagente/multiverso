@@ -327,11 +327,18 @@ func (s *Scorer) RunHidden(reconDir string) (Observation, error) {
 	if rerr != nil {
 		// No report is not an error: it is a cross-check failure, and the
 		// judge turns it into `unknown` with a reason. The runner's own
-		// output is kept in RunnerErr only when there is nothing else to
-		// say, so a crash is diagnosable.
-		if obs.RunnerErr == "" && obs.ExitCode == 0 {
-			obs.RunnerErr = "no report written: " + strings.TrimSpace(combined.String())
+		// output is ALWAYS kept here, including on a non-zero exit: keeping
+		// it only when the exit code was 0 discarded the stderr of exactly
+		// the runs that crashed, which left "empty report" as the whole
+		// diagnosis of a child that never started.
+		detail := strings.TrimSpace(combined.String())
+		if detail == "" {
+			detail = "(the runner wrote nothing to stdout or stderr)"
 		}
+		if obs.RunnerErr != "" {
+			obs.RunnerErr += "; "
+		}
+		obs.RunnerErr += fmt.Sprintf("no report written (exit %d): %s", obs.ExitCode, detail)
 		return obs, nil
 	}
 	obs.ReportXML = b
