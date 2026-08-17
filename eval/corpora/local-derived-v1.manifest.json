@@ -1,0 +1,98 @@
+{
+  "corpus": "local-derived",
+  "digest_basis": "fixture-sources",
+  "instances": [
+    {
+      "id": "advrepo-split-A",
+      "image_ref": "",
+      "oracle_digest": "",
+      "public_digest": "",
+      "url": ""
+    },
+    {
+      "id": "advrepo-split-B",
+      "image_ref": "",
+      "oracle_digest": "",
+      "public_digest": "",
+      "url": ""
+    },
+    {
+      "id": "toyrepo-mean-A",
+      "image_ref": "",
+      "oracle_digest": "",
+      "public_digest": "",
+      "url": ""
+    },
+    {
+      "id": "toyrepo-mean-B",
+      "image_ref": "",
+      "oracle_digest": "",
+      "public_digest": "",
+      "url": ""
+    },
+    {
+      "id": "toyrepo-mean-C",
+      "image_ref": "",
+      "oracle_digest": "",
+      "public_digest": "",
+      "url": ""
+    }
+  ],
+  "network": false,
+  "notes": [
+    "local-derived ships: NO NETWORK, no download, no image. n = 2 repositories, so this corpus is a DIAGNOSIS and never a rate with a confidence interval.",
+    "digest_basis is fixture-sources: what is pinned is the COMMITTED FIXTURE BYTES the generator reads, not the generated instance JSON. The generator is code that will improve; the fixture is data that must not move silently.",
+    "Every instance's hidden oracle is GENERATED at materialization time under a fresh 32-byte canary, so no oracle byte and no canary is ever committed.",
+    "Candidates: S1 gold (test hunks stripped, recorded), S2 mechanical derivations of it, S3 the declared laundering vectors. SYNTHETIC-CANDIDATES on every table."
+  ],
+  "revision": "",
+  "schema": "multiverso.dev/eval-manifest/v0",
+  "sources": [
+    {
+      "digest": "sha256:1e4c893935e84d05de7d4c513eb5c2fc9176c81773b42f28a5303ee552293571",
+      "path": "testdata/adversarial/repo/billing.py"
+    },
+    {
+      "digest": "sha256:b7984663b45de226bfc93d1bf41cfe514aeeacc86cdb093875712a9c56931ea4",
+      "path": "testdata/adversarial/repo/test_billing.py"
+    },
+    {
+      "digest": "sha256:61257766326511fd1df7e7636414321cb1b9251bdd5b18a364f34246549ed86f",
+      "path": "testdata/adversarial/vectors/01-honest_fix.patch"
+    },
+    {
+      "digest": "sha256:54211635cf406da8e1a06dbf6b3431946770a2de2d73d8aed7a11caf76acbfdd",
+      "path": "testdata/adversarial/vectors/02-test_deletion.patch"
+    },
+    {
+      "digest": "sha256:a869af405b7b1b7c0e9267e99705443e9d39a8ee88ea0b301236daf5afa856fc",
+      "path": "testdata/adversarial/vectors/07-assertion_weakening.patch"
+    },
+    {
+      "digest": "sha256:8e08ab97ab4b480714f851649bd9629bf33dfc6dc3b47e218359674e5faa8129",
+      "path": "testdata/adversarial/vectors/10-padded_deletion.patch"
+    },
+    {
+      "digest": "sha256:23f5ebb5c0080116c605980a5469c9df97b156d35cb091d40c890c515c33d583",
+      "path": "testdata/toyrepo/patches-agree/patch-p2.patch"
+    },
+    {
+      "digest": "sha256:63956a4c0ad23721babde5064f2644be3f0e2b1c184d1d2e0b4ca94218ab6226",
+      "path": "testdata/toyrepo/patches-hidden-reach/patch-hidden-reach.patch"
+    },
+    {
+      "digest": "sha256:0993b2025fbe0218eb2e89f37d1137e3b006f8d52bc510ae555c3ba7a93ca2ce",
+      "path": "testdata/toyrepo/patches/patch-a.patch"
+    },
+    {
+      "digest": "sha256:7baa3c1496a1191816e19fee53939eac8991b560b0daf5be9e1b1c1687764ace",
+      "path": "testdata/toyrepo/stats.py"
+    },
+    {
+      "digest": "sha256:ea99dc4749b91ab86ed5e25b6ca2c3c73493a4e444fd42290bf9e8d9072e5a88",
+      "path": "testdata/toyrepo/test_stats.py"
+    }
+  ],
+  "upstream": "",
+  "version": "v1"
+}

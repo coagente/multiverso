@@ -1,0 +1,18 @@
+{
+  "schema": "multiverso.dev/eval-manifest/v0",
+  "corpus": "swebench-live-lite",
+  "version": "unpinned",
+  "upstream": "https://huggingface.co/datasets/SWE-bench-Live/SWE-bench-Live",
+  "revision": "",
+  "network": true,
+  "digest_basis": "instance-payload",
+  "sources": [],
+  "instances": [],
+  "notes": [
+    "THIS MANIFEST IS A TEMPLATE AND IT FETCHES NOTHING. It carries no instance rows and no revision, so `mvo-eval fetch swebench-live-lite` prints the one upstream URL it would contact and then REFUSES, because a manifest with no per-instance digest cannot verify a single byte and this plane does not write bytes it cannot verify.",
+    "NETWORK ACCESS IS DECLARED HERE, IN THE FILE A REVIEWER READS, so nobody discovers it from a stack trace. `network: true` is the whole disclosure: filling this manifest in means an explicit, opt-in download of SWE-bench-Live dataset rows (and, with --images, the per-instance RepoLaunch images), cached under $MVO_EVAL_HOME outside the repository, printed URL by URL before contact, requiring --yes for a non-interactive run, and refusing to write anything on a digest mismatch.",
+    "WHAT IT WOULD BUY, and only this: PRD §11's instance counts for the SELECTOR arms, plus research ch. 9's temporal-holdout contamination defence via the frozen lite/verified splits and the newest monthly +50 slice. It buys nothing about generation, because M2d charges no tokens.",
+    "WHAT MUST BE TRUE BEFORE IT IS FILLED IN. Every row needs (id, url, public_digest, oracle_digest, image_ref). The oracle digest is over the HIDDEN bytes, which for a fetched corpus are stable — unlike local-derived's generated oracles — so a fetched corpus's freeze file pins them and `score --split eval` checks them.",
+    "M2d ships this file empty on purpose. A manifest with plausible-looking digests nobody has verified is worse than no manifest: it would make an unverifiable download look reviewed."
+  ]
+}

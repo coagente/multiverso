@@ -2140,6 +2140,441 @@ fi
 "$MVO" audit --dir "$REPO" | grep -q '^OK:' \
   || fail "m2b1: mvo audit is not OK with the fixed-budget arm's events present"
 
+# =============================================================================
+# M2d — FIVE HERMETIC STEPS. No corpus fetched from a network, no docker, no
+# minutes: seconds. The full protocol lives in scripts/eval.sh, which needs a
+# materialized corpus and is NOT part of this script.
+#
+# What these assert, in the order the block earns them:
+#   m2d-7a  the corpus is absent and the harness SAYS SO — and prints NO metric
+#   m2d-7b  the leak tripwire FIRES (the block's failing test, written first)
+#   m2d-7c  the racing binary cannot read a label
+#   m2d-7d  labels are pure and the controls bind
+#   m2d-7e  the run-time half of decision 2, read off a REAL race
+# =============================================================================
+MVOEVAL="$WORK/mvo-eval"
+(cd "$ROOT" && go build -o "$MVOEVAL" ./cmd/mvo-eval)
+
+# --- m2d-7c. THE RACING BINARY CANNOT READ A LABEL. Decision 2's structural
+# half, asserted mechanically rather than reviewed: `mvo` must not, at any
+# optimization level, contain a symbol that opens $MVO_EVAL_HOME, and the way to
+# guarantee that is for the import to be absent from its dependency graph. A
+# leak through the racing binary would require someone to add an import that
+# THIS LINE rejects. Compare the alternative — one binary with a flag that "must
+# not be set during a race" — which is a promise. ---
+if (cd "$ROOT" && go list -deps ./cmd/mvo | grep -q '^github.com/coagente/multiverso/internal/eval$'); then
+  fail "m2d-7c: cmd/mvo depends on internal/eval: the binary that races can open the eval home.
+There is no \`mvo eval\` subcommand and there must not be one; the scorer is cmd/mvo-eval."
+fi
+(cd "$ROOT" && go list -deps ./cmd/mvo-eval) | grep -q '^github.com/coagente/multiverso/internal/eval$' \
+  || fail "m2d-7c: cmd/mvo-eval does NOT depend on internal/eval: it cannot be the scorer"
+echo "m2d-7c: OK — the racer's dependency graph cannot reach internal/eval"
+echo "        (the RUN-TIME half — no MVO_EVAL_* variable survives into the exec'd"
+echo "         racer's environment — is asserted on a REAL race in m2d-7e below, once"
+echo "         m2d-7b has materialized a corpus to race against. This comment used to"
+echo "         claim that assertion and the next statement was the OK echo.)"
+
+# --- m2d-7a. THE CORPUS IS ABSENT AND THE HARNESS SAYS SO. With MVO_EVAL_HOME
+# pointed at an EMPTY directory: every instance is skipped `corpus-absent`, NO
+# metric line is printed at all, and the exit code is 0. Under --strict the same
+# run is non-zero, so CI cannot mistake "nothing was measured" for "everything
+# passed".
+#
+# THE ASSERTION IS ON THE ABSENCE OF A NUMBER, which is the only way to test the
+# rule: a dash in a table of numbers still invites a reader to average it. ---
+EMPTY_HOME="$WORK/eval-empty"
+mkdir -p "$EMPTY_HOME"
+chmod 700 "$EMPTY_HOME"
+ABSENT_OUT="$WORK/m2d-7a.out"
+MVO_EVAL_HOME="$EMPTY_HOME" "$MVOEVAL" run --repo-root "$ROOT" >"$ABSENT_OUT" 2>&1 \
+  || fail "m2d-7a: an absent corpus did not exit 0:
+$(cat "$ABSENT_OUT")"
+grep -q 'SKIP corpus-absent' "$ABSENT_OUT" \
+  || fail "m2d-7a: the skip is not named 'corpus-absent':
+$(cat "$ABSENT_OUT")"
+grep -q 'no metric line is printed' "$ABSENT_OUT" \
+  || fail "m2d-7a: the harness did not say why there is no number:
+$(cat "$ABSENT_OUT")"
+if grep -q 'TCAR' "$ABSENT_OUT"; then
+  fail "m2d-7a: an absent corpus printed a TCAR line:
+$(cat "$ABSENT_OUT")"
+fi
+if grep -q 'FAR' "$ABSENT_OUT"; then
+  fail "m2d-7a: an absent corpus printed a FAR line:
+$(cat "$ABSENT_OUT")"
+fi
+# The census prints ABOVE the metrics, never in a footnote.
+python3 - "$ABSENT_OUT" <<'PYA' || fail "m2d-7a: the census does not print above the metrics"
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+census = next(i for i, l in enumerate(lines) if "SKIP corpus-absent" in l)
+notice = next(i for i, l in enumerate(lines) if "no metric line is printed" in l)
+raise SystemExit(0 if census < notice else 1)
+PYA
+set +e
+MVO_EVAL_HOME="$EMPTY_HOME" "$MVOEVAL" run --repo-root "$ROOT" --strict >"$WORK/m2d-7a-strict.out" 2>&1
+STRICT_CODE=$?
+set -e
+[ "$STRICT_CODE" = "3" ] \
+  || fail "m2d-7a: --strict over an absent corpus exited $STRICT_CODE, want 3:
+$(cat "$WORK/m2d-7a-strict.out")"
+# Every other verb degrades the same way: a NAMED skip, exit 77, never a number.
+for verb in "derive toyrepo-mean-A" "freeze"; do
+  set +e
+  # shellcheck disable=SC2086
+  MVO_EVAL_HOME="$EMPTY_HOME" "$MVOEVAL" $verb >"$WORK/m2d-7a-$RANDOM.out" 2>&1
+  code=$?
+  set -e
+  [ "$code" = "77" ] || fail "m2d-7a: '$verb' over an absent corpus exited $code, want 77"
+done
+echo "m2d-7a: OK — corpus-absent is a named skip, no metric is printed, --strict exits 3"
+
+# --- m2d-7b. THE LEAK TRIPWIRE FIRES. This is the block's failing test, and it
+# is written against the mechanism rather than the intention.
+#
+# CASE 1: a candidate patch that deliberately contains a hidden test FILE NAME,
+# a hidden NODE ID, and the CANARY. D2 (tree membership), D4 (transcript) and D5
+# (the canary over the whole workspace) must all fire, the instance is
+# `leak-detected`, the harness exits non-zero, and the printed message names the
+# token and the hitting path.
+#
+# CASE 2: the canary planted in a workspace file that is in NO world tree, NO
+# receipt argv and NO CAS blob — which ONLY D5 can catch. That case is the whole
+# reason D5 exists: enumeration is not the defence, because the entry-point
+# plugin vector was assumed closed by a path-glob set and was not. ---
+LEAK_HOME="$WORK/eval-leak"
+mkdir -p "$LEAK_HOME"
+chmod 700 "$LEAK_HOME"
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" fetch local-derived --repo-root "$ROOT" >"$WORK/m2d-7b-fetch.out" 2>&1 \
+  || fail "m2d-7b: fetch local-derived failed:
+$(cat "$WORK/m2d-7b-fetch.out")"
+grep -q 'URLs it will contact: NONE' "$WORK/m2d-7b-fetch.out" \
+  || fail "m2d-7b: the local corpus did not declare that it contacts nothing"
+
+# The needles, read from the HIDDEN half. The acceptance script is the scorer's
+# side of the boundary, so reading them here is exactly what it is allowed to do.
+LEAK_ORACLE="$LEAK_HOME/local-derived/v1/oracle/toyrepo-mean-A.json"
+[ -f "$LEAK_ORACLE" ] || fail "m2d-7b: no hidden oracle was materialized"
+[ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$LEAK_ORACLE")" = "0o600" ] \
+  || fail "m2d-7b: the hidden oracle is not mode 0600: a hidden oracle anyone can read is not hidden"
+CANARY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["canary_token"])' "$LEAK_ORACLE")"
+NODEID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fail_to_pass"][0])' "$LEAK_ORACLE")"
+HIDDENFILE="$(python3 -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))["files"])[0])' "$LEAK_ORACLE")"
+[ -n "$CANARY" ] && [ -n "$NODEID" ] && [ -n "$HIDDENFILE" ] \
+  || fail "m2d-7b: could not read the needle set out of the hidden oracle"
+
+# NEITHER THE REPORT PATH NOR THE NONCE MAY BE ON THE ORACLE'S ARGV. Under v0
+# they were, and the process that carried them was the same one that imported
+# the candidate's modules — so a ten-line candidate wrote its own all-pass
+# report, echoed the nonce and exited 0. The template is asserted here because
+# it is the one place the disclosure is visible without running anything.
+python3 - "$LEAK_ORACLE" <<'PYB' || fail "m2d-7b: the hidden oracle's argv template discloses the report path or the nonce"
+import json, sys
+argv = json.load(open(sys.argv[1]))["suite_argv"]
+joined = " ".join(argv)
+for forbidden in ("{report}", "{nonce}", "--report", "--nonce"):
+    assert forbidden not in joined, (
+        "the hidden runner's argv carries %s: a candidate that reads sys.argv can forge "
+        "its own label. Both travel on the runner's stdin. argv=%r" % (forbidden, argv))
+print("m2d-7b: the oracle argv discloses no report path and no nonce: %r" % (argv,))
+PYB
+
+# A workspace over the same fixture, raced with a PLANTED candidate.
+LEAK_REPO="$WORK/leakrepo"
+mkdir -p "$LEAK_REPO"
+cp -R "$ROOT/testdata/toyrepo/." "$LEAK_REPO/"
+rm -rf "$LEAK_REPO/__pycache__"
+$GIT -C "$LEAK_REPO" init -q -b main
+$GIT -C "$LEAK_REPO" add -A
+$GIT -C "$LEAK_REPO" commit -qm "leak fixture baseline"
+LEAK_PATCHES="$WORK/leakpatches"
+mkdir -p "$LEAK_PATCHES"
+# The planted candidate: it ADDS a file whose name is the hidden suite's, whose
+# body carries the canary and a hidden node id. Nothing about it is subtle —
+# a tripwire that only catches subtle leaks is a tripwire nobody can test.
+python3 - "$LEAK_PATCHES/cand-00.patch" "$HIDDENFILE" "$CANARY" "$NODEID" <<'PYC'
+import sys
+out, hidden, canary, node = sys.argv[1:5]
+body = [
+    '"""planted by scripts/accept.sh step m2d-7b."""',
+    "# mvo-hidden-canary " + canary,
+    "NODE = " + repr(node),
+]
+lines = [
+    "diff --git a/%s b/%s" % (hidden, hidden),
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/%s" % hidden,
+    "@@ -0,0 +1,%d @@" % len(body),
+] + ["+" + l for l in body]
+open(out, "w").write("\n".join(lines) + "\n")
+PYC
+python3 - "$LEAK_PATCHES/cand-01.patch" <<'PYD'
+import sys
+# An ordinary honest candidate beside it, so the race has something to select.
+open(sys.argv[1], "w").write("""diff --git a/stats.py b/stats.py
+--- a/stats.py
++++ b/stats.py
+@@ -5,7 +5,7 @@ def mean(values):
+     \"\"\"Return the arithmetic mean of a non-empty sequence.\"\"\"
+     if not values:
+         raise ValueError("mean() of empty sequence")
+-    return sum(values) / (len(values) - 1)
++    return sum(values) / len(values)
+
+
+ def clamp(value, low, high):
+""")
+PYD
+"$MVO" init --dir "$LEAK_REPO" >/dev/null
+LEAK_INTENT="$("$MVO" intent new --dir "$LEAK_REPO" --title "m2d-7b: planted leak" --budget-candidates 2)"
+[ -n "$LEAK_INTENT" ] || fail "m2d-7b: mvo intent new printed no digest"
+"$MVO" race "$LEAK_INTENT" --dir "$LEAK_REPO" --agent script --patches "$LEAK_PATCHES" >/dev/null 2>&1 \
+  || true   # the planted candidate may be rejected by a gate; the LEAK is the point
+set +e
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" leakcheck --instance toyrepo-mean-A \
+  --workspace "$LEAK_REPO" >"$WORK/m2d-7b-leak.out" 2>&1
+LEAK_CODE=$?
+set -e
+[ "$LEAK_CODE" = "4" ] \
+  || fail "m2d-7b: leakcheck over a planted leak exited $LEAK_CODE, want 4:
+$(cat "$WORK/m2d-7b-leak.out")"
+grep -q 'leak-detected' "$WORK/m2d-7b-leak.out" \
+  || fail "m2d-7b: the refusal does not name leak-detected:
+$(cat "$WORK/m2d-7b-leak.out")"
+grep -q "VOIDED" "$WORK/m2d-7b-leak.out" \
+  || fail "m2d-7b: the instance was not voided:
+$(cat "$WORK/m2d-7b-leak.out")"
+grep -q "$CANARY" "$WORK/m2d-7b-leak.out" \
+  || fail "m2d-7b: the canary token was not printed on a hit:
+$(cat "$WORK/m2d-7b-leak.out")"
+grep -q "$HIDDENFILE" "$WORK/m2d-7b-leak.out" \
+  || fail "m2d-7b: the hitting path was not printed on a hit:
+$(cat "$WORK/m2d-7b-leak.out")"
+for det in D2-tree D4-transcript D5-canary; do
+  grep -q "$det" "$WORK/m2d-7b-leak.out" \
+    || fail "m2d-7b: detector $det did not fire on the planted leak:
+$(cat "$WORK/m2d-7b-leak.out")"
+done
+
+# CASE 2 — the canary in a workspace file that no tree, no argv and no CAS blob
+# carries. A fresh race over the honest candidate only, so the workspace is
+# clean, and then one planted file.
+CLEAN_REPO="$WORK/cleanrepo"
+mkdir -p "$CLEAN_REPO"
+cp -R "$ROOT/testdata/toyrepo/." "$CLEAN_REPO/"
+rm -rf "$CLEAN_REPO/__pycache__"
+$GIT -C "$CLEAN_REPO" init -q -b main
+$GIT -C "$CLEAN_REPO" add -A
+$GIT -C "$CLEAN_REPO" commit -qm "clean fixture baseline"
+CLEAN_PATCHES="$WORK/cleanpatches"
+mkdir -p "$CLEAN_PATCHES"
+cp "$LEAK_PATCHES/cand-01.patch" "$CLEAN_PATCHES/cand-00.patch"
+"$MVO" init --dir "$CLEAN_REPO" >/dev/null
+CLEAN_INTENT="$("$MVO" intent new --dir "$CLEAN_REPO" --title "m2d-7b: clean" --budget-candidates 1)"
+"$MVO" race "$CLEAN_INTENT" --dir "$CLEAN_REPO" --agent script --patches "$CLEAN_PATCHES" >/dev/null 2>&1 || true
+set +e
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" leakcheck --instance toyrepo-mean-A \
+  --workspace "$CLEAN_REPO" >"$WORK/m2d-7b-clean.out" 2>&1
+CLEAN_CODE=$?
+set -e
+[ "$CLEAN_CODE" = "0" ] \
+  || fail "m2d-7b: leakcheck fired on a CLEAN workspace (a detector that fires on the
+experiment working is not a detector) exit=$CLEAN_CODE:
+$(cat "$WORK/m2d-7b-clean.out")"
+grep -q 'no detector fired' "$WORK/m2d-7b-clean.out" \
+  || fail "m2d-7b: the clean run did not say so:
+$(cat "$WORK/m2d-7b-clean.out")"
+# Now plant the canary in an ordinary workspace file. It is in no tree (the race
+# is over), in no argv and in no CAS blob.
+mkdir -p "$CLEAN_REPO/.multiverso/scratch"
+printf 'harness note %s\n' "$CANARY" > "$CLEAN_REPO/.multiverso/scratch/note.txt"
+set +e
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" leakcheck --instance toyrepo-mean-A \
+  --workspace "$CLEAN_REPO" --json >"$WORK/m2d-7b-d5.json" 2>"$WORK/m2d-7b-d5.err"
+D5_CODE=$?
+set -e
+[ "$D5_CODE" = "4" ] \
+  || fail "m2d-7b: a canary planted outside every tree/argv/CAS surface was not caught (exit $D5_CODE):
+$(cat "$WORK/m2d-7b-d5.err")"
+python3 - "$WORK/m2d-7b-d5.json" "$CANARY" <<'PYE' || fail "m2d-7b: only D5 should have caught the planted canary"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+canary = sys.argv[2]
+findings = rep["findings"]
+assert findings, "no findings"
+dets = {f["detector"] for f in findings}
+assert dets == {"D5-canary"}, "expected only D5-canary, got %s" % (dets,)
+assert any(f["needle"] == canary for f in findings), "the canary is not the needle"
+assert any("note.txt" in f["ref"] for f in findings), "the hitting path is not named: %s" % (findings,)
+print("m2d-7b: D5 alone caught the transcript-shaped plant — %d finding(s)" % len(findings))
+PYE
+echo "m2d-7b: OK — the tripwire fires on a planted tree/node-id/canary leak, D5 alone"
+echo "        catches a canary no other detector can see, and a clean workspace is clean"
+
+# --- m2d-7d. LABELS ARE PURE AND THE CONTROLS BIND. Two scorings of the same
+# (world tree, oracle digest, env digest) produce BYTE-IDENTICAL label files, and
+# a batch whose controls moved yields `unknown` for the whole batch and never
+# `correct`. The second half is asserted as a Go test over a hidden oracle whose
+# fail_to_pass set the base tree already satisfies
+# (internal/eval.TestAControlThatMovesVoidsTheWholeBatchNeverProducingCorrect);
+# here we assert the determinism against a REAL scoring, and that the controls
+# RAN and HELD rather than being skipped.
+#
+# toyrepo-mean-A is on the DEV split, so `score` runs without --split eval and
+# the freeze does not bind. That is the correct behaviour and it is asserted
+# below: a scoring of an EVAL-split instance without --split eval is REFUSED,
+# because the freeze would not have bound and the run would have left no trace
+# of a moved policy digest. ---
+SCORE_OUT_1="$WORK/m2d-7d-1.out"
+SCORE_OUT_2="$WORK/m2d-7d-2.out"
+set +e
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" score --instance toyrepo-mean-A \
+  --workspace "$CLEAN_REPO" --repo-root "$ROOT" >"$SCORE_OUT_1" 2>&1
+SCORE_CODE=$?
+set -e
+if [ "$SCORE_CODE" = "77" ]; then
+  echo "SKIP m2d-7d: $(cat "$SCORE_OUT_1")"
+elif [ "$SCORE_CODE" != "0" ]; then
+  fail "m2d-7d: scoring exited $SCORE_CODE:
+$(cat "$SCORE_OUT_1")"
+else
+  grep -q 'sealed before' "$SCORE_OUT_1" \
+    || fail "m2d-7d: the scorer did not report the seal that preceded the labels:
+$(cat "$SCORE_OUT_1")"
+  grep -q 'negative ran=true ok=true; positive ran=true ok=true' "$SCORE_OUT_1" \
+    || fail "m2d-7d: the batch controls did not both RUN and HOLD (a control that was
+not run must never render as one that passed):
+$(cat "$SCORE_OUT_1")"
+  # DECISION 6 BINDS ON `score` TOO. The verb that opens the hidden oracle,
+  # runs it and writes labels appends its own eval-use line, and it REFUSES an
+  # eval-split instance that was not declared as one. Both were absent: the
+  # counter lived only in `run`'s finish() and `score` had no --split flag at
+  # all, so an eval-split instance could be scored repeatedly under a moved
+  # policy digest leaving no trace.
+  grep -q 'eval-use count for local-derived' "$SCORE_OUT_1" \
+    || fail "m2d-7d: score appended no eval-use line: each scoring is a leaderboard query
+and the count is published:
+$(cat "$SCORE_OUT_1")"
+  set +e
+  MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" score --instance advrepo-split-A \
+    --workspace "$CLEAN_REPO" --repo-root "$ROOT" >"$WORK/m2d-7d-eval.out" 2>&1
+  EVAL_SPLIT_CODE=$?
+  set -e
+  [ "$EVAL_SPLIT_CODE" = "2" ] \
+    || fail "m2d-7d: scoring an EVAL-split instance without --split eval exited $EVAL_SPLIT_CODE, want 2:
+the freeze file's own notes promise that \`mvo-eval score --split eval\` refuses under a moved
+policy digest, and a scoring that never declares its split is one the freeze never bound.
+$(cat "$WORK/m2d-7d-eval.out")"
+  grep -q 'EVAL split' "$WORK/m2d-7d-eval.out" \
+    || fail "m2d-7d: the refusal does not name the split:
+$(cat "$WORK/m2d-7d-eval.out")"
+
+  LABEL_DIR="$LEAK_HOME/local-derived/v1/labels/toyrepo-mean-A"
+  [ -d "$LABEL_DIR" ] || fail "m2d-7d: no labels were written. The candidate/world join is by
+RESULT TREE (the digest of the tree a candidate's patch produces on the base
+commit), so zero labels means this workspace's base tree does not match the
+materialized instance's — which is a real condition worth failing on rather than
+a scoring that silently labelled nothing."
+  [ "$(find "$LABEL_DIR" -name '*.json' | wc -l | tr -d ' ')" -ge 1 ] \
+    || fail "m2d-7d: the label directory exists but holds no label"
+  BEFORE="$WORK/labels-before"
+  mkdir -p "$BEFORE"
+  cp "$LABEL_DIR"/*.json "$BEFORE/"
+  MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" score --instance toyrepo-mean-A \
+    --workspace "$CLEAN_REPO" --repo-root "$ROOT" >"$SCORE_OUT_2" 2>&1 \
+    || fail "m2d-7d: the second scoring failed:
+$(cat "$SCORE_OUT_2")"
+  diff -r "$BEFORE" "$LABEL_DIR" >"$WORK/m2d-7d.diff" 2>&1 \
+    || fail "m2d-7d: two scorings of the same (tree, oracle, env) wrote DIFFERENT labels:
+$(cat "$WORK/m2d-7d.diff")"
+  # A label must carry no wall clock, no nonce and no decision digest: those are
+  # properties of the RUN, they live in the run manifest, and putting them here
+  # would make the byte-identity assertion above untestable.
+  python3 - "$LABEL_DIR" <<'PYF' || fail "m2d-7d: a label carries a per-run value"
+import glob, json, os, sys
+for p in glob.glob(os.path.join(sys.argv[1], "*.json")):
+    d = json.load(open(p))
+    for forbidden in ("created_at", "nonce", "scoring_ms", "duration_ms", "decision", "seal"):
+        assert forbidden not in d, "%s carries %s" % (os.path.basename(p), forbidden)
+    assert d["verdict"] in ("correct", "incorrect", "unknown"), d["verdict"]
+    assert d["tier"] in (1, 2, 3), d["tier"]
+    assert d["env_digest"], (
+        "%s carries an EMPTY env identity: two scorings under different interpreters "
+        "could then produce the same label" % os.path.basename(p))
+    assert oct(os.stat(p).st_mode & 0o777) == "0o600", p
+print("m2d-7d: %d label file(s) are pure and 0600" % len(glob.glob(os.path.join(sys.argv[1], "*.json"))))
+PYF
+  echo "m2d-7d: OK — labels are byte-identical across scorings, carry no per-run value,"
+  echo "        both batch controls ran and held, the eval-use line is appended, and"
+  echo "        scoring an eval-split instance without --split eval is REFUSED"
+fi
+
+# --- m2d-7e. THE RUN-TIME HALF OF DECISION 2, ON A REAL RACE. m2d-7c asserts
+# the import graph; this asserts the property the env scrub exists to PRODUCE,
+# by reading the non-consultation witness a real `mvo-eval run` writes. The
+# comment on m2d-7c used to claim exactly this and then the next statement was
+# the OK echo — the class of false confidence this block is written against.
+#
+# One instance, R=1, one arm, one reference replicate: seconds, and enough to
+# carry env_scrubbed / argv_clean / cwd_outside_eval_home for a race that
+# actually happened, plus the two joins a reviewer found broken — the detector
+# scan scope and the winner_source identity. ---
+NC_JSON="$WORK/m2d-7e.json"
+set +e
+MVO_EVAL_HOME="$LEAK_HOME" "$MVOEVAL" run --mvo "$MVO" --repo-root "$ROOT" \
+  --instances toyrepo-mean-A --replicates 1 --reference-replicates 1 \
+  --arms A1-fixed-budget --json "$NC_JSON" >"$WORK/m2d-7e.out" 2>&1
+NC_CODE=$?
+set -e
+if [ "$NC_CODE" = "77" ]; then
+  echo "SKIP m2d-7e: $(sed -n '1,3p' "$WORK/m2d-7e.out")"
+elif [ "$NC_CODE" != "0" ]; then
+  fail "m2d-7e: the run exited $NC_CODE:
+$(cat "$WORK/m2d-7e.out")"
+else
+  python3 - "$NC_JSON" <<'PYG' || fail "m2d-7e: the non-consultation witness does not carry the scrub"
+import json, sys
+man = json.load(open(sys.argv[1]))["manifest"]
+ncs = man.get("non_consultation") or []
+assert ncs, "the manifest carries no non-consultation witness at all"
+for nc in ncs:
+    for key in ("env_scrubbed", "argv_clean", "cwd_outside_eval_home", "proved"):
+        assert nc.get(key) is True, "%s: %s is %r; refusals=%s" % (
+            nc["instance"], key, nc.get(key), nc.get("refusals"))
+    assert nc.get("workspaces_scanned", 0) >= 2, (
+        "%s: the detectors covered %d workspace(s). Every raced workspace must be scanned, "
+        "not just the reference one: the budgeted arms' workspaces are where every reported "
+        "decision comes from." % (nc["instance"], nc.get("workspaces_scanned", 0)))
+    assert nc.get("scorer_after_racer") is True, nc
+    assert nc.get("racer_exited_at_ms", 0) > 0 and nc.get("scorer_started_at_ms", 0) > 0, (
+        "the ordering conjunct carries no measured instants: it is a constant again")
+    assert nc["racer_exited_at_ms"] <= nc["scorer_started_at_ms"], nc
+print("m2d-7e: %d witness(es); env scrubbed, argv clean, cwd outside the eval home, "
+      "%d workspace(s) scanned" % (len(ncs), ncs[0].get("workspaces_scanned", 0)))
+PYG
+  python3 - "$NC_JSON" <<'PYH' || fail "m2d-7e: a row's winner_source is not a source on that instance's table"
+import json, sys
+man = json.load(open(sys.argv[1]))["manifest"]
+rows = man.get("rows") or []
+assert rows, "the manifest carries no rows"
+for r in rows:
+    assert r.get("policy"), "row %s/%s carries no policy column: a cell that cannot say what it raced under is a cell whose caption is a guess" % (r["instance"], r["arm"])
+    ws = r.get("winner_source") or ""
+    if not ws:
+        continue
+    assert ws in (r.get("table_sources") or []), (
+        "row %s/%s: winner_source=%s is not in the instance's own candidate sources %s "
+        "— the join is by verdict again, not by tree" % (
+            r["instance"], r["arm"], ws, r.get("table_sources")))
+print("m2d-7e: %d row(s); every winner_source is a source on that instance's table, "
+      "every row carries its policy" % len(rows))
+PYH
+  echo "m2d-7e: OK — the scrub, the scan scope, the ordering and the source join are"
+  echo "        read off a REAL race rather than claimed in a comment"
+fi
+
+
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"
 "$MVO" admit "$INTENT" --dir "$REPO" || fail "mvo admit exited non-zero"

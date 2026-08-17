@@ -1,0 +1,27 @@
+{
+  "schema": "multiverso.dev/eval-freeze/v0",
+  "corpus": "local-derived",
+  "version": "v1",
+  "frozen_at": "2026-08-17T00:00:00Z",
+  "policy_digest": "mv0:f207c3fad59d0fc973e5f342ac54d8b1bc9e5c6cae2a2cff0b33477ddee3c543",
+  "constants": {
+    "bound_cap": 1000000,
+    "cost_min_samples": 3,
+    "executor_bp.candidate-process": 5000,
+    "executor_bp.control-plane": 10000,
+    "redundancy_bp.independent": 0,
+    "redundancy_bp.near-duplicate": 10000,
+    "redundancy_bp.same-prior": 5000,
+    "redundancy_bp.same-signal": 7000
+  },
+  "binary_digest": "",
+  "oracle_digests": {},
+  "notes": [
+    "V0 -> V1: the corpus version moved because the GENERATED hidden oracle moved. Under v0 the runner imported the candidate's modules into the same interpreter that held the mutable check table and carried --report/--nonce on that interpreter's argv, so a candidate could rewrite the checks and write its own all-pass report \u2014 reproduced end to end. v1 splits the oracle into a parent that judges and a child that runs candidate code. THE SPLIT SALT IS UNCHANGED, so every instance keeps the dev/eval half it was assigned before the fix: changing the assignment while fixing a defect is how a split gets curated after seeing results.",
+    "WHAT THIS FILE IS. Decision 6's freeze: what was true when the eval split was frozen, so that tuning after the freeze is not forbidden but is impossible to do quietly. `mvo-eval score --split eval` recomputes the policy digest and the scheduler constants, compares them here, and REFUSES while naming what moved unless --unfreeze \"<reason>\" is passed; the reason, the diff and the timestamp are then appended to the run log.",
+    "policy_digest is the SHIPPED DEFAULT v1 policy (the object `mvo init` records as policy.created). constants are the compiled scheduler constants: executor_bp is M2b decision 6's one honest constant, redundancy_bp is decision 5's hand-set tier table, bound_cap is the allocation bound's enumeration ceiling and cost_min_samples the floor below which no cost coefficient is printed. All four are exactly what M2d was supposed to sweep, which is why they are frozen rather than read at report time.",
+    "oracle_digests IS DELIBERATELY EMPTY, and this is a named limitation rather than an omission. local-derived's hidden oracles are GENERATED at materialization under a fresh 32-byte canary, so their digests differ on every `mvo-eval fetch` and no committed value could match one. Committing a digest that is guaranteed to mismatch would train every reader to pass --unfreeze, which is worse than not checking. `mvo-eval freeze --write` records the digests of the materialized oracles into $MVO_EVAL_HOME beside the corpus, where they do pin a specific materialization; a FETCHED corpus (swebench-live-*) has stable oracle bytes and its freeze file pins them here.",
+    "binary_digest is empty and is NOT part of the refusal: every rebuild moves it, and a freeze that refused on it would be a lock nobody could work under. It is recorded per run in eval-runs.log instead, which is where the query count that Blum & Hardt's ladder discipline asks us to publish also lives.",
+    "THE HONEST GAP. None of this stops a determined developer from reading a hidden suite on the eval split. It makes the reading leave a trace (freeze mismatch, unfreeze reason, run-count inflation) and it stops the accidental version, which is the one that actually happens. Sequential-analysis-grade protection would need a third party to hold the suites, and we do not have one."
+  ]
+}

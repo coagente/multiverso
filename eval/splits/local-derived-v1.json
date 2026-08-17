@@ -1,0 +1,15 @@
+{
+  "corpus": "local-derived",
+  "dev": [
+    "toyrepo-mean-A"
+  ],
+  "eval": [
+    "advrepo-split-A",
+    "advrepo-split-B",
+    "toyrepo-mean-B",
+    "toyrepo-mean-C"
+  ],
+  "salt": "m2d-local-derived-v0-split-salt",
+  "schema": "multiverso.dev/eval-split/v0",
+  "version": "v1"
+}

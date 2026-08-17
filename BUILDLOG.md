@@ -2,6 +2,177 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-17 — M2d: labels, and what they say about the null
+
+**Adaptive was worse.** M2b.1 raced two budgeted arms, got a disagreement that
+exceeded both arms' noise, and could not say which arm was right because a
+`REJECT` is admirable when nothing good was on the table and a failure when an
+honest fix was sitting there unbought. This block builds the thing that tells
+those apart — a hidden oracle no policy, no gate, no scheduler and no world ever
+sees — and points it at that row. At the tightest budget the adaptive rule
+rejects on **both** instances where a correct candidate existed, the policy
+would have selected it on full evidence, and the money to reach that decision
+was in the arm's pocket. That is `FRR_reachable = 2/2`, and the harness's own
+regret decomposition files all of it under **allocation-avoidable** rather than
+under gates. Not caution. Failure, with the interpretation removed.
+
+**The label discipline, in plain language.** A candidate's correctness comes
+from a suite that is generated at materialization time under a fresh 32-byte
+canary, written mode 0600 under a home at mode 0700, outside the repository and
+outside every workspace. The code that can open that home is **not linked into
+the binary that races** — `go list -deps ./cmd/mvo | grep internal/eval` must not
+match, and `accept.sh` fails the build if it does. Scoring happens on a fresh
+reconstruction of each world's tree, in a directory no race, no world and no
+keeper ever saw, **after** the ledger is sealed; a label cannot be written
+without a decision digest and sequence number read back out of that seal. Four
+detectors plus a canary scan run over **every workspace the instance raced** —
+nine per instance here, not just the reference one — and a hit voids the instance
+rather than annotating it. Each run prints a non-consultation witness whose every
+conjunct is a fact somebody measured, and it refuses to say PROVED when a
+detector could not read a surface it claims to cover.
+
+**The first TCAR/FAR numbers.** Shipped default policy on every instance, R = 3,
+reference arm replicated 3× and B derived from the **median** minspend,
+`local-derived@v1`, five instance-slices over **two independent bugs**:
+
+| level | adaptive TCAR | fixed-budget TCAR | paired (both / adaptive-only / fixed-only / neither) | adaptive FRR_reach (family A) |
+|---|---|---|---|---|
+| **B1** (tightest) | **1/5** | **2/5** | 0 / 1 / 2 / 2 | **2/2 = 100 %** |
+| B2 (mid-band) | 2/5 | 2/5 | 2 / 0 / 0 / 3 | 0/2 = 0 % |
+| B3 (= S) | 2/5 | 2/5 | 2 / 0 / 0 / 3 | 0/2 = 0 % |
+
+**FAR is `—` for both arms at every level**, and that is not a zero: neither arm
+made a single false admission under the shipped default, so FAR has no
+denominator and the harness refuses to print `0 %` for an arm that never acted
+wrongly. On family B — the family built to vindicate a cautious arm — adaptive
+scores exactly what the ladder scores, because the ladder also rejects; caution
+buys nothing where nobody is offering. The one instance adaptive wins is
+`toyrepo-mean-C` at B1, where it selects gold and the ladder escalates.
+
+**So the answer to M2b.1's question is: failure, and only at the tightest
+budget.** The M2b.1 row read as adaptive-rejects-everything; with labels and a
+median-derived budget it reads as adaptive loses two reachable admissions at B1
+and is indistinguishable at B2 and B3. That is a smaller claim than M2b.1's and
+a sharper one, and it points at the same defect M2b named: the frontier offers
+one rung per alive world, symmetric worlds tie, so the allocator advances
+everybody and finishes nobody — which only bites when the budget runs out first.
+
+**The relaxed-guard cell is a different experiment and is captioned as one.**
+Two instances carry a `PolicyHint` naming `no-paths.json`, because under the
+shipped guards eleven of the twelve laundering vectors die at rung O-1 with one
+receipt each and never reach the scheduler at all. Under that policy **both arms
+admit a declared laundering vector on both adversarial instances** — FAR 1/1 on
+family A and 1/1 on family B, for each arm, and `d*` does the same on full
+evidence. That is M1e's `10-padded_deletion` result re-measured, it is a property
+of the relaxed guard rather than of any allocator, and for the first time the
+census attributes it correctly: `WON-BY-S3-adversarial`, `+ADVERSARIAL(declared)`.
+
+**What the hostile reviewer found, and it was the block's own deliverable.**
+§2 says the mechanism that keeps decision and label apart *is* the deliverable
+and the arithmetic is the easy part. The reviewer took that at its word and
+broke the mechanism — by execution, not by reading:
+
+- **The hidden oracle was forgeable by the candidate it was judging.** The runner
+  did `sys.path.insert(0, repo)` and `__import__(mod)` in the same interpreter
+  that already held the mutable check table, and carried `--report <path>
+  --nonce <value>` on that interpreter's argv. A `billing.py` whose only extra
+  code was `sys.modules['mvo_hidden_checks'].CHECKS = [(cls, name, lambda: True)
+  for ...]` exited 0, echoed the nonce, listed all seven declared nodes as
+  passing, and was labelled **correct** while returning `[total] * parts`.
+  Decision 4's "verdict integrity by cross-check" was three signals from one
+  process the candidate controlled. The design defended the wrong thing — "the
+  checks are generated functions, not evaluated strings" — because the problem
+  was never dynamic evaluation, it was **co-residency**. The fix is a process
+  split: a parent that holds the canary, the node ids and the predicates, takes
+  the report path and the nonce **on stdin**, writes the report and sets the exit
+  status, and never imports candidate code; and a child that imports the
+  candidate and returns only **observable values**, with `sys.argv` scrubbed, its
+  own script directory off `sys.path`, an empty throwaway cwd and no secret in
+  its image. A wrong candidate can now only pass by returning the value a correct
+  implementation returns, which it cannot learn. The forgery ships as a
+  regression test; the corpus version moved `v0 → v1` so a `v0` eval home cannot
+  be scored by a `v1` scorer.
+- **The scorer's scratch was the candidate's working directory**, and it
+  accumulated every hidden report — each carrying the canary and the whole
+  f2p/p2p node-id list, with the controls running first, so the first candidate
+  scored saw a full pass/fail map. No detector covered it: D5 scans the racer's
+  workspace and `report-<nonce>.xml` matches no hidden-suite basename. Reports
+  are now deleted as soon as they are parsed and an assertion refuses if one
+  survives.
+- **`winner_source` joined on the verdict, not on the winner.** It returned the
+  alphabetically-first same-verdict candidate, so a laundering vector that won
+  was reported as a derived mutant and `+ADVERSARIAL(declared)` never fired on
+  any published number. It joins on the winning world's tree now, the caption
+  fires on the population rather than on the winners, and `accept.sh` asserts
+  that every row's source is a source that instance's candidate set carries.
+- **A cell captioned with one policy pooled two.** The `PolicyHint` override is
+  right; printing `NOT UNIFORM` and then averaging across it was not. Metrics are
+  computed per (arm, family, **policy**), so a printed cell is uniform by
+  construction, and `--policy-override` makes the whole-corpus default cell above
+  runnable — which is where the sharper result came from.
+- **B was one unreplicated draw.** Across three reference replicates of a single
+  instance minspend came out `[2089 0 2081] ms`; a zero makes B1 zero, which
+  `mvo intent new` reads as *unbounded*, so the row captioned "tightest budget"
+  was the one handed infinite money. B is now the median of R reference races,
+  every replicate's minspend prints as the reference spread, and an unbudgeted
+  row is excluded rather than annotated.
+- **Decision 6 did not bind on the verb that opens the oracle.** `mvo-eval score`
+  had no `--split`, ran no freeze check and appended no eval-use line, so an
+  eval-split instance could be scored repeatedly under a moved policy digest
+  leaving no trace — the accidental version the mechanism exists to stop, and the
+  one the freeze file's own notes promised twice was impossible. Shared helper,
+  outright refusal, counter appended.
+- Smaller, all real: D3's gold needle digested the canary-prefixed hidden form,
+  so on the family-B instances where it is armed it looked for a key no workspace
+  could contain; both detectors' skip counters were computed and dropped on the
+  floor; every arm's charged cost was computed and dropped on the floor, so no
+  arm ever printed a number on the cost axis decision 12 exists to build; the
+  admit columns were structurally unreachable; `ScorerAfterRacer` was a constant
+  true; `eval.sh --keep` silently zeroed every cell after the first and exited 0;
+  and `accept.sh` step m2d-7c's comment claimed a run-time assertion whose next
+  statement was the OK echo. That last one is the class of thing this project
+  exists to stop doing, and it is now step m2d-7e, run against a real race.
+
+**The unquantified "drifted once", quantified.** M2b.1 carried a diagnosis —
+`24-schedule_budget_burn` drifted in one of four attempts, load-dependent budget
+sensitivity, not re-recorded — into a headline that gates on the corpus. A
+diagnosis is not a number, so here is the number: that vector **0 drifts in 12
+runs alone**, and the **full 22-vector corpus 0 drifts in 4 consecutive runs**,
+22/22 matching the recorded baseline every time. Beside it, two more counts that
+were claims before: the eval-use counter is appended per scoring and published
+(1 per cell here), and the leak scan prints its scope next to its verdict —
+9 workspaces per instance, 0 surfaces a detector could not read, canary clean
+on all five.
+
+**What the full PRD §11 experiment still needs, and this cannot supply.** Real
+agent candidates at ≥300 instances per stratum (tokens dominate §11's budget and
+this harness charges none); arms 1, 4 and 5 proper, all of which generate; Tier-2
+strengthened suites, without which ch. 9's own warning applies to us verbatim —
+a false-admission rate below ~5 % measured on Tier 1 alone is meaningless, and
+ours is `—`; Tier-3 human adjudication (the file format ships, the raters do
+not); FAR-adv against challenger agents rather than 22 static patches;
+model-swap stability and pass^k; calibration, which fitted on S2 would calibrate
+against `derive.go`; cost per truly-correct merge, which needs the token term;
+post-integration regressions over a chronological stream; the contamination
+probe; and `race --reverify <world-digests>`, still a contract change and still
+the largest threat to any cross-arm number once generation is live.
+
+**And what these numbers are not, printed by the harness on every table.** Five
+instance-slices over **two** repositories — `advrepo-split-B`'s candidate set is
+`advrepo-split-A`'s minus gold and v07, `toyrepo-mean-A/B/C` share one gold and
+one mutant pool — so coverage 3/5 and A9's 60 % ceiling are properties of how the
+corpus was assembled, not measurements. Three of `derive.go`'s seven operators
+decline or fail to apply on both fixtures, so every wrong candidate is one of
+four perturbations of a single-line change, every one labelled `incorrect` with
+reason `f2p-fail` and `expectation_violated` 0: the wrong-candidate pool is
+uniformly trivial for the suite, so every FAR here is a **floor**.
+`SYNTHETIC-CANDIDATES`, Tier-1 labels, `ORACLE-BUDGET-MATCHED` only, selection
+cost measured and uncharged, tokens and runner time unmeasured, no agent output
+anywhere in it, and the instance floor of 30 refuses a p-value and a confidence
+interval on all of it. It is a diagnosis of a scheduling rule. It says the rule
+loses money it had, at the one budget where losing it costs something — so the
+next move is to fix the rule, not to widen the corpus until the number flips.
+
 ## 2026-08-16 — M2b1: the arm the comparison was missing
 
 **M2b's own BUILDLOG said this block had to exist, and said why.** `--schedule=fixed`

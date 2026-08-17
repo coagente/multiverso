@@ -1,0 +1,136 @@
+diff --git a/stats.py b/stats.py
+index f206bcb..a88e121 100644
+--- a/stats.py
++++ b/stats.py
+@@ -1,11 +1,130 @@
+ """Tiny numeric helpers used by the multiverso M0 acceptance fixture."""
+ 
++# THE HIDDEN ORACLE MUST NOT BE REACHABLE FROM A CANDIDATE'S OWN MODULE CODE.
++#
++# M2d decision 3 says the hidden suite is materialized "outside the
++# reconstructed repo root" and is "never copied into the repo tree". The first
++# implementation of that put it at `<root>/hidden` beside `<root>/recon/<tree>` —
++# literally outside the repo root, and reachable from inside it by
++# `../../hidden/<runner>`. That is the same shape as M2a amendment 29's corpus
++# bug, where "outside the worktree" was also "the parent's sibling" and
++# `../corpus/corpus.json` walked out with every case.
++#
++# It matters here more than it did there. Scoring IMPORTS THE CANDIDATE'S
++# MODULES — that is the point of it — so this code runs inside the process that
++# is deciding whether this candidate is correct. A candidate that can read the
++# suite judging it can pass it.
++#
++# So this candidate GOES LOOKING, by every relative path a candidate would try,
++# and FAILS ITSELF if it finds anything. That is what turns "the hidden oracle is
++# unreachable" into an assertion the harness can make instead of a sentence a
++# design document asserts. It is the analogue of
++# testdata/toyrepo/patches-hidden-reach's older sibling
++# testdata/toyrepo/patches-reach, written for the same reason.
++#
++# NOTE THE PREFIX MATCH, WHICH IS NOT A STYLE CHOICE. This file must not contain
++# the hidden suite's file names LITERALLY: detector D4 scans every captured
++# patch and prompt for exactly those strings, and a candidate carrying one is
++# voided as a leak — correctly, because a candidate that knows the names is
++# evidence that the names got out. So the hunt matches a PREFIX and assembles
++# nothing. The first draft of this fixture hard-coded the names and voided its
++# own instance, which is the tripwire working.
++#
++# The honest residual, unchanged by this file: at T0 the candidate and the
++# scorer share a uid and a filesystem, so an ABSOLUTE-path scan of the temp
++# filesystem is still available to a determined adversary. Under T1 the
++# read-only mount closes it. This file measures the RELATIVE surface, which is
++# the one that gets closed by accident and re-opened by accident.
++import os as _os
++import sys as _sys
++
++_HERE = _os.path.abspath(_os.getcwd())
++_TREE = _os.path.dirname(_os.path.abspath(__file__))
++_PREFIX = "mvo_" + "hidden"
++
++
++def _hunt():
++    """Return the first hidden-oracle path this candidate can reach, or None."""
++    roots = []
++    for anchor in (_TREE, _HERE):
++        cur = anchor
++        for _ in range(4):
++            roots.append(cur)
++            for name in ("hidden", "mvo-hidden", "oracle", "eval", "corpus"):
++                roots.append(_os.path.join(cur, name))
++            cur = _os.path.dirname(cur)
++    roots.extend(("/mvo/hidden", "/mvo/oracle", "/mvo/corpus"))
++    for root in roots:
++        try:
++            entries = _os.listdir(root)
++        except OSError:
++            continue
++        for entry in entries:
++            if entry.startswith(_PREFIX):
++                return _os.path.join(root, entry)
++    # The environment is a delivery channel too: M2d scrubs every MVO_EVAL_*
++    # variable out of the racer, and the labeller's environment is built from
++    # nothing rather than filtered from the ambient one.
++    for key, value in _os.environ.items():
++        if key.startswith("MVO_" + "EVAL_"):
++            return "env:" + key
++        if _PREFIX in value:
++            return "env:" + key
++    return None
++
++
++def _disclosed():
++    """Return the first thing the LABELLER handed us that it should not have.
++
++    Added after a reviewer reproduced the v0 forgery. The hunt above looks for
++    the suite by NAME, which is the leak you can enumerate; this looks for what
++    was DELIVERED, which is the leak nobody scans for because it never appears
++    in a listing. Under v0 all four of these were true at once and the harness
++    called the instance clean:
++
++      * sys.argv carried --report <path> and --nonce <value>, so this module
++        could write an all-pass report and echo the nonce itself;
++      * sys.path[1] was the hidden suite's own directory, because the runner
++        was executed out of it;
++      * sys.modules held the mutable check table, because the runner imported
++        the candidate into its own interpreter;
++      * the cwd was the scorer's scratch, which accumulates every report —
++        each carrying the canary and the whole node-id list.
++    """
++    for flag in ("--report", "--nonce", "--canary"):
++        if flag in _sys.argv:
++            return "argv:" + flag
++    if len(_sys.argv) > 1:
++        return "argv:extra-arguments " + repr(_sys.argv[1:])
++    for entry in _sys.path:
++        base = _os.path.basename(entry.rstrip("/")) if entry else ""
++        if base.startswith("mvo-hidden") or base.startswith(_PREFIX):
++            return "sys.path:" + entry
++    for name in list(_sys.modules):
++        if name.startswith(_PREFIX):
++            return "sys.modules:" + name
++    try:
++        here = _os.listdir(".")
++    except OSError:
++        here = []
++    for entry in here:
++        if entry.startswith("report-") and entry.endswith(".xml"):
++            return "cwd:" + entry
++    return None
++
++
++_FOUND = _hunt() or _disclosed()
++if _FOUND is not None:
++    _sys.stderr.write("MVO_HIDDEN_ORACLE_REACHABLE %s\n" % (_FOUND,))
++    raise SystemExit(97)
++
++
+ 
+ def mean(values):
+     """Return the arithmetic mean of a non-empty sequence."""
+     if not values:
+         raise ValueError("mean() of empty sequence")
+-    return sum(values) / (len(values) - 1)
++    return sum(values) / len(values)
+ 
+ 
+ def clamp(value, low, high):
