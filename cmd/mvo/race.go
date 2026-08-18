@@ -64,6 +64,13 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 	allowNetwork := fs.Bool("allow-network", false, "T1 joins the default bridge instead of --network none (NFR-4 opt-out)")
 	scheduleArm := fs.String("schedule", schedule.ScheduleAdaptive,
 		"phase-B arm: adaptive (the M2b scheduler), fixed-budget (the depth-first ladder given the same budget), or fixed (the UNBUDGETED exhaustive M1 ladder)")
+	selector := fs.String("selector", "",
+		"which rule the adaptive arm allocates by: voc (M2b's published rule, and the DEFAULT - see M2b.2 section 7.6) or "+
+			"voc2 (M2b.2's finishing rule: the finish-cost denominator plus the commit-set reservation, both inert "+
+			"unless the pool cannot finish every alive world). voc2 ships behind this flag rather than as the default "+
+			"because it converts a full-evidence ESCALATE into a SELECT under the shipped default policy across "+
+			"the whole budgeted band, and no gate measures it: on a fresh workspace nothing is priced and the rule "+
+			"falls back to voc")
 	collectInert := fs.Bool("collect-inert", false,
 		"also buy decision-inert rungs on worlds that passed every gate, labelled basis=research (M2b decision 11)")
 	budgetBasis := fs.String("budget-basis", schedule.BudgetBasisActual,
@@ -149,6 +156,24 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		if cpuMilli, err = dockerx.ParseCPUMilli(*cpus); err != nil {
 			return usagef("race: --cpus: %v", err)
 		}
+	}
+
+	// M2b.2 decision 6. The revision ships BEHIND A SELECTOR and the published
+	// rule is retained, because F15 requires both halves of a before/after to
+	// be one build: deleting `voc` would confound the revision's effect with
+	// every other change in the tree since M2d, and no per-instance difference
+	// would be attributable to the rule. The vocabulary is closed and it is
+	// checked HERE, with the other pure flag combinations, so a misspelled
+	// rule costs a usage error rather than a workspace.
+	switch *selector {
+	case "", schedule.SelectorNameVOC, schedule.SelectorNameVOC2:
+	default:
+		return usagef("race: --selector must be %s or %s (got %q)",
+			schedule.SelectorNameVOC2, schedule.SelectorNameVOC, *selector)
+	}
+	if set["selector"] && *scheduleArm != schedule.ScheduleAdaptive {
+		return usagef("race: --selector applies only to --schedule=%s: the allocation RULE is what the flag chooses, and --schedule=%s is the depth-first ladder (which reserves nothing) while --schedule=%s is the unbudgeted M1 ladder (which allocates nothing)",
+			schedule.ScheduleAdaptive, schedule.ScheduleFixedBudget, schedule.ScheduleFixed)
 	}
 
 	ws, err := workspace.Open(*dir)
@@ -366,6 +391,7 @@ func cmdRace(args []string, stdout, stderr io.Writer) error {
 		KeepWorlds:    *keepWorlds,
 		LegacyOracle:  legacy,
 		Schedule:      arm,
+		Selector:      *selector,
 		CollectInert:  *collectInert,
 		BudgetBasis:   *budgetBasis,
 		Rotation:      *rotation,

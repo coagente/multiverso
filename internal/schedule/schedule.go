@@ -80,7 +80,12 @@ type Config struct {
 	// coordinate of the correlation descriptor for the kinds that read it.
 	CorpusDigest string
 	// Selector is decision 1's seam: the arm. Nil means SelectorVOC, so every
-	// caller written before M2b1 keeps the adaptive rule it asked for.
+	// caller written before M2b1 keeps the adaptive rule it asked for — and
+	// so that M2b.2's revision is never reached by DEFAULTING into it. Which
+	// rule a race allocates by is a choice the orchestrator makes explicitly
+	// and records; AdaptiveRuleDefault is what `mvo race --schedule=adaptive`
+	// passes here, and this library keeps the published rule as its own
+	// no-argument answer.
 	Selector Selector
 	// Order is the CONTROL-PLANE world order (decision 3): world digests in
 	// the orchestrator's own order, which is candidate ordinal ascending.
@@ -124,6 +129,19 @@ type Scheduler struct {
 	// contender is the set of worlds that had a frontier purchase at the
 	// last step, so a world leaving it can release its share.
 	contender map[string]bool
+	// heldAllow is what the LAST step's apportionment actually granted each
+	// contender, and heldEqual says whether that apportionment was an equal
+	// share. Both exist so that `released_ms` reports what a departing world
+	// actually held rather than a share nobody granted it: under M2b.2's
+	// reservation a committed world holds `pool − Σ siblings' finish`, which
+	// is not `remaining / |contenders|` and is frequently several times it.
+	// The equal-share arms keep the published arithmetic to the byte.
+	heldAllow map[string]int64
+	heldEqual bool
+	// reserves is the last DECISIVE answer to "does this arm apportion the
+	// pool across its contenders" — decisive meaning a frontier of two or more
+	// rows, the only shape whose allowances distinguish the arms.
+	reserves bool
 
 	// sel is the arm (decision 1). order is the control-plane world order
 	// AFTER rotation — the list the ranking reads and the trace records —
@@ -178,6 +196,8 @@ func New(cfg Config, worlds []object.RecordedWorld) (*Scheduler, error) {
 		perWorld:   map[string][]object.RecordedReceipt{},
 		bought:     map[string]map[string]bool{},
 		contender:  map[string]bool{},
+		heldAllow:  map[string]int64{},
+		heldEqual:  true,
 		sel:        sel,
 		order:      rotate(cfg.Order, cfg.Rotation),
 		orderOf:    map[string]int{},
@@ -278,15 +298,23 @@ func (s *Scheduler) Started(intent, arm string, parallel int) Started {
 	return Started{
 		Budget:      StartBudget{MaxOracleMS: s.cfg.BudgetMS},
 		BudgetBasis: s.basis,
-		Constants:   Constants{ExecutorBP: ExecutorConstants(), RedundancyBP: RedundancyConstants()},
-		CostTable:   s.costRows,
-		Intent:      intent,
-		Mode:        mode,
-		Parallel:    parallel,
-		Rotation:    s.cfg.Rotation,
-		Schedule:    arm,
-		Selector:    s.sel.Name(),
-		WorldOrder:  s.WorldOrder(),
+		Constants: Constants{
+			// The BINARY's default rule, rendered from the same constant the
+			// selector registry holds rather than restated here: a snapshot
+			// that can disagree with the thing it snapshots is worse than no
+			// snapshot (M2b.2 decision 8).
+			AdaptiveRule: AdaptiveRule(),
+			ExecutorBP:   ExecutorConstants(),
+			RedundancyBP: RedundancyConstants(),
+		},
+		CostTable:  s.costRows,
+		Intent:     intent,
+		Mode:       mode,
+		Parallel:   parallel,
+		Rotation:   s.cfg.Rotation,
+		Schedule:   arm,
+		Selector:   s.sel.Name(),
+		WorldOrder: s.WorldOrder(),
 	}
 }
 
@@ -305,12 +333,14 @@ func (s *Scheduler) state() State {
 		}
 		return clamped
 	}
-	return State{
+	st := State{
 		Policy:  s.cfg.Policy,
 		Worlds:  s.worlds,
 		Decide:  s.cfg.Decide,
 		Bounds:  s.cfg.Bounds,
 		Inert:   s.cfg.CollectInert,
+		pool:    s.bud.remaining(),
+		bounded: !s.bud.unbounded(),
 		clamped: clampedFn,
 		base: func() object.Decision {
 			if !haveBase {
@@ -323,7 +353,28 @@ func (s *Scheduler) state() State {
 		bought:    s.boughtEvidence,
 		readBy:    s.readBy,
 		orderIdx:  s.orderIndex,
+		unpriced:  s.UnpricedKinds,
 	}
+	// THE LOOKAHEAD MEMO, one step wide. A revision that reads the bracket
+	// under two regimes must not pay for it twice: the metalevel is worth
+	// running only because it costs 0.07-0.3 % of the purchase it prices, and
+	// that ratio is a property of the number of `Decide` calls per step. The
+	// memo makes M2b.2 §3.1's "zero additional Decide calls" mechanical rather
+	// than a promise, and it is per-step because the receipt set moves between
+	// steps and a stale verdict would price a purchase against a decision that
+	// no longer stands.
+	seen := map[string]Verdicts{}
+	st.look = func(p purchase) Verdicts {
+		key := p.world.Digest + "\x00" + p.rung.Name
+		if v, ok := seen[key]; ok {
+			return v
+		}
+		v := Evaluate(st.Decide, st.Policy, st.Worlds, clampedFn(), st.Base(),
+			p.world, p.rung, p.rest, st.Bounds)
+		seen[key] = v
+		return v
+	}
+	return st
 }
 
 // purchase is one prospective buy: a world and the one rung it is next
@@ -405,10 +456,37 @@ func (s *Scheduler) Next() (Step, bool) {
 	if s.done {
 		return Step{}, false
 	}
+	// THE MEASURED WINDOW OPENS HERE, before the frontier walk, because
+	// `selection_us` is the arm's WHOLE metalevel time and the comment at the
+	// charge point has claimed the frontier walk since M2b.1 while the timer
+	// started three statements later. Under M2b.2 that gap stopped being
+	// cosmetic: `Allowances` is where `voc2` does ALL of its lookahead
+	// (voc2Plan → newCommitPlan → score → State.Look → Evaluate → Decide) and
+	// `Rank` then only hits the per-step memo, so a timer started after the
+	// apportionment reported ~1/1000th of the work on a scarce race and the
+	// full figure on every other arm — a bias specific to the one arm being
+	// measured. Reported, not charged (F8), and it must measure everything the
+	// arm spends deciding what to buy.
+	t0 := nowNS()
 	front := s.Frontier()
-	s.releaseNonContenders(front)
+	st := s.state()
+	// THE APPORTIONMENT COMES FIRST, and the ordering comes second. Under
+	// M2b.2 decision 4 the bracket's pass outcomes are conditioned on the
+	// world being completable AT ITS ALLOWANCE, so a rule that ranked before
+	// it apportioned would have to price every row twice. The arms that hold
+	// no reservation compute this in constant time and ignore the answer.
+	//
+	// AND IT RUNS BEFORE THE EMPTY-FRONTIER RETURN, because the terminal step
+	// — where every remaining contender leaves the set at once — is where the
+	// largest release happens, and a `released_ms` that skipped it would make
+	// this binary's `--selector=voc` race unable to reproduce the pre-M2b.2
+	// binary's ledger, which is the one thing decision 6 retains `voc` to
+	// guarantee. `Allowances` is total on an empty frontier for all three arms.
+	allow, regime := s.sel.Allowances(front, st)
+	s.releaseNonContenders(front, allow)
 	if len(front) == 0 {
 		s.stop, s.done = StopEmpty, true
+		s.selUS += (nowNS() - t0) / 1000
 		return Step{}, false
 	}
 	s.step++
@@ -419,46 +497,64 @@ func (s *Scheduler) Next() (Step, bool) {
 	// vocabulary, one trace shape. The arms differ in the line below and in
 	// nothing else.
 	//
-	// The lookahead — which only the VOC arm runs — reasons over CLAMPED
+	// The lookahead — which only the VOC arms run — reasons over CLAMPED
 	// receipts (decision 3b): the incumbent's ranking key values are bounded
 	// by the same control-plane ceilings the bracket is, or the bracket is
 	// measured against an unbounded self-report and rival starvation works
 	// anyway. The RECORDED decision is computed from the real receipts and is
 	// untouched by this.
-	t0 := nowNS()
-	ranked := s.sel.Rank(front, s.state())
-	share := s.bud.share(s.sel.Contenders(front))
+	ranked := s.sel.Rank(front, st)
+	// ONE ALLOWANCE PER WORLD, keyed on the world rather than on the row's
+	// position, because Rank reorders and the apportionment is a fact about a
+	// world rather than about a queue position.
+	allowOf := make(map[string]int64, len(front))
+	for i, p := range front {
+		if i < len(allow) {
+			allowOf[p.world.Digest] = allow[i]
+		}
+	}
 
 	rows := make([]Considered, 0, len(ranked))
 	for _, r := range ranked {
 		row := r.Row
-		row.Affordable = s.bud.affordable(r.Cost, share)
+		a := allowOf[row.World]
+		row.Affordable = s.bud.affordable(r.Cost, a)
 		if row.Declined == "" && row.Admissible && !row.Affordable {
-			row.Declined = unaffordableReason(r.Cost, share, s.bud.remaining())
+			// The arm's own sentence when it has one: two different budget
+			// facts must not print the same sentence, and only the arm knows
+			// which arithmetic refused the row (M2b.2 decision 7).
+			if row.Declined = r.Unaffordable; row.Declined == "" {
+				row.Declined = unaffordableReason(r.Cost, a, s.bud.remaining())
+			}
 		}
 		rows = append(rows, row)
 	}
 	chosen := s.batch(ranked, rows)
 	// Reported, not charged (F8). The measurement covers the frontier walk,
-	// the ranking, the lookahead and the batch fill — everything the arm
-	// spends on deciding what to buy, and nothing it spends buying.
+	// the APPORTIONMENT, the ranking, the lookahead and the batch fill —
+	// everything the arm spends on deciding what to buy, and nothing it spends
+	// buying.
 	s.selUS += (nowNS() - t0) / 1000
 
 	real := s.cfg.Decide(s.cfg.Policy, s.worlds, s.receipts)
-	st := Step{
-		Batch:      len(chosen),
-		Budget:     BudgetState{ReleasedMS: s.bud.released, RemainingMS: s.bud.remaining(), SpentMS: s.bud.spent},
-		Chosen:     chosen,
-		Considered: rows,
+	step := Step{
+		Batch:       len(chosen),
+		Budget:      BudgetState{ReleasedMS: s.bud.released, RemainingMS: s.bud.remaining(), SpentMS: s.bud.spent},
+		Chosen:      chosen,
+		CommitBasis: regime.Basis,
+		CommitSet:   regime.CommitSet,
+		Considered:  rows,
 		DecisionNow: DecisionNow{
 			PassCount: passCount(s.cfg.Policy, s.worlds, s.receipts),
 			Subject:   append([]string{}, real.Subject...),
 			Type:      real.Type,
 		},
-		Step: s.step,
+		Scarce:        regime.Scarce,
+		Step:          s.step,
+		UncommittedMS: regime.UncommittedMS,
 	}
-	if st.Batch > 0 {
-		st.Staleness = st.Batch - 1
+	if step.Batch > 0 {
+		step.Staleness = step.Batch - 1
 	}
 	s.nSeen += len(rows)
 	for _, r := range rows {
@@ -476,10 +572,10 @@ func (s *Scheduler) Next() (Step, bool) {
 			s.skipped = append(s.skipped, Skipped{Oracle: r.Oracle, Reason: r.Declined, World: r.World})
 		}
 		s.skipStarvedRemainder(rows)
-		return st, false
+		return step, false
 	}
 	s.nBought += len(chosen)
-	return st, true
+	return step, true
 }
 
 // skipStarvedRemainder is decision 4 made observable: when the money runs
@@ -495,15 +591,33 @@ func (s *Scheduler) Next() (Step, bool) {
 // without them a partially verified world reads like a fully verified one
 // that lost.
 func (s *Scheduler) skipStarvedRemainder(rows []Considered) {
-	if s.stop != StopBudget {
-		return
-	}
 	seen := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		seen[r.World+"\x00"+r.Oracle] = true
 	}
-	reason := fmt.Sprintf("budget exhausted after %d ms", s.bud.spent)
+	budget := fmt.Sprintf("budget exhausted after %d ms", s.bud.spent)
 	for _, r := range rows {
+		// A STARVED STOP abandons every world's remainder, because the pool
+		// is empty for all of them. A world whose last row was refused BY THE
+		// MONEY (M2b.2 decision 7's `reserved`/`unreachable`) is abandoned on
+		// its own, whatever the stop clause says: this function runs only at
+		// the stop, so the money that refused its next rung refuses every rung
+		// behind it too, and the purchase law's record must cover them —
+		// otherwise the finishing rule buys its efficiency with a silence
+		// M2a's own event exists to prevent. It is the STOP that makes "not
+		// this batch" mean "not ever"; mid-race those same sentences are
+		// statements about one step's allowance and nothing is skipped for
+		// them, because a world the money refused at step 2 may be bought at
+		// step 4 when a committed world completes and C re-forms.
+		reason := ""
+		switch {
+		case s.stop == StopBudget:
+			reason = budget
+		case moneyDecline(r.Declined):
+			reason = r.Declined
+		default:
+			continue
+		}
 		for _, rung := range s.rungs {
 			key := r.World + "\x00" + rung.Name
 			if s.bought[r.World][rung.Name] || seen[key] {
@@ -681,33 +795,115 @@ func (s *Scheduler) chargeFor(rung Rung, rr object.RecordedReceipt) int64 {
 	return rr.Receipt.Cost.WallMS
 }
 
-// releaseNonContenders records the shares of worlds that have left the
+// releaseNonContenders records the reserves of worlds that have left the
 // contender set since the last step. Equal shares are made adaptive by this
 // recomputation and by nothing else (decision 8).
 //
-// It is a NO-OP for an arm that does not hold equal shares. A depth-first
-// arm reserves nothing for the worlds behind the head, so it has nothing to
-// release, and a released_ms it never reserved would be a number about a
-// mechanism that did not run.
-func (s *Scheduler) releaseNonContenders(front []purchase) {
-	if s.sel.Contenders(front) != len(front) {
+// It is a NO-OP for an arm that does not hold per-world reserves. A
+// depth-first arm reserves nothing for the worlds behind the head, so it has
+// nothing to release, and a released_ms it never reserved would be a number
+// about a mechanism that did not run.
+//
+// IT RUNS ON THE TERMINAL STEP TOO, and that is not an implementation detail:
+// the step at which the frontier empties is where every remaining contender
+// leaves the set at once, so it carries the largest release of the race. The
+// M2b.2 refactor moved this call below the empty-frontier return and cut a
+// bounded `voc` race's released_ms from 3 171 ms to 1 309 ms on an otherwise
+// identical fixture — a published observational field moving under the arm
+// decision 6 retains precisely so that old ledgers keep reproducing.
+func (s *Scheduler) releaseNonContenders(front []purchase, allow []int64) {
+	// WHETHER THIS ARM RESERVES PER WORLD IS READ FROM THE NUMBERS IT HANDED
+	// BACK, never from its name (M2b1 decision 1: the loop is not allowed to
+	// know which rule it is running). Two frontier shapes carry no answer: a
+	// ONE-ROW frontier hands back the same number under every arm — the share
+	// IS the pool — and an EMPTY frontier, which is the terminal step, hands
+	// back no number at all. So the last DECISIVE answer stands, and the
+	// terminal release is made under the apportionment the race actually ran.
+	//
+	// The named residual: a race whose frontier NEVER holds two rows — one
+	// world, start to finish — is never decisive, so it releases nothing. The
+	// pre-M2b.2 binary released the whole remaining pool there for the equal-
+	// share arm and nothing for the ladder, a difference that was a fact about
+	// the arm's identity and not about any number either arm produced. It is
+	// recorded here rather than reproduced by asking the seam what it is.
+	if len(allow) >= 2 {
+		s.reserves = reservesPerWorld(allow, s.bud.remaining())
+	}
+	if !s.reserves {
 		s.contender = map[string]bool{}
+		s.heldAllow = map[string]int64{}
+		s.heldEqual = true
 		return
 	}
 	now := make(map[string]bool, len(front))
 	for _, p := range front {
 		now[p.world.Digest] = true
 	}
-	gone := 0
+	gone := make([]string, 0, len(s.contender))
 	for w := range s.contender {
 		if !now[w] {
-			gone++
+			gone = append(gone, w)
 		}
 	}
-	if gone > 0 {
-		s.bud.release(int64(gone) * s.bud.share(len(s.contender)))
+	if len(gone) > 0 {
+		if s.heldEqual {
+			// THE EQUAL-SHARE ARMS KEEP THE PUBLISHED ARITHMETIC, to the byte.
+			// `voc`'s released_ms is on the wire of every M2b/M2b.1/M2d ledger
+			// and decision 6 retains the arm so those ledgers stay
+			// reproducible; recomputing it "better" would move the reference
+			// of a published comparison, which §5 forbids outright.
+			s.bud.release(int64(len(gone)) * s.bud.share(len(s.contender)))
+		} else {
+			// AN ARM THAT DID NOT APPORTION EQUALLY RELEASES WHAT IT ACTUALLY
+			// RESERVED. Under M2b.2's reservation the departing world held
+			// `pool − Σ_{siblings ∈ C} finish_ms`, not `remaining /
+			// |contenders|`, and crediting back an equal share would print a
+			// number about a mechanism that did not run — which is the
+			// sentence this file already uses to refuse releasing anything for
+			// the depth-first arm.
+			total := int64(0)
+			for _, w := range gone {
+				total += s.heldAllow[w]
+			}
+			s.bud.release(total)
+		}
 	}
 	s.contender = now
+	// What THIS step granted, for the next step to release from. Recorded
+	// after the release, because the release is about the apportionment that
+	// granted the reserve rather than the one replacing it.
+	s.heldAllow = make(map[string]int64, len(front))
+	s.heldEqual = true
+	for i, p := range front {
+		if i < len(allow) {
+			s.heldAllow[p.world.Digest] = allow[i]
+			if allow[i] != allow[0] {
+				s.heldEqual = false
+			}
+		}
+	}
+}
+
+// reservesPerWorld reports whether this step's allowances APPORTION the pool
+// across the contenders rather than handing each of them the whole of it.
+//
+// It reads the apportionment the arm produced rather than asking the arm what
+// kind of arm it is, which is M2b.1 decision 1's discipline held under a wider
+// seam: the loop is not allowed to know which rule it is running, so the one
+// thing it may key on is the number the rule handed it. An arm that reserves
+// nothing releases nothing, and a released_ms it never reserved would be a
+// number about a mechanism that did not run.
+func reservesPerWorld(allow []int64, pool int64) bool {
+	if len(allow) < 2 {
+		// ONE CONTENDER: the share IS the pool, and the two readings coincide.
+		return true
+	}
+	for _, a := range allow {
+		if a != pool {
+			return true
+		}
+	}
+	return false
 }
 
 // Finish closes the allocation and returns schedule.finished's totals.

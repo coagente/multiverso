@@ -91,15 +91,42 @@ func scheduleArm(cfg Config, pol policy.Policy) (string, []string, error) {
 	return schedule.ScheduleAdaptive, nil, nil
 }
 
-// selectorFor maps the recorded arm to decision 1's selector. It is the ONE
-// place the arms diverge in this package: everything downstream — the
-// frontier, the budget, the charge point, the dispatch, the trace — is the
-// same code for both.
-func selectorFor(arm string) schedule.Selector {
+// selectorFor maps the recorded arm and the requested rule to decision 1's
+// selector. It is the ONE place the arms diverge in this package: everything
+// downstream — the frontier, the budget, the charge point, the dispatch, the
+// trace — is the same code for all three.
+//
+// THE PUBLISHED RULE IS RETAINED AND SELECTABLE (M2b.2 decision 6), AND IT IS
+// STILL THE DEFAULT. M2d convicted `voc` of losing reachable admissions it had
+// the money for, and `voc2` fixes that — but under the shipped default policy
+// it fixes it by admitting where the full-evidence decision escalates, at every
+// budget in the informative band, and no gate in this repository measures it
+// (M2b.2 §7.6). So the revision is one flag away rather than the default, and
+// the before/after stays a paired comparison under ONE binary, which is why
+// neither rule was deleted or upgraded in place.
+func selectorFor(arm, rule string) (schedule.Selector, error) {
 	if arm == schedule.ScheduleFixedBudget {
-		return schedule.SelectorLadder()
+		if rule != "" && rule != schedule.SelectorNameLadder {
+			return nil, fmt.Errorf("race: --selector=%s applies to --schedule=%s only; --schedule=%s IS the depth-first ladder and reserves nothing",
+				rule, schedule.ScheduleAdaptive, schedule.ScheduleFixedBudget)
+		}
+		return schedule.SelectorLadder(), nil
 	}
-	return schedule.SelectorVOC()
+	switch rule {
+	case "":
+		// The BINARY's default rule, read from the same constant the trace
+		// records as `adaptive_rule` — so a race, its ledger and the eval
+		// freeze check cannot disagree about which rule this build allocates
+		// by.
+		return selectorFor(arm, schedule.AdaptiveRule())
+	case schedule.SelectorNameVOC:
+		return schedule.SelectorVOC(), nil
+	case schedule.SelectorNameVOC2:
+		return schedule.SelectorVOC2(), nil
+	default:
+		return nil, fmt.Errorf("race: --selector must be %s or %s (got %q)",
+			schedule.SelectorNameVOC2, schedule.SelectorNameVOC, rule)
+	}
 }
 
 // worldOrder is the CONTROL-PLANE world order (M2b1 decision 3): candidate
@@ -172,6 +199,10 @@ func (r *raceRun) scheduledVerify(ctx context.Context, completed []int, arm stri
 		bounds.CorpusCases = int64(len(r.corpus.corpus.Cases))
 		corpusDigest = r.corpus.digest
 	}
+	sel, err := selectorFor(arm, r.cfg.Selector)
+	if err != nil {
+		return err
+	}
 	sch, err := schedule.New(schedule.Config{
 		Policy:       r.pol,
 		Decide:       Decide,
@@ -181,7 +212,7 @@ func (r *raceRun) scheduledVerify(ctx context.Context, completed []int, arm stri
 		Batch:        r.cfg.Parallel,
 		CollectInert: r.cfg.CollectInert,
 		CorpusDigest: corpusDigest,
-		Selector:     selectorFor(arm),
+		Selector:     sel,
 		Order:        r.worldOrder(),
 		Rotation:     r.cfg.Rotation,
 		BudgetBasis:  r.cfg.BudgetBasis,

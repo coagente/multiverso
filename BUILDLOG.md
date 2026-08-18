@@ -2,6 +2,266 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-17 — M2b.2: a rule that finishes what it starts
+
+**A pre-registered falsifier fired: on the instrument that convicted the rule,
+nothing moved.** `FRR_reachable(voc2, B1, family A) = 2/2` — identical to the
+rule it replaces, and the pre-registration's own words for that observation are
+*"the metric that convicted the rule is unmoved. The fix did not work."* Two
+more predictions failed as written (P9, P11), and the revision also converts a
+full-evidence ESCALATE into a SELECT under the shipped default. It is not shipped
+as the default and it is not a partial success. What it is, is a sharp diagnosis
+plus a repair that the labelled instrument **cannot currently test** — every eval
+cell is byte-identical between the two rules because `mvo-eval` never warms the
+cost table, so every rung is priced `declared-rank`, `finish_ms` is unknown, and
+the revision falls back to the old rule on every step. The mechanical fixture
+does show the arithmetic working (§7's P1 held 5/5). Both halves are below.
+
+M2d convicted the adaptive rule of `FRR_reachable = 2/2` at the tightest budget — on both
+instances where a correct candidate existed, where the policy would have
+selected it on full evidence, and where the money was in the arm's pocket, the
+arm rejected. This block builds the repair that arithmetic demanded, and the
+repair does exactly what §7's P1 says. It also converts a **full-evidence
+ESCALATE into a SELECT**, under the shipped default policy, deterministically,
+across the whole informative budget band, where the rule it replaces rejects.
+Nothing in the pre-registration could catch that: every falsifier was stated
+against the **ladder**, and the revision *ties* the ladder. So `voc2` ships
+behind `--selector=voc2`, `AdaptiveRuleDefault` stays `voc`, and the falsifier
+that was missing is written into §7 with the measurement that fired it.
+
+**The diagnosis, and it is three defects rather than a tie-break.** The
+frontier offers one rung per alive world; the score's denominator is *the
+rung's own cost*, which prices a fragment of a good M2a's purchase law makes
+indivisible; equal shares divide the pool by the number of worlds still buying,
+and the last rung of a fidelity ladder is the most expensive one — so the
+finishing purchase is exactly the purchase most likely to exceed a fractional
+share, and on symmetric worlds it exceeds *every* world's share in the same
+step. Replayed on the published race at B2 = 1 529 ms: **the pool held 943 ms,
+the purchase that would have completed a world cost 689, equal shares offered
+each world 471, and refused both.** Not a bad choice between worlds. A refusal
+to every world simultaneously, which is the one thing an apportionment rule
+must never do.
+
+**The revision, in one line.** Under scarcity — Σ finish_ms over the alive
+worlds exceeds the pool — the score's denominator becomes the cost to FINISH
+the world, and equal shares become a reservation: the pool is committed to the
+longest prefix of the commit order it can actually complete, and a committed
+world's allowance is the pool minus what its co-committed siblings still need.
+Neither half works alone. Zero new constants: the completion term is a sum over
+the pinned cost table of rungs the policy itself declares. Under `¬scarce` —
+every unbounded race, and every race with an unpriced kind — it is M2b's rule
+through M2b's own code path, so every null-case proof survives by construction.
+
+**The pre-registration, quoted verbatim, and what the measurement says.**
+
+> **P1** — At `default / B2 = 1 529 ms`, `voc2` records **≥ 1 complete world**
+> in **≥ ⌈2R/3⌉** replicates. Published `voc`: **0 complete worlds, 5/5**.
+>
+> **P2** — At the same cell, `voc2` spends **≈ 982 ms** (one full ladder) and
+> buys **3 receipts**, stopping `S-budget` with ≈ 547 ms **unspent**. Published
+> `voc`: 586 ms / 4 receipts. Published ladder: 1 284 ms / 5 receipts.
+>
+> **§7.5** — So the expected outcome of this fix on this corpus is: **`voc2` ≡
+> `ladder` within noise at every level.** That is a **success for the rule** and
+> a **null for the thesis**, and both halves get published in the same sentence.
+
+**P1 HELD. P2 WAS FALSIFIED — by the doc's own decision-5 amendment, before the
+gate ever ran.** `accept.sh` step m2b2-8a, at a budget that pays for one ladder
+and not two: *voc2 finished 1 world for 1 364 ms; voc finished 0 for 634 ms*.
+The predicted 982 ms / 3 receipts / 547 ms unspent became ~1 364 ms and 5
+receipts, because after the head world completes the commit set empties, and
+with nothing left to protect M2b decision 3c stands verbatim and the rival's
+affordable prefix is bought. That is §7.5's convergence on the ladder arriving
+one block early, and it is recorded in the doc as a falsification rather than
+smoothed into the prose.
+
+**And §7.5's null is not a near-miss, it is mechanical.** `Table.Predict` is
+keyed on `(kind, units)` and holds nothing per world, so on symmetric worlds
+`finish_ms` is *identical* at equal ladder positions (measured: 1 034 ms for
+both worlds, tie fixture, B = 1 500). With `flip` equal too, the commit order's
+sort falls through score and through finish to its terminal key —
+`st.OrderIndex`, the control-plane world order — **which is the ladder's entire
+ranking rule.** Measured: identical decision, spend and per-world receipt counts
+against the ladder at 6/6 budgets on `patches-tie`; identical at 3/3 on the
+`23-schedule_starvation` duel with a warm table. So the claim that the arm is
+adaptive under scarcity is **withdrawn**: the value model decides nothing about
+who gets the money, and the commit order is the candidate ordinal. By §7.5's own
+anti-spin commitment the next block is a per-world cost signal or an asymmetric
+corpus — **not another rule**.
+
+**THE FALSIFIER THAT WAS MISSING, AND IT FIRED.** Every falsifier in §7.3 is
+stated against the ladder or against a published metric. **None was stated
+against `voc`** — the arm being replaced and the shipped default — so F-4
+("FAR(voc2) greater than FAR(ladder)") structurally could not fire on a rule
+that ties the ladder. Added as **F-10** and observed:
+`testdata/toyrepo/patches-tie`, shipped default policy, warm cost table,
+`--budget-basis=predicted`. Unbounded reference: **ESCALATE**, rule
+`on_ranking_tie`, S = 1 998 ms.
+
+| B (ms) | voc | voc2 | ladder |
+|---|---|---|---|
+| 1 200 | REJECT, 596 ms, 4 rcpt (2+2) | **SELECT**, 1 006 ms, 4 rcpt (3+1) | SELECT, 1 009 ms |
+| 1 400 | REJECT, 620 ms, 4 rcpt | **SELECT**, 1 345 ms, 5 rcpt (3+2) | SELECT, 1 354 ms |
+| 1 600 | REJECT, 630 ms, 4 rcpt | **SELECT**, 1 350 ms, 5 rcpt | SELECT, 1 354 ms |
+| 1 800 | REJECT, 632 ms, 4 rcpt | **SELECT**, 1 360 ms, 5 rcpt | SELECT, 1 361 ms |
+| 2 000 | REJECT, 634 ms, 4 rcpt | **SELECT**, 1 360 ms, 5 rcpt | SELECT, 1 360 ms |
+| 2 100 ≈ S | ESCALATE | ESCALATE | ESCALATE |
+
+Through the project's own harness, paired and interleaved:
+`schedule-compare.sh --patches patches-tie --budget 1400 --replicates 4
+--arm-a --selector=voc --arm-b --selector=voc2` → `REJECT/SELECT` **4 of 4**,
+both arms deterministic given the rotation. The SELECT rationale is honest
+("evidence incomplete: … was not measured against 3 hard gate(s)") and it is
+still an admission with the rival's suite never bought — PRD vector 25, the
+starved admission, on a committed fixture in one harness invocation.
+`docs/concepts.md` used to say the corpus "has never produced" one. It has, and
+the row now says so with the reproduction.
+
+**So the rule ships behind a flag.** `--schedule=adaptive` still allocates by
+`voc`; `--selector=voc2` runs the revision; `--schedule=fixed-budget` is the
+ladder, which has made exactly this trade since M2b.1 and is captioned for it.
+The second reason is independent and worse: **no gate in this repository
+measures the revision at all.** The adversarial corpus builds a fresh workspace
+per vector, so nothing is priced, `finish_ms` is UNKNOWN, and decision 1's
+fallback fires on every step — `commit_basis:
+"unpriced-fallback(pytest-collect,pytest-suite,tree-guard)"`, `scarce: false`,
+`|C| = 0`; 21 of 22 vectors carry no budget, and the 22nd reproduces the same
+fallback and a byte-identical purchase order to `voc`. Every eval cell is
+identical between the two rules for the same reason. **"adversarial 22/22" and
+"FAR unchanged" are true statements about `voc`.** §6 calls the corpus this
+block's blocking gate; for the rule this block adds, that gate is vacuous, and
+saying so is the point of writing it down.
+
+**What the instrument did, and what it did not.** The freeze gained
+`adaptive_rule` and the check now compares it — the mechanism M2d's freeze was
+missing, since M2b.2 moves no constant and no policy field and would have passed
+in silence. **No byte of `eval/freeze/*.json` moved, and the check does not
+refuse**, because the default rule did not move: a freeze that is refused on
+every run is a rubber stamp, and the file's own notes call that worse than not
+checking. **No new labelled measurement was taken in this block** — no
+`--unfreeze`, no eval-use line, no re-scored cell — and that is not modesty, it
+is the honest consequence of the paragraph above: on cold workspaces the two
+rules produce identical cells, so P9–P16 are **unevaluable as the harness
+stands**. Making them evaluable needs a per-instance warm-up race in
+`mvo-eval`, which changes affordability for every arm and is therefore a change
+to the instrument that §5.3 forbids inside this block. It is the first thing the
+next block builds.
+
+**What the hostile reviewer found, and four of them were defects in the
+observation, not in the rule.**
+
+- **The instrument moved in a way that flattered the new rule, twice, and both
+  were fixed and re-measured.** `selection_us` — F8's reported-not-charged
+  fairness field, aggregated per arm by `schedule-compare.sh` — started its
+  timer *after* the apportionment pass, which is where `voc2` does **all** of
+  its lookahead (`Allowances` → `voc2Plan` → `Look` → `Decide`); `Rank` then
+  only hits the per-step memo. On a probe with an instrumented `Decide`: **voc
+  10 041 µs, voc2 35 µs for a comparable number of `Decide` calls**, a 287×
+  under-report of the same work, asymmetric across precisely the arms being
+  compared. The window now opens before the frontier walk, which is what the
+  comment at the charge point had claimed since M2b.1. And the retained `voc`
+  arm's **`released_ms` moved**: the refactor put `releaseNonContenders` below
+  the empty-frontier early return, so the terminal step — where every remaining
+  contender leaves at once — stopped recording. Identical bounded race, HEAD vs
+  working tree: **3 171 ms vs 1 309 ms**. Restored to 3 159 ms, and pinned by a
+  test, because a `--selector=voc` race that cannot reproduce the pre-M2b.2
+  ledger defeats the only reason decision 6 keeps the arm.
+- **The headline verdict flipped with the parity of R.** On an N-world fixture
+  the replicate's rotation is `r mod N`, so an arm whose decision depends on
+  which candidate holds the head is a *deterministic function of the rotation*
+  — and `noise_floor` is each arm's disagreement with its own modal decision,
+  so that systematic effect was charged as noise while being the entire effect.
+  R = 9 gave 55.6 % against a 44.4 % floor (not a tie); R = 10, same command
+  and fixture, gave 50.0 % against 50.0 % (a tie). Worse, the test is
+  structurally incapable of returning a tie when one arm is deterministic and
+  the arms' modal decisions differ, except at an exact 50/50 split. The report
+  now stratifies by effective rotation, names arms that decide deterministically
+  given it, and refuses to call the pooled tie test interpretable when the
+  replicates do not cover whole rotation cycles.
+- **The freeze had no fixed point.** `FreezeFile.Rules` is `json:"-"` and there
+  was no `MarshalJSON`, so `mvo-eval freeze` emitted a file with **no
+  `adaptive_rule` key** — which the reader normalizes to `"voc"` — so any
+  legitimate re-freeze was refused by the very binary that wrote it, forever,
+  with no way to record the truth but hand-editing the artifact. That is the
+  "trains every reader to pass `--unfreeze`" failure the committed freeze's own
+  notes name. Merged write path, and a round-trip test: a freeze written by this
+  build and re-read by this build reports zero drift.
+- **A trace declared a world unreachable and then bought its rungs.** Steps 1–2
+  declined a world with *"unreachable: …no pass outcome is purchasable"*; step 3
+  bought that exact rung for 312 ms, because the head world completed, `C`
+  emptied and decision 5's amendment reinstated the hard-gate override. The
+  sentence claimed to terminate the world's whole ladder; the allowance is
+  recomputed every step and decision 3 says membership in `C` is never a
+  property of a world. The sentence now scopes itself to the step it is printed
+  on and says the world is not abandoned; the terminal skips still fire at the
+  stop, which is the only moment "not this batch" becomes "not ever".
+- **The acceptance gate encoded its own result.** The four new steps assert that
+  the revision finishes worlds and spends *more*; none asserted anything about
+  decision quality, and the withholding-monotonicity property test proves only
+  the pass-set property, which this project's own docs say does not constrain
+  SELECT. **m2b2-8e** is the gate that can refute the block: on `patches-tie`
+  under the shipped default at two budgets in the informative band, the default
+  adaptive arm's decision must not be SELECT when the unbounded reference
+  ESCALATEs. It passes under `voc`, fails under `voc2`, and prints both:
+  *"at 1 276 ms of 2 128 — shipped default REJECT, --selector=voc2 SELECT (full
+  evidence: ESCALATE)"*.
+- **The renderer dated traces with a field that does not date them.** `preM2b2`
+  read `Constants.adaptive_rule == "voc"` — which works only while the default
+  *is* the revision. With `voc` as the shipped default that stamps "pre-M2b.2
+  trace" on races run this morning, in the sentence written to stop the renderer
+  inventing evidence. It now reads the finishing rule's own vocabulary
+  (`commit_basis` on a step, `score_basis` on a row), and §8's five trace shapes
+  finally have the table-driven goldens the testing bar asked for.
+- **`accept.sh` was flaky** — 1 failure in 4 runs, on an anchored grep against a
+  tabwriter table whose column widths depend on which policies happen to be
+  recorded. Re-grepping the failing line from the log with the same pattern
+  matched, so what differed was the assertion's input, not its regex. Parsed as
+  data now, printing the whole table on failure. Measured pass rate after the
+  change: **6 of 6 green** (`scripts/accept.sh`, sequential, same tree), reported as a rate
+  rather than as a single green run.
+- **§8's wire delta was stale in the direction of the implementation** (three
+  Step fields declared, four shipped — `commit_basis`, which decision 1 in fact
+  requires), and **§7.4 could not be executed as pre-registered** (no `A2b`
+  arm; a global `--selector` makes the before/after two full protocol runs,
+  scoring every declared cell twice, which §5.2 requires the published query
+  count to say). Both are recorded as `AMENDED IN IMPLEMENTATION` beside the two
+  the block had already recorded, and §7 carries a **POST-HOC NOTICE**: the rule
+  was amended twice after measurement, decision 3's amendment says in as many
+  words that the amended fixture then matches "§7's P1 and P2 to the
+  millisecond", so P1 and P2 are a description of a rule tuned until they held
+  and not an out-of-sample confirmation. A reader must not read them as one.
+- **The B1 before/after was drawn against a different instance set than the
+  published one.** At B1 both arms ran n = 3, because two instances derived a
+  median minspend of 0 — which `mvo intent new` reads as *unbounded* — and were
+  excluded as not budget-matched. One of the two is `toyrepo-mean-C`, which
+  M2d's published table names as the one instance adaptive wins alone. So P13
+  was **unevaluable in that run**, and the published n = 5 numbers must not be
+  printed beside an n = 3 cell. Recorded rather than re-run: re-running is a
+  measurement, and this block takes none.
+
+**The gate.** `gofmt -l` empty; `go vet ./...` and `go test -count=1 ./...`
+green with no docker daemon, no network, no corpus and none of hypothesis,
+mutmut or cosmic-ray installed; `go.mod`/`go.sum` untouched; no test invokes a
+real agent CLI; **ZERO AGENT SPEND**. `scripts/m0-accept.sh` OK.
+`scripts/adversarial.sh` **22/22 against the recorded baseline** — on a code
+path the new rule never enters, which is the point above and not a reassurance.
+Every M0–M2d ledger replays byte-for-byte and the shipped default policy digest
+does not move (`mv0:f207c3fa…`).
+
+**What M2b.2 does not have, and it is the shape of the next block.** A cell in
+which `commit_basis` is `reserved` on at least one step of a *labelled*
+instance; adversarial vectors that attack allocation carrying budgets **and** a
+warm cost table, with the baseline re-recorded as its own declared change; a
+per-world cost signal, without which the "adaptive" rule under scarcity is the
+control-plane ordinal with extra arithmetic; and either a shipped default policy
+that declares `on_evidence_incomplete` — whose base rate this block was supposed
+to measure and could not — or a reservation that refuses to commit while the
+uncommitted remainder cannot buy the rivals' decision-relevant hard gates. Until
+one of those exists, the honest sentence about the finishing rule is that it was
+measured on an unlabelled two-world fixture, that it does what its arithmetic
+says on that fixture, and that what it does there is what the depth-first ladder
+already did.
+
 ## 2026-08-17 — M2d: labels, and what they say about the null
 
 **Adaptive was worse.** M2b.1 raced two budgeted arms, got a disagreement that

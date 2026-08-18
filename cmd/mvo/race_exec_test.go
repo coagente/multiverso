@@ -60,6 +60,20 @@ func TestRaceExecFlagMatrix(t *testing.T) {
 		{"pids below 1",
 			[]string{"race", "mv0:x", "--patches", "p", "--exec", "T1", "--exec-image", "img", "--pids", "0", "--oracle-cmd", "true"},
 			"--pids must be at least 1"},
+		// M2b.2 decision 6: the rule is SELECTABLE, the vocabulary is closed,
+		// and it applies to the arm that allocates. The ladder reserves
+		// nothing and the unbudgeted M1 ladder allocates nothing, so naming a
+		// rule for either is a usage error rather than a silent no-op that
+		// would put an unrun rule's name in a published comparison.
+		{"unknown selector",
+			[]string{"race", "mv0:x", "--patches", "p", "--selector", "greedy", "--oracle-cmd", "true"},
+			"--selector must be voc2 or voc"},
+		{"selector on the ladder arm",
+			[]string{"race", "mv0:x", "--patches", "p", "--selector", "voc", "--schedule", "fixed-budget", "--oracle-cmd", "true"},
+			"--selector applies only to --schedule=adaptive"},
+		{"selector on the unbudgeted ladder",
+			[]string{"race", "mv0:x", "--patches", "p", "--selector", "voc2", "--schedule", "fixed", "--oracle-cmd", "true"},
+			"--selector applies only to --schedule=adaptive"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -106,6 +106,85 @@ func TestPayloadIsCanonical(t *testing.T) {
 	}
 }
 
+// M2b.2's WIRE DELTA: three additive keys on a considered row, four on a
+// step, one on the constants block, and NOTHING ELSE. Every one of them is
+// observational, carries no payload digest and is ignored by replay.
+func TestM2b2FieldsAreAdditiveAndCanonical(t *testing.T) {
+	step := sampleStep(1)
+	step.Scarce = true
+	step.CommitBasis = CommitBasisReserved
+	step.CommitSet = []string{"mv0:aa1"}
+	step.UncommittedMS = 547
+	step.Considered[0].Committed = true
+	step.Considered[0].FinishMS = 982
+	step.Considered[0].ScoreBasis = ScoreBasisFinish
+
+	b, err := Payload(normalizeStep(step))
+	if err != nil {
+		t.Fatalf("Payload: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, key := range []string{"commit_basis", "commit_set", "scarce", "uncommitted_ms"} {
+		if _, ok := decoded[key]; !ok {
+			t.Fatalf("schedule.step payload is missing %q: %s", key, b)
+		}
+	}
+	row := decoded["considered"].([]any)[0].(map[string]any)
+	for _, key := range []string{"committed", "finish_ms", "score_basis"} {
+		if _, ok := row[key]; !ok {
+			t.Fatalf("considered row is missing %q: %s", key, b)
+		}
+	}
+	// And the round trip is exact: a consumer reads back what the allocator
+	// recorded, never a recomputation.
+	got, err := DecodeStep(b)
+	if err != nil {
+		t.Fatalf("DecodeStep: %v", err)
+	}
+	if !got.Scarce || got.UncommittedMS != 547 || len(got.CommitSet) != 1 ||
+		got.Considered[0].FinishMS != 982 || got.Considered[0].ScoreBasis != ScoreBasisFinish {
+		t.Fatalf("the regime did not survive the round trip: %+v", got)
+	}
+}
+
+// ABSENT IS ABSENT, and `adaptive_rule` absent means "voc" EXACTLY rather
+// than by assumption: no binary before M2b.2 could allocate by any other
+// rule. That normalization is what lets M2d's freeze see the change without
+// one byte of any frozen artifact moving, and it is what tells a renderer
+// that a pre-M2b.2 trace recorded no scarcity test rather than recording
+// `false`.
+func TestPreM2b2TraceNormalizesTheAdaptiveRuleToVOC(t *testing.T) {
+	old := []byte(`{"budget":{"max_oracle_ms":1529},"budget_basis":"actual",` +
+		`"constants":{"executor_bp":{"control-plane":10000},"redundancy_bp":{}},` +
+		`"cost_table":[],"intent":"mv0:i","mode":"decision","parallel":1,"schedule":"adaptive",` +
+		`"selector":"voc","world_order":[]}`)
+	st, err := DecodeStarted(old)
+	if err != nil {
+		t.Fatalf("an M2b1-era schedule.started no longer decodes: %v", err)
+	}
+	if st.Constants.AdaptiveRule != SelectorNameVOC {
+		t.Errorf("adaptive_rule = %q on a pre-M2b.2 trace, want %q exactly",
+			st.Constants.AdaptiveRule, SelectorNameVOC)
+	}
+	// A pre-M2b.2 STEP carries no regime at all, and decoding must not invent
+	// one: `scarce: false` would be a measurement nobody took.
+	step, err := DecodeStep([]byte(`{"batch":1,"budget":{"released_ms":0,"remaining_ms":9,"spent_ms":1},` +
+		`"chosen":[],"considered":[],"decision_now":{"pass_count":0,"subject":[],"type":"REJECT"},` +
+		`"staleness":0,"step":1}`))
+	if err != nil {
+		t.Fatalf("an M2b-era schedule.step no longer decodes: %v", err)
+	}
+	if step.CommitBasis != "" {
+		t.Errorf("commit_basis = %q on a pre-M2b.2 step, want empty (unknown)", step.CommitBasis)
+	}
+	if len(step.CommitSet) != 0 {
+		t.Errorf("commit_set = %v on a pre-M2b.2 step, want empty", step.CommitSet)
+	}
+}
+
 // A nil slice canonicalizes to `null`, and `null` is a lie about the shape
 // of the record: "the scheduler considered nothing" and "the field is
 // missing" are different facts.

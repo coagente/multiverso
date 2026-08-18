@@ -50,20 +50,37 @@ type explainSchedule struct {
 	// of the control-plane order this replicate ran, and the order itself. An
 	// empty world order is reported as unknown and NEVER as digest order,
 	// because inventing a past ordering is inventing evidence.
-	BudgetBasis string               `json:"budget_basis"`
-	Rotation    int                  `json:"rotation"`
-	WorldOrder  []string             `json:"world_order"`
-	Mode        string               `json:"mode"`
-	BudgetMS    int64                `json:"budget_ms"`
-	Parallel    int                  `json:"parallel"`
-	Inert       bool                 `json:"collect_inert"`
-	Steps       []explainScheduleRow `json:"steps"`
-	CostModel   []explainCostRow     `json:"cost_model"`
-	Skipped     []schedule.Skipped   `json:"skipped"`
-	Stop        string               `json:"stop"`
-	Batches     int                  `json:"batches"`
-	SpentMS     int64                `json:"spent_ms"`
-	Released    int64                `json:"released_ms"`
+	BudgetBasis string   `json:"budget_basis"`
+	Rotation    int      `json:"rotation"`
+	WorldOrder  []string `json:"world_order"`
+	// AdaptiveRule is the rule THE BINARY defaulted to for --schedule=adaptive
+	// when this race ran — a property of the build, not of the run, and not
+	// the same fact as `selector`. It reads "voc" EXACTLY on a pre-M2b.2
+	// trace, because no earlier binary could allocate by any other rule, and
+	// that is what tells a reader the regime fields below were never recorded
+	// rather than recorded false.
+	AdaptiveRule string `json:"adaptive_rule"`
+	// Regimes is one row per step: decision 1's scarcity test, decision 3's
+	// commit set, and the pool the reservation did not commit. It is EMPTY on
+	// a pre-M2b.2 trace — absent, never a fabricated `false` — and empty on an
+	// arm that holds no such concept.
+	Regimes []explainRegime `json:"regimes"`
+	// noRegime says the regime fields were NEVER RECORDED rather than recorded
+	// empty: a pre-M2b.2 trace, which ran no scarcity test at all. It is not on
+	// the wire because it is not a fact about the race — it is what the
+	// renderer knows about the ledger it is reading.
+	noRegime  bool
+	Mode      string               `json:"mode"`
+	BudgetMS  int64                `json:"budget_ms"`
+	Parallel  int                  `json:"parallel"`
+	Inert     bool                 `json:"collect_inert"`
+	Steps     []explainScheduleRow `json:"steps"`
+	CostModel []explainCostRow     `json:"cost_model"`
+	Skipped   []schedule.Skipped   `json:"skipped"`
+	Stop      string               `json:"stop"`
+	Batches   int                  `json:"batches"`
+	SpentMS   int64                `json:"spent_ms"`
+	Released  int64                `json:"released_ms"`
 	// SelectionUS is the arm's own metalevel time, measured: REPORTED AND NOT
 	// CHARGED (F8). PRD §11's budget includes selection cost and this harness
 	// charges only oracle milliseconds, so the field is what keeps the claim
@@ -112,6 +129,17 @@ type explainUnscheduled struct {
 	Phase    string `json:"phase"`
 }
 
+// explainRegime is one step's apportionment record (M2b.2 decisions 1 and 3):
+// which rule allocated it, whether the pool could finish every alive world,
+// which worlds it committed to finishing, and what it left uncommitted.
+type explainRegime struct {
+	Step          int      `json:"step"`
+	Scarce        bool     `json:"scarce"`
+	CommitBasis   string   `json:"commit_basis"`
+	CommitSet     []string `json:"commit_set"`
+	UncommittedMS int64    `json:"uncommitted_ms"`
+}
+
 type explainScheduleTotals struct {
 	Considered int `json:"considered"`
 	Bought     int `json:"bought"`
@@ -137,14 +165,25 @@ type explainScheduleRow struct {
 	CostMS       int64    `json:"cost_ms"`
 	CostBasis    string   `json:"cost_basis"`
 	ScoreBPPS    int64    `json:"score_bpps"`
-	Affordable   bool     `json:"affordable"`
-	HardGate     bool     `json:"hard_gate"`
-	Basis        string   `json:"basis"`
-	Bought       bool     `json:"bought"`
-	Declined     string   `json:"declined"`
-	Receipt      string   `json:"receipt"`
-	Status       string   `json:"status"` // the receipt's verdict; "" when unjoined
-	ActualMS     int64    `json:"actual_ms"`
+	// ScoreBasis says which denominator produced ScoreBPPS: "rung" is M2b's
+	// own cost of the next purchase, "finish" is M2b.2's cost of completing
+	// the world. "" is a row that computed no score at all and renders "—".
+	ScoreBasis string `json:"score_basis"`
+	// FinishMS and Committed are the finishing rule's two facts about this
+	// world at this step. A row whose ScoreBasis is "rung" may still carry a
+	// finish cost — a measurement the rule computed and did NOT divide by —
+	// and the rendering labels it as such rather than letting it read as the
+	// denominator.
+	FinishMS   int64  `json:"finish_ms"`
+	Committed  bool   `json:"committed"`
+	Affordable bool   `json:"affordable"`
+	HardGate   bool   `json:"hard_gate"`
+	Basis      string `json:"basis"`
+	Bought     bool   `json:"bought"`
+	Declined   string `json:"declined"`
+	Receipt    string `json:"receipt"`
+	Status     string `json:"status"` // the receipt's verdict; "" when unjoined
+	ActualMS   int64  `json:"actual_ms"`
 }
 
 // explainCostRow is one kind's recorded cost model. A row whose basis is
@@ -183,6 +222,9 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	out := &explainSchedule{
 		Recorded:          !tr.Empty(),
 		Selector:          tr.Started.Selector,
+		AdaptiveRule:      tr.Started.Constants.AdaptiveRule,
+		Regimes:           []explainRegime{},
+		noRegime:          preM2b2(tr),
 		BudgetBasis:       tr.Started.BudgetBasis,
 		Rotation:          tr.Started.Rotation,
 		WorldOrder:        tr.Started.WorldOrder,
@@ -238,12 +280,23 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	}
 	seenReceipt := map[string]bool{}
 	for _, s := range tr.Steps {
+		// ABSENT IS ABSENT (M2b.2 §3.4). A pre-M2b.2 trace carries no
+		// scarcity test at all, and reporting one as `false` would invent a
+		// regime nobody measured — the same argument M2b.1 made about
+		// world_order, reused because it is the same argument.
+		if !preM2b2(tr) {
+			out.Regimes = append(out.Regimes, explainRegime{
+				Step: s.Step, Scarce: s.Scarce, CommitBasis: s.CommitBasis,
+				CommitSet: s.CommitSet, UncommittedMS: s.UncommittedMS,
+			})
+		}
 		for _, r := range s.Considered {
 			row := explainScheduleRow{
 				Step: s.Step, Order: r.Order, World: r.World, Oracle: r.Oracle, Kind: r.Kind,
 				Flip: r.Flip, FlipOutcomes: r.FlipOutcomes, DiscountBP: r.DiscountBP,
 				ExecutorBP: r.ExecutorBP, ValueBP: r.ValueBP, CostMS: r.CostMS,
-				CostBasis: r.CostBasis, ScoreBPPS: r.ScoreBPPS, Affordable: r.Affordable,
+				CostBasis: r.CostBasis, ScoreBPPS: r.ScoreBPPS, ScoreBasis: r.ScoreBasis,
+				FinishMS: r.FinishMS, Committed: r.Committed, Affordable: r.Affordable,
 				HardGate: r.HardGate, Basis: r.Basis, Bought: r.Declined == "",
 				Declined: r.Declined,
 			}
@@ -306,6 +359,37 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 
 func rowKey(step int, world, oracle string) string {
 	return fmt.Sprintf("%d\x00%s\x00%s", step, world, oracle)
+}
+
+// preM2b2 reports whether this trace was written by a binary that predates the
+// finishing rule.
+//
+// IT CANNOT BE READ OFF `adaptive_rule`, and the first version of this
+// function did. That field is the BINARY's default rule; an absent value
+// normalizes to "voc" EXACTLY (decision 8); and M2b.2 ships with `voc` as the
+// default, so "voc" is what a pre-M2b.2 ledger AND a race run this morning
+// both record. A renderer that dated the binary from it would stamp "pre-M2b.2
+// trace" on current races — inventing evidence in exactly the direction M2b.1
+// decision 6 forbids, and doing it in the sentence written to prevent that.
+//
+// What actually separates the eras is the finishing rule's OWN VOCABULARY: a
+// binary that has the rule records a `commit_basis` on every step of a `voc2`
+// race and a `score_basis` on every VOC row of any race, and a binary that
+// does not, records neither. A LADDER race carries neither in either era — it
+// computes no scarcity test and no score at all — so its regime line is
+// answered before this test is reached, from the arm rather than from the era.
+func preM2b2(tr schedule.Trace) bool {
+	for _, s := range tr.Steps {
+		if s.CommitBasis != "" {
+			return false
+		}
+		for _, c := range s.Considered {
+			if c.ScoreBasis != "" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // unscheduledPhase names the phase a receipt the allocator never chose came
@@ -425,6 +509,7 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 	fmt.Fprintf(w, "  selector:   %s\n", selectorText(s))
 	fmt.Fprintf(w, "  charged:    %s\n", basisText(s.BudgetBasis))
 	fmt.Fprintf(w, "  order:      %s\n", worldOrderText(s))
+	fmt.Fprintf(w, "  regime:     %s\n", regimeText(s))
 
 	// The table is laid out ALONE and the decline reasons are interleaved
 	// afterwards, and that two-step is not fussiness. §4.4 puts a declined
@@ -438,17 +523,18 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 	var tb strings.Builder
 	tw := tabwriter.NewWriter(&tb, 2, 8, 2, ' ', 0)
 	ladder := s.Selector == schedule.SelectorNameLadder
-	fmt.Fprintln(tw, "  STEP\tWORLD\tORACLE\tFLIP\tDISC\tEXEC\tCOST\tSCORE\tOUTCOME")
+	fmt.Fprintln(tw, "  STEP\tWORLD\tORACLE\tFLIP\tDISC\tEXEC\tCOST\tSCORE\tPER\tFINISH\tCOMMIT\tOUTCOME")
 	for _, r := range s.Steps {
 		// A LADDER ROW RENDERS "—" WHERE A VOC ROW RENDERS A NUMBER (decision
 		// 6). The depth-first arm computes no flip, no discount, no executor
 		// weight and no score, and under "absent source implies absent metric"
 		// those columns must not print zeros a reader could aggregate: a `0`
 		// under FLIP is a VOC row that scored zero, which is a different fact.
-		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Step, short(r.World), r.Oracle,
 			voc(ladder, int64(r.Flip)), voc(ladder, r.DiscountBP), voc(ladder, r.ExecutorBP),
-			costCell(r), voc(ladder, r.ScoreBPPS), outcomeCell(r))
+			costCell(r), voc(ladder, r.ScoreBPPS), dash(r.ScoreBasis),
+			finishCell(r), commitCell(r), outcomeCell(r))
 	}
 	_ = tw.Flush()
 	laid := strings.Split(strings.TrimSuffix(tb.String(), "\n"), "\n")
@@ -549,9 +635,107 @@ func selectorText(s *explainSchedule) string {
 		return "ladder (depth-first, world order recorded)"
 	case schedule.SelectorNameVOC:
 		return "voc (value of computation: flip x discount x executor / predicted cost)"
+	case schedule.SelectorNameVOC2:
+		return "voc2 (value of computation; under scarcity the denominator is the cost to FINISH the world and the pool is reserved to a commit set)"
 	default:
 		return dash(s.Selector)
 	}
+}
+
+// regimeText renders M2b.2 decision 1's gate for the whole race: which rule
+// actually apportioned the pool, and on how many steps the pool could not
+// finish every alive world.
+//
+// It is also the FAR claim's precondition made readable. M2b decision 4's
+// restored claim holds "whenever the budget can pay for every hard gate of
+// every live world", which is exactly ¬scarce — so a race whose every step
+// says `not scarce` carries that claim with equality, from its own ledger,
+// rather than from a sentence in a design document.
+func regimeText(s *explainSchedule) string {
+	if s.Selector == schedule.SelectorNameLadder {
+		// THE ARM ANSWERS BEFORE THE ERA DOES. A depth-first ladder computes
+		// no scarcity test in either era, so dating its binary would be
+		// answering a question nobody asked with a fact nobody can check.
+		return "— (the ladder arm computes no scarcity test and commits to nothing)"
+	}
+	if s.noRegime {
+		// Absent is absent. A pre-M2b.2 binary ran no scarcity test, and
+		// printing "not scarce" for it would report a measurement nobody took.
+		return "unknown (pre-M2b.2 trace); no scarcity test was recorded"
+	}
+	if len(s.Regimes) == 0 {
+		return "— (no allocation steps recorded)"
+	}
+	scarce, basis := 0, ""
+	var last explainRegime
+	for _, r := range s.Regimes {
+		if r.Scarce {
+			scarce++
+		}
+		// The last step that COMMITTED to anything, because the last scarce
+		// step of a finished race is routinely the one whose commit set is
+		// empty — the head world is complete and the remainder cannot finish
+		// the rival — and reporting that as the race's commitment would read
+		// as "it committed to nobody".
+		if len(r.CommitSet) > 0 {
+			last = r
+		}
+		if basis == "" || strings.HasPrefix(r.CommitBasis, schedule.CommitBasisUnpriced) {
+			basis = r.CommitBasis
+		}
+	}
+	if basis == "" {
+		return fmt.Sprintf("— (the %s arm computes no scarcity test and commits to nothing)", dash(s.Selector))
+	}
+	if strings.HasPrefix(basis, schedule.CommitBasisUnpriced) {
+		return fmt.Sprintf("%s — the finish cost is UNKNOWN for a kind with no local fit, so the scarcity test is undecidable and M2b's rule allocated the whole race",
+			basis)
+	}
+	if scarce == 0 {
+		return fmt.Sprintf("%s on all %d step(s): the pool could finish every alive world, so M2b's rule allocated and the FAR claim holds with equality",
+			schedule.CommitBasisNotScarce, len(s.Regimes))
+	}
+	if len(last.CommitSet) == 0 {
+		return fmt.Sprintf("%s on %d of %d step(s); the pool could finish NO alive world, so equal shares allocated (decision 3's degenerate case)",
+			schedule.CommitBasisReserved, scarce, len(s.Regimes))
+	}
+	parts := make([]string, 0, len(last.CommitSet))
+	for _, w := range last.CommitSet {
+		parts = append(parts, short(w))
+	}
+	return fmt.Sprintf("%s on %d of %d step(s); last commit set: %d world(s) [%s], %d ms uncommitted",
+		schedule.CommitBasisReserved, scarce, len(s.Regimes), len(last.CommitSet),
+		strings.Join(parts, ", "), last.UncommittedMS)
+}
+
+// finishCell renders the cost to FINISH the row's world. A row that computed
+// none prints an em dash, and so does a row whose finish cost is UNKNOWN,
+// because 0 is not a measurement of zero milliseconds. The cell says whether
+// the number was the score's DENOMINATOR or merely a measurement beside it —
+// a `voc2` row under ¬scarce carries a finish cost it did not divide by, and
+// letting the two look alike would misreport which rule priced the row.
+func finishCell(r explainScheduleRow) string {
+	if r.ScoreBasis == "" || r.FinishMS <= 0 {
+		return "—"
+	}
+	if r.ScoreBasis == schedule.ScoreBasisFinish {
+		return fmt.Sprintf("%d ms", r.FinishMS)
+	}
+	return fmt.Sprintf("(%d ms)", r.FinishMS)
+}
+
+// commitCell says whether the pool was reserved to FINISH this world at this
+// step. It is meaningful only under the reservation: a row priced by the rung
+// denominator was never in or out of a commit set, and printing "no" for it
+// would be a claim about a set that was never formed.
+func commitCell(r explainScheduleRow) string {
+	if r.ScoreBasis != schedule.ScoreBasisFinish {
+		return "—"
+	}
+	if r.Committed {
+		return "yes"
+	}
+	return "no"
 }
 
 // basisText says what the pool was charged, because the two bases answer

@@ -63,6 +63,15 @@ func TestRenderPromptAIControlRule(t *testing.T) {
 	forbidden := append([]string{polDig, oracleArgv, "pytest"},
 		policy.HardGates...)
 	forbidden = append(forbidden, policy.Ranking...)
+	// M2b.2 §6: the revision adds one new protocol internal — WHICH WORLD THE
+	// POOL IS COMMITTED TO — and ch. 13's finding is that adaptive attacks
+	// exploiting protocol internals collapsed a resampling protocol's safety
+	// from 96 % to 17 %. A candidate that learned it was uncommitted, or that
+	// learned the scarcity regime, would know exactly when its rivals go
+	// unmeasured. The scheduler's whole vocabulary joins the deny-list.
+	forbidden = append(forbidden,
+		"commit_set", "committed", "finish_ms", "scarce", "uncommitted_ms",
+		"allowance", "adaptive_rule", "score_basis", "voc2")
 
 	for k := 1; k <= 2; k++ {
 		for _, task := range []string{"", "operator override task"} {

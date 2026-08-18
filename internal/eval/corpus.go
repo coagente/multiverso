@@ -285,6 +285,27 @@ func SchedulerConstants() map[string]int64 {
 	return out
 }
 
+// FreezeKeyAdaptiveRule is the `constants` member that names THE ALLOCATION
+// RULE the binary defaults to for `--schedule=adaptive`.
+const FreezeKeyAdaptiveRule = "adaptive_rule"
+
+// SchedulerRules renders the STRING-valued scheduler constants the freeze
+// pins. There is exactly one today and it exists because of a defect this
+// check had: `eval/freeze/*.json` pinned `executor_bp`, `redundancy_bp`,
+// `bound_cap` and `cost_min_samples` — the scheduler's NUMBERS — and pinned
+// nothing about its RULE. M2b.2 changes no constant and no policy field, so it
+// would have passed the freeze silently: the mechanism that exists to make
+// post-freeze tuning impossible to do quietly would have failed to notice a
+// change to the allocation rule itself, which is larger than any constant it
+// does pin.
+//
+// The fix is in the direction of MORE REFUSAL, which is the whole
+// justification for touching a verification path at all, and any future edit
+// to this check must be able to make the same claim.
+func SchedulerRules() map[string]string {
+	return map[string]string{FreezeKeyAdaptiveRule: schedule.AdaptiveRule()}
+}
+
 // FreezeFile is eval/freeze/<corpus>-<version>.json: what was true at
 // FREEZE TIME. Tuning after the freeze is not forbidden; it is made
 // impossible to do quietly.
@@ -300,6 +321,17 @@ type FreezeFile struct {
 	// the scheduler constants, both at freeze time.
 	PolicyDigest string           `json:"policy_digest"`
 	Constants    map[string]int64 `json:"constants"`
+	// Rules are the STRING-valued members of the same `constants` block —
+	// `adaptive_rule` today. They are split out because the block is otherwise
+	// integer-typed, and they are checked exactly as the numbers are.
+	//
+	// AN ABSENT `adaptive_rule` MEANS "voc" EXACTLY, not by assumption: no
+	// binary before M2b.2 could allocate by any other rule. That is M2b.1
+	// decision 6's normalization argument reused, and it is what lets the
+	// check see the change WITHOUT ONE BYTE OF ANY FROZEN ARTIFACT MOVING —
+	// writing a retroactive value into a frozen file would be editing the
+	// instrument.
+	Rules map[string]string `json:"-"`
 	// BinaryDigest is the racing binary's digest, recorded for citation.
 	// It is expected to move — every rebuild moves it — so it is NOT part
 	// of the refusal: refusing on it would make the freeze a lock nobody
@@ -314,13 +346,104 @@ type FreezeDrift struct {
 	Now    string `json:"now"`
 }
 
+// MarshalJSON writes a freeze file, MERGING `Rules` back into the single
+// `constants` block that `UnmarshalJSON` splits.
+//
+// IT EXISTS BECAUSE THE CHECK HAD NO WRITE PATH AND THEREFORE NO FIXED POINT.
+// `Rules` is `json:"-"`, so without this a `mvo-eval freeze` emitted a file
+// with no `adaptive_rule` key, which the reader then normalizes to "voc" — so
+// a freeze cut by a `voc2`-default binary was refused by the very next run of
+// that same binary, forever, with no way to record the truth except by hand-
+// editing the artifact. That is the failure mode this freeze's own notes name
+// in as many words: committing a value guaranteed to mismatch "would train
+// every reader to pass --unfreeze, which is worse than not checking". A
+// round-trip test pins it: a freeze written by this build and re-read by this
+// build reports zero drift.
+//
+// Decision 8's absent-means-"voc" normalization is untouched and is about
+// PRE-EXISTING artifacts; this is about the value the current binary writes.
+func (f FreezeFile) MarshalJSON() ([]byte, error) {
+	type alias FreezeFile
+	consts := make(map[string]any, len(f.Constants)+len(f.Rules))
+	for k, v := range f.Constants {
+		consts[k] = v
+	}
+	for k, v := range f.Rules {
+		if _, clash := consts[k]; clash {
+			return nil, fmt.Errorf("eval: freeze constant %q is pinned as both a number and a rule", k)
+		}
+		consts[k] = v
+	}
+	return json.Marshal(struct {
+		alias
+		Constants map[string]any `json:"constants"`
+	}{alias: alias(f), Constants: consts})
+}
+
+// UnmarshalJSON reads a freeze file, splitting the `constants` block into its
+// numeric and its string-valued members and normalizing an absent
+// `adaptive_rule` to "voc".
+//
+// The split is a decoding detail, not a schema change: `constants` is one
+// block in the file and stays one block. What it buys is that a frozen
+// artifact written before the rule had a name still says, exactly, which rule
+// it was frozen against.
+func (f *FreezeFile) UnmarshalJSON(b []byte) error {
+	type alias FreezeFile
+	var raw struct {
+		alias
+		Constants map[string]json.RawMessage `json:"constants"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*f = FreezeFile(raw.alias)
+	f.Constants = map[string]int64{}
+	f.Rules = map[string]string{}
+	for k, v := range raw.Constants {
+		var n int64
+		if err := json.Unmarshal(v, &n); err == nil {
+			f.Constants[k] = n
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			f.Rules[k] = s
+			continue
+		}
+		return fmt.Errorf("eval: freeze constant %q is neither an integer nor a string", k)
+	}
+	if f.Rules[FreezeKeyAdaptiveRule] == "" {
+		f.Rules[FreezeKeyAdaptiveRule] = schedule.SelectorNameVOC
+	}
+	return nil
+}
+
 // CheckFreeze compares the live world against the freeze and names what
 // moved. It reports EVERY difference, because "the policy digest moved" and
 // "the policy digest and executor_bp moved" are different findings.
-func (f FreezeFile) CheckFreeze(policyDigest string, constants map[string]int64, oracleDigests map[string]string) []FreezeDrift {
+func (f FreezeFile) CheckFreeze(policyDigest string, constants map[string]int64,
+	rules map[string]string, oracleDigests map[string]string) []FreezeDrift {
+
 	var out []FreezeDrift
 	if f.PolicyDigest != policyDigest {
 		out = append(out, FreezeDrift{What: "policy_digest", Frozen: f.PolicyDigest, Now: policyDigest})
+	}
+	// THE RULE IS CHECKED EXACTLY AS THE NUMBERS ARE, and a moved rule reads
+	// `constants.adaptive_rule (frozen voc, now voc2)` — the sentence that
+	// tells a reader the allocator itself changed rather than one of its
+	// knobs.
+	for _, k := range unionKeys(f.Rules, rules) {
+		fv, fok := f.Rules[k]
+		nv, nok := rules[k]
+		switch {
+		case fok && nok && fv != nv:
+			out = append(out, FreezeDrift{What: "constants." + k, Frozen: fv, Now: nv})
+		case fok && !nok:
+			out = append(out, FreezeDrift{What: "constants." + k, Frozen: fv, Now: "absent"})
+		case !fok && nok:
+			out = append(out, FreezeDrift{What: "constants." + k, Frozen: "absent", Now: nv})
+		}
 	}
 	keys := map[string]bool{}
 	for k := range f.Constants {
@@ -363,6 +486,25 @@ func (f FreezeFile) CheckFreeze(policyDigest string, constants map[string]int64,
 			out = append(out, FreezeDrift{What: "oracle_digest." + id, Frozen: f.OracleDigests[id], Now: now})
 		}
 	}
+	return out
+}
+
+// unionKeys is the union of two maps' keys, sorted: a drift report has to be
+// deterministic, and a key present on only one side is exactly the kind of
+// difference the check exists to name.
+func unionKeys(a map[string]string, b map[string]string) []string {
+	seen := map[string]bool{}
+	for k := range a {
+		seen[k] = true
+	}
+	for k := range b {
+		seen[k] = true
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 

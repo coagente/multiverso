@@ -50,6 +50,12 @@ JSON_DIR=""
 ARMS="A2-adaptive,A1-fixed-budget"
 POLICY_CONFIGS="default schedule"
 UNFREEZE=""
+# SELECTOR is M2b.2 decision 6: WHICH allocation rule the adaptive arm races
+# under. Empty means the binary default, which is what a published cell should
+# normally carry; `voc` reproduces the M2d numbers on a binary that ships the
+# revision, which is the only way the before/after is a paired comparison
+# rather than a comparison against a moving baseline.
+SELECTOR=""
 
 usage() {
   cat >&2 <<'EOF'
@@ -65,6 +71,19 @@ usage: scripts/eval.sh [options]
   --instances A,B      restrict to these instance ids
   --split dev|eval     restrict to a split half (the file's own recorded function)
   --arms A,B           budgeted arms to race (default adaptive + fixed-budget)
+  --selector RULE      allocation rule the ADAPTIVE arm races under: voc (M2b's
+                       published rule, the binary default) or voc2 (M2b.2's
+                       finishing rule). Run the protocol once per rule to get
+                       M2b.2's paired before/after under ONE binary; the arm
+                       table, the instances, the split, the labels, the scoring
+                       and the metrics do not move, and the rule is recorded in
+                       each cell's manifest notes.
+                       TWO RUNS SCORE EVERY DECLARED CELL TWICE, so the
+                       published eval-use count doubles and §5.2 requires it to
+                       say so. And on a FRESH workspace nothing is priced, so
+                       finish_ms is unknown and voc2 falls back to voc on every
+                       step: as the harness stands, both runs produce IDENTICAL
+                       cells. See M2b.2 §7.4's amendment before quoting either
   --policy-configs "…" evidence-incompleteness configurations to run (default
                        "default schedule": the shipped default has
                        on_evidence_incomplete OFF, policies/schedule.json has it ON,
@@ -89,6 +108,7 @@ while [ $# -gt 0 ]; do
     --instances) INSTANCES="${2:?--instances needs a value}"; shift 2 ;;
     --split) SPLIT="${2:?--split needs a value}"; shift 2 ;;
     --arms) ARMS="${2:?--arms needs a value}"; shift 2 ;;
+    --selector) SELECTOR="${2:?--selector needs a rule}"; shift 2 ;;
     --policy-configs) POLICY_CONFIGS="${2:?--policy-configs needs a value}"; shift 2 ;;
     --no-fetch) FETCH=0; shift ;;
     --strict) STRICT=1; shift ;;
@@ -212,6 +232,7 @@ for policy in $POLICY_CONFIGS; do
     [ -n "$INSTANCES" ] && args+=(--instances "$INSTANCES")
     [ -n "$SPLIT" ] && args+=(--split "$SPLIT")
     [ -n "$UNFREEZE" ] && args+=(--unfreeze "$UNFREEZE")
+    [ -n "$SELECTOR" ] && args+=(--selector "$SELECTOR")
     [ "$STRICT" = "1" ] && args+=(--strict)
     if [ -n "$JSON_DIR" ]; then
       args+=(--json "$JSON_DIR/cell-$policy-$level.json")

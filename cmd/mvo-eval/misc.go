@@ -444,9 +444,13 @@ func cmdFreeze(args []string) error {
 	}
 	fz := eval.FreezeFile{
 		Schema: eval.SchemaFreeze, Corpus: common.corpus, Version: common.version,
-		FrozenAt:      time.Now().UTC().Format(time.RFC3339),
-		PolicyDigest:  defaultPolicyDigest(),
-		Constants:     eval.SchedulerConstants(),
+		FrozenAt:     time.Now().UTC().Format(time.RFC3339),
+		PolicyDigest: defaultPolicyDigest(),
+		Constants:    eval.SchedulerConstants(),
+		// The ALLOCATION RULE, not only the scheduler's numbers (M2b.2
+		// decision 8). A freeze that could not pin it would be refused by the
+		// binary that wrote it the moment it was read.
+		Rules:         eval.SchedulerRules(),
 		OracleDigests: map[string]string{},
 	}
 	for _, id := range ids {

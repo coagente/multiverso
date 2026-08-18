@@ -187,6 +187,114 @@ func TestWithholdingMonotonicity(t *testing.T) {
 	}
 }
 
+// THE SAME PROPERTY, WITH EVERY SELECTOR IN THE GENERATOR'S SET (M2b.2 §3.2).
+//
+// The pass-set claim is the one structural safety result in the project and
+// M2b.2 changes the allocation rule underneath it, so the property is re-run
+// over allocations the REVISED rule actually makes, at budgets that bind, on
+// the real `race.Decide`. Nothing about the proof changes — the scheduler still
+// only ever WITHHOLDS receipts relative to exhaustion, withholding makes a
+// required metric absent, and an absent required metric fails the gate — and
+// this is what makes that a checked fact rather than a re-derivation.
+//
+// F-8: if this fails with `voc2` in the selector set, nothing ships.
+func TestWithholdingMonotonicityAcrossEverySelector(t *testing.T) {
+	ws := []object.RecordedWorld{
+		mkWorld("a", object.OutcomeCompleted),
+		mkWorld("b", object.OutcomeCompleted),
+		mkWorld("c", object.OutcomeCompleted),
+	}
+	// A fitted table, so the budget binds on predictions rather than failing
+	// open on unpriced rungs: guard 10 ms, collect 100 ms, suite 200 ms, so a
+	// world's whole ladder costs 310 ms and three of them cost 930.
+	var samples []schedule.Sample
+	for kind, ms := range map[string]int64{
+		policy.KindTreeGuard: 10, policy.KindPytestCollect: 100, policy.KindPytestSuite: 200,
+	} {
+		for i := 0; i < 3; i++ {
+			samples = append(samples, schedule.Sample{Kind: kind, Seal: policy.AutoloadOff, Units: 8, WallMS: ms})
+		}
+	}
+	bounds := schedule.Bounds{CollectedBase: 8}
+	costs := schedule.NewTable(samples, policy.AutoloadOff, bounds)
+
+	arms := []struct {
+		name string
+		sel  schedule.Selector
+	}{
+		{schedule.SelectorNameVOC, schedule.SelectorVOC()},
+		{schedule.SelectorNameVOC2, schedule.SelectorVOC2()},
+		{schedule.SelectorNameLadder, schedule.SelectorLadder()},
+	}
+	for i, pol := range policyShapes(t) {
+		star := exhaustive(t, pol, ws)
+		full := passSet(pol, ws, star)
+		if len(full) == 0 {
+			t.Fatalf("shape %d: nothing passes under exhaustion; the property would be vacuous", i)
+		}
+		for _, arm := range arms {
+			for _, budget := range []int64{0, 1, 120, 310, 311, 620, 930, 5000} {
+				order := make([]string, 0, len(ws))
+				for _, w := range ws {
+					order = append(order, w.Digest)
+				}
+				s, err := schedule.New(schedule.Config{
+					Policy: pol, Decide: race.Decide, Batch: 1, Costs: costs, Bounds: bounds,
+					BudgetMS: budget, Selector: arm.sel, Order: order,
+				}, ws)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				for n := 0; n < 64; n++ {
+					step, more := s.Next()
+					if !more {
+						break
+					}
+					for _, c := range step.Chosen {
+						// THE SCHEDULER NEVER FABRICATES AND NEVER ALTERS a
+						// receipt: it is handed exactly the one the exhaustive
+						// ladder would have produced for that world and that
+						// rung, so the only difference between R and R* is
+						// WHICH ones were bought.
+						rr, ok := receiptFromStar(pol, star, c.World, c.Oracle)
+						if !ok {
+							t.Fatalf("shape %d %s budget %d: the arm chose %s/%s, which exhaustion never produced",
+								i, arm.name, budget, c.World, c.Oracle)
+						}
+						s.Record(rr)
+					}
+				}
+				for w := range passSet(pol, ws, s.Receipts()) {
+					if !full[w] {
+						t.Fatalf("shape %d %s budget %d: world %s passes under WITHHELD evidence but not under exhaustion",
+							i, arm.name, budget, w)
+					}
+				}
+				if v := s.PurchaseLaw(); v != "" {
+					t.Fatalf("shape %d %s budget %d: %s", i, arm.name, budget, v)
+				}
+			}
+		}
+	}
+}
+
+// receiptFromStar picks the receipt the exhaustive ladder produced for one
+// world's declared oracle instance. The join is through the PINNED POLICY,
+// because a trace row names a policy-local instance and a receipt names the
+// registry kind plus the resolved config (M1e decision 8).
+func receiptFromStar(pol policy.Policy, star []object.RecordedReceipt, world, oracle string) (object.RecordedReceipt, bool) {
+	spec, ok := pol.OracleByName(oracle)
+	if !ok {
+		return object.RecordedReceipt{}, false
+	}
+	for _, rr := range star {
+		if rr.Receipt.World == world && rr.Receipt.Oracle.ID == spec.Kind && rr.Receipt.Oracle.Config == spec.Config {
+			return rr, true
+		}
+	}
+	return object.RecordedReceipt{}, false
+}
+
 // The purchase law, stated as the thing an adaptive scheduler is allowed to
 // rely on: A WORLD THAT HAS NOT PAID FOR EVERY HARD GATE'S ORACLE CANNOT
 // PASS. It is not a rule the scheduler maintains — it is what a SELECT from

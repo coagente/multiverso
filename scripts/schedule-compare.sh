@@ -89,6 +89,12 @@ usage: scripts/schedule-compare.sh [options]
   --probe-tolerance-bp N host-probe tolerance in basis points (default: 2000 = 20%)
   --arm-a FLAG           first arm (default: --schedule=adaptive)
   --arm-b FLAG           second arm (default: --schedule=fixed-budget)
+                         M2b.2's paired before/after is
+                           --arm-a --selector=voc --arm-b --selector=voc2
+                         which races the PUBLISHED allocation rule against its
+                         revision under ONE binary, one cost table, one Decide
+                         and one seeded workspace (F15) — the only way a
+                         per-instance difference is attributable to the rule
   --budget-flag FLAG     intent flag carrying max_oracle_ms (default: --budget-oracle-ms)
   --keep DIR             keep the workspaces in DIR instead of a temp dir
   --json                 emit the comparison as one JSON object
@@ -567,6 +573,51 @@ for p in kept:
 agree = sum(n for k, n in table.items() if k.split("/")[0] == k.split("/")[1])
 same_subject = sum(1 for p in kept if p["a"]["winner_ordinal"] == p["b"]["winner_ordinal"])
 
+# ROTATION IS NOT NOISE, AND POOLING IT AS NOISE MAKES THE VERDICT FLIP WITH
+# THE PARITY OF R. Replicate r rotates the control-plane world order by
+# r mod N, so on an N-world fixture an arm whose decision depends on WHICH
+# candidate holds the head is a DETERMINISTIC function of the rotation, not a
+# stochastic draw. `noise_floor` is each arm's disagreement with its own modal
+# decision, so that systematic effect is charged as noise while being the whole
+# effect — and the arithmetic decides the verdict: measured on the tie fixture,
+# R = 9 gives disagreement 55.6 % against a floor of 44.4 % (NOT a tie) and
+# R = 10, same command and same fixture, gives 50.0 % against 50.0 % (a TIE).
+#
+# So the report stratifies. It also states the structural fact that makes the
+# pooled test uninformative here: when one arm is deterministic and the arms'
+# modal decisions differ, `disagreement >= 1 - self_disagreement(other)`, so a
+# tie is reachable ONLY at an exact 50/50 split — the test cannot return a tie
+# for any other split, whatever the underlying effect is.
+worlds = max((p["a"]["world_order_len"] for p in kept), default=0)
+
+def rho(p):
+    """The EFFECTIVE rotation. The trace records the replicate index; the
+    scheduler rotates by r mod N, so two replicates 2 apart on a two-world
+    fixture put the same candidate at the head and are the same stratum."""
+    return p["a"]["rotation"] % worlds if worlds else 0
+
+by_rot = {}
+for p in kept:
+    rot = rho(p)
+    cell = by_rot.setdefault(rot, {"n": 0, "agree": 0, "table": {}})
+    key = "%s/%s" % (p["a"]["decision"], p["b"]["decision"])
+    cell["n"] += 1
+    cell["table"][key] = cell["table"].get(key, 0) + 1
+    if p["a"]["decision"] == p["b"]["decision"]:
+        cell["agree"] += 1
+rotation = {
+    "worlds": worlds,
+    "cycles_complete": bool(worlds and R % worlds == 0),
+    "strata": {str(k): v for k, v in sorted(by_rot.items())},
+    "deterministic_arms": [
+        side for side, arm in (("a", A), ("b", B))
+        if arm["n"] and len(by_rot) > 1 and all(
+            len({p[side]["decision"] for p in kept if rho(p) == rot}) <= 1
+            for rot in by_rot
+        )
+    ],
+}
+
 # THE ANECDOTE RULE, ENFORCED BY THE HARNESS RATHER THAN BY DISCIPLINE.
 # R = 1 measures one draw of a process whose own noise floor is unmeasured, so
 # no verdict is printed below R = 3. Every number M2b's BUILDLOG quotes was
@@ -586,6 +637,7 @@ verdict = {
     "agree": agree,
     "same_subject": same_subject,
     "noise_floor": max(A["self_disagreement"], B["self_disagreement"]),
+    "rotation": rotation,
     "verdict_available": verdict_ok,
     "build": os.environ["BUILD"],
 }
@@ -593,6 +645,13 @@ if verdict_ok:
     disagree_rate = 1 - agree / len(kept)
     verdict["disagreement_rate"] = round(disagree_rate, 3)
     verdict["tie"] = disagree_rate <= verdict["noise_floor"]
+    # THE POOLED TIE TEST IS REPORTED WITH ITS OWN PRECONDITIONS ATTACHED.
+    # It is only interpretable when the replicates cover a whole number of
+    # rotation cycles (otherwise one rotation is over-represented and the rate
+    # moves with the parity of R) and when neither arm is a deterministic
+    # function of the rotation (otherwise the "noise floor" is the effect).
+    verdict["tie_interpretable"] = bool(
+        rotation["cycles_complete"] and not rotation["deterministic_arms"])
 
 if as_json:
     print(json.dumps({"a": A, "b": B, "verdict": verdict, "pairs": kept,
@@ -641,6 +700,25 @@ print("verdict:")
 print("  disagreement rate: %.0f%% (%d of %d replicates decided differently)"
       % (verdict["disagreement_rate"] * 100, len(kept) - agree, len(kept)))
 print("  noise floor:       %.0f%% (the larger arm's self-disagreement)" % (verdict["noise_floor"] * 100))
+rot = verdict["rotation"]
+if rot["worlds"]:
+    print("  by rotation (N=%d worlds, rho = r mod N):" % rot["worlds"])
+    for k in sorted(rot["strata"], key=int):
+        cell = rot["strata"][k]
+        print("    rho=%s  n=%d  agree %d  %s" % (k, cell["n"], cell["agree"], cell["table"]))
+if not rot["cycles_complete"]:
+    print("  ROTATION CYCLES INCOMPLETE: R=%d over %d worlds. One rotation is over-represented," % (R, rot["worlds"]))
+    print("  so the pooled rate and the noise floor both move with the parity of R. Re-run with")
+    print("  R a multiple of %d before quoting either number." % max(rot["worlds"], 1))
+if rot["deterministic_arms"]:
+    print("  ARM(S) %s DECIDE DETERMINISTICALLY GIVEN THE ROTATION: their 'self-disagreement' is"
+          % ", ".join(a.upper() for a in rot["deterministic_arms"]))
+    print("  the rotation effect, not noise, so the disagreement rate and the noise floor below are")
+    print("  measuring the SAME THING. Read the stratified table above instead. And note the")
+    print("  structural limit: when one arm is deterministic and the arms' modal decisions differ,")
+    print("  a tie is reachable only at an exact 50/50 split, whatever the underlying effect is.")
+if not verdict["tie_interpretable"]:
+    print("  => the pooled tie test below is NOT interpretable for this cell.")
 if verdict["tie"]:
     print("  TIE: the difference between the arms does not exceed both arms' own")
     print("       self-disagreement. Reported as a tie, in the text and in the abstract.")

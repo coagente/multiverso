@@ -412,6 +412,13 @@ func TestScheduleRendersLadderRowsAsAbsentNotZero(t *testing.T) {
 		}
 	}
 	// A VOC row scoring zero still renders 0: the two facts stay distinct.
+	//
+	// The assertion is scoped to the VALUE-OF-COMPUTATION columns rather than
+	// to the whole line, and the scoping is M2b.2's own rule rather than a
+	// weakening. A `voc` row carries no finish cost and belongs to no commit
+	// set — the rule that computes those did not run — so its FINISH and
+	// COMMIT cells are em dashes for exactly the reason the flip cell of a
+	// ladder row is one: absent source implies absent metric.
 	voc := &explainSchedule{
 		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC,
 		BudgetBasis: schedule.BudgetBasisActual, WorldOrder: []string{"mv0:aa1000000000"},
@@ -419,12 +426,23 @@ func TestScheduleRendersLadderRowsAsAbsentNotZero(t *testing.T) {
 		Steps: []explainScheduleRow{{
 			Step: 1, World: "mv0:aa1000000000", Oracle: "suite", Kind: policy.KindPytestSuite,
 			Flip: 0, DiscountBP: 0, ExecutorBP: 5000, ValueBP: 0, CostMS: 427,
-			CostBasis: "fit(pytest-suite,off) n=4", Declined: "no bracket outcome moves the decision",
+			CostBasis: "fit(pytest-suite,off) n=4", ScoreBasis: schedule.ScoreBasisRung,
+			Declined: "no bracket outcome moves the decision",
 		}},
 	}
 	for _, line := range strings.Split(renderSchedule(voc), "\n") {
-		if strings.Contains(line, "suite") && strings.Contains(line, "—") {
-			t.Fatalf("a VOC row rendered an em dash where it holds a measured zero:\n%s", line)
+		if !strings.Contains(line, "suite") || strings.Contains(line, "STEP") {
+			continue
+		}
+		// STEP WORLD ORACLE FLIP DISC EXEC COST(2 fields) SCORE …
+		f := strings.Fields(line)
+		if len(f) < 9 {
+			t.Fatalf("a VOC row rendered too few cells to check:\n%s", line)
+		}
+		for i, cell := range f[3:9] {
+			if cell == "—" {
+				t.Fatalf("a VOC row rendered an em dash in value column %d where it holds a measured number:\n%s", i+4, line)
+			}
 		}
 	}
 }
@@ -497,5 +515,202 @@ func TestScheduleRendersTheAllocationBound(t *testing.T) {
 	}
 	if strings.Contains(refused, "minspend") {
 		t.Fatalf("a refused bound printed a number anyway:\n%s", refused)
+	}
+}
+
+// M2b.2 §8's RENDERER BAR, as a table over the five trace shapes it names.
+//
+// It was owed and was not paid: nothing in cmd/mvo exercised `regimeText`,
+// `preM2b2`, `finishCell` or `commitCell`, so the untested branches included
+// the one that exists to stop the renderer inventing evidence — the pre-M2b.2
+// trace, which must say a scarcity test was never recorded rather than print
+// `false`, `0` or `[]` as if it had been. That branch was ALSO WRONG: it dated
+// the binary from `adaptive_rule`, which reads "voc" on a pre-M2b.2 ledger AND
+// on every race this build runs, so it would have stamped "pre-M2b.2 trace" on
+// races run this morning.
+func TestScheduleRendersEveryRegimeShape(t *testing.T) {
+	world := "mv0:aa1000000000"
+	rival := "mv0:bb2000000000"
+	// A scarce voc2 race: the pool is committed to finishing one world, and
+	// the row that priced by the finish denominator says so in three places —
+	// the regime header, the PER column and the FINISH/COMMIT cells.
+	scarce := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC2,
+		AdaptiveRule: schedule.SelectorNameVOC, BudgetBasis: schedule.BudgetBasisPredicted,
+		WorldOrder: []string{world, rival}, BudgetMS: 1529, Stop: schedule.StopBudget,
+		Regimes: []explainRegime{
+			{Step: 1, Scarce: true, CommitBasis: schedule.CommitBasisReserved,
+				CommitSet: []string{world}, UncommittedMS: 547},
+		},
+		Steps: []explainScheduleRow{{
+			Step: 1, World: world, Oracle: "suite", Kind: policy.KindPytestSuite,
+			Flip: 1, DiscountBP: 10000, ExecutorBP: 5000, ValueBP: 5000, CostMS: 689,
+			CostBasis: "fit(pytest-suite,off) n=4", ScoreBPPS: 5091,
+			ScoreBasis: schedule.ScoreBasisFinish, FinishMS: 982, Committed: true,
+		}, {
+			Step: 1, World: rival, Oracle: "suite", Kind: policy.KindPytestSuite,
+			Flip: 0, CostMS: 689, CostBasis: "fit(pytest-suite,off) n=4",
+			ScoreBasis: schedule.ScoreBasisFinish, FinishMS: 982, Committed: false,
+			Declined: schedule.DeclineReserved + "the pool is committed to finishing 1 world(s) " +
+				"(" + world + "); this world needs 982 ms to finish and 547 ms are uncommitted",
+		}},
+	}
+	got := renderSchedule(scarce)
+	for _, want := range []string{
+		"regime:     reserved on 1 of 1 step(s); last commit set: 1 world(s) [mv0:aa100000…], 547 ms uncommitted",
+		"982 ms", "yes", "no", "finish",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("a scarce race is missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "reserved: the pool is committed to finishing 1 world(s)") {
+		t.Fatalf("the reserved decline sentence is not rendered:\n%s", got)
+	}
+
+	// A NON-SCARCE voc2 race carries a finish cost it did NOT divide by, and
+	// the cell must not let it read as the denominator: parentheses, not a
+	// bare number (M2b.2 §3.4).
+	notScarce := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC2,
+		AdaptiveRule: schedule.SelectorNameVOC, BudgetBasis: schedule.BudgetBasisActual,
+		WorldOrder: []string{world}, Stop: schedule.StopEmpty,
+		Regimes: []explainRegime{{Step: 1, Scarce: false, CommitBasis: schedule.CommitBasisNotScarce,
+			CommitSet: []string{}}},
+		Steps: []explainScheduleRow{{
+			Step: 1, World: world, Oracle: "guard", Kind: policy.KindTreeGuard,
+			Flip: 1, DiscountBP: 10000, ExecutorBP: 10000, ValueBP: 10000, CostMS: 11,
+			CostBasis: "fit(tree-guard,off) n=3", ScoreBPPS: 909090,
+			ScoreBasis: schedule.ScoreBasisRung, FinishMS: 982,
+		}},
+	}
+	got = renderSchedule(notScarce)
+	if !strings.Contains(got, "not-scarce on all 1 step(s)") {
+		t.Fatalf("a non-scarce race does not name its regime:\n%s", got)
+	}
+	if !strings.Contains(got, "the FAR claim holds with equality") {
+		t.Fatalf("a non-scarce race does not carry the FAR claim it proves from its own ledger:\n%s", got)
+	}
+	if !strings.Contains(got, "(982 ms)") {
+		t.Fatalf("a finish cost that was NOT the denominator is rendered as if it were:\n%s", got)
+	}
+
+	// THE UNPRICED FALLBACK. No kind has a local fit, so finish_ms is unknown,
+	// the scarcity test is undecidable, and M2b's rule allocated the whole
+	// race. The header must say so and name the kinds.
+	unpriced := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC2,
+		AdaptiveRule: schedule.SelectorNameVOC, BudgetBasis: schedule.BudgetBasisActual,
+		WorldOrder: []string{world}, Stop: schedule.StopEmpty,
+		Regimes: []explainRegime{{Step: 1, CommitBasis: schedule.CommitBasisUnpriced +
+			"(pytest-collect,pytest-suite,tree-guard)", CommitSet: []string{}}},
+		Steps: []explainScheduleRow{{
+			Step: 1, World: world, Oracle: "guard", Kind: policy.KindTreeGuard,
+			Flip: 1, CostBasis: "declared-rank(1 of 3)", ScoreBasis: schedule.ScoreBasisRung,
+		}},
+	}
+	got = renderSchedule(unpriced)
+	for _, want := range []string{
+		"unpriced-fallback(pytest-collect,pytest-suite,tree-guard)",
+		"the finish cost is UNKNOWN", "M2b's rule allocated the whole race",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the unpriced fallback is missing %q:\n%s", want, got)
+		}
+	}
+	// UNKNOWN IS NOT ZERO: a row with no finish cost renders an em dash.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "guard") && strings.Contains(line, "0 ms") {
+			t.Fatalf("an unknown finish cost rendered as a measurement of zero:\n%s", line)
+		}
+	}
+
+	// THE LADDER computes no scarcity test and belongs to no commit set, in
+	// either era, and the header answers from the ARM rather than from a guess
+	// about which binary wrote the trace.
+	ladder := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleFixedBudget, Selector: schedule.SelectorNameLadder,
+		AdaptiveRule: schedule.SelectorNameVOC, BudgetBasis: schedule.BudgetBasisActual,
+		WorldOrder: []string{world}, Stop: schedule.StopEmpty,
+		Steps: []explainScheduleRow{{
+			Step: 1, Order: 1, World: world, Oracle: "guard", Kind: policy.KindTreeGuard,
+			CostMS: 11, CostBasis: "fit(tree-guard,off) n=3",
+		}},
+	}
+	got = renderSchedule(ladder)
+	if !strings.Contains(got, "regime:     — (the ladder arm computes no scarcity test and commits to nothing)") {
+		t.Fatalf("a ladder race reports a regime it never computed:\n%s", got)
+	}
+	if strings.Contains(got, "pre-M2b.2") {
+		t.Fatalf("a ladder race was dated by a field that does not date it:\n%s", got)
+	}
+
+	// A PRE-M2b.2 TRACE: no commit basis anywhere, no score basis on any row.
+	// It must say the scarcity test was never recorded, and must never print
+	// `false`, `0` or `[]` for a measurement nobody took.
+	old := &explainSchedule{
+		Recorded: true, Arm: schedule.ScheduleAdaptive, Selector: schedule.SelectorNameVOC,
+		AdaptiveRule: schedule.SelectorNameVOC, BudgetBasis: schedule.BudgetBasisActual,
+		WorldOrder: []string{world}, Stop: schedule.StopEmpty, noRegime: true,
+		Steps: []explainScheduleRow{{
+			Step: 1, World: world, Oracle: "guard", Kind: policy.KindTreeGuard,
+			Flip: 1, DiscountBP: 10000, ExecutorBP: 10000, ValueBP: 10000, CostMS: 11,
+			CostBasis: "fit(tree-guard,off) n=3", ScoreBPPS: 909090,
+		}},
+	}
+	got = renderSchedule(old)
+	if !strings.Contains(got, "regime:     unknown (pre-M2b.2 trace); no scarcity test was recorded") {
+		t.Fatalf("a pre-M2b.2 trace does not say its regime was never recorded:\n%s", got)
+	}
+	if strings.Contains(got, "not-scarce") || strings.Contains(got, "reserved") {
+		t.Fatalf("a pre-M2b.2 trace was credited with a regime nobody measured:\n%s", got)
+	}
+	// And a CURRENT `voc` race is NOT mistaken for one: it records a score
+	// basis on every row, which no pre-M2b.2 binary could write.
+	current := *old
+	current.noRegime = false
+	current.Regimes = []explainRegime{{Step: 1, CommitSet: []string{}}}
+	current.Steps = []explainScheduleRow{{
+		Step: 1, World: world, Oracle: "guard", Kind: policy.KindTreeGuard,
+		Flip: 1, DiscountBP: 10000, ExecutorBP: 10000, ValueBP: 10000, CostMS: 11,
+		CostBasis: "fit(tree-guard,off) n=3", ScoreBPPS: 909090,
+		ScoreBasis: schedule.ScoreBasisRung,
+	}}
+	got = renderSchedule(&current)
+	if strings.Contains(got, "pre-M2b.2") {
+		t.Fatalf("a current voc race was dated as a pre-M2b.2 trace:\n%s", got)
+	}
+	if !strings.Contains(got, "computes no scarcity test") {
+		t.Fatalf("a current voc race does not say the arm computes no scarcity test:\n%s", got)
+	}
+}
+
+// `preM2b2` READS THE FINISHING RULE'S OWN VOCABULARY, not the binary's
+// default rule. The first version read `adaptive_rule`, which works only while
+// the default happens to be the revision — and M2b.2 ships `voc` as the
+// default, so it would have dated every current trace to before the block that
+// wrote it.
+func TestPreM2b2ReadsTheRecordedVocabularyAndNotTheDefaultRule(t *testing.T) {
+	rule := schedule.Constants{AdaptiveRule: schedule.SelectorNameVOC}
+	older := schedule.Trace{
+		Started: schedule.Started{Constants: rule},
+		Steps: []schedule.Step{{Step: 1, Considered: []schedule.Considered{
+			{World: "mv0:aa", Oracle: "guard", ScoreBPPS: 12},
+		}}},
+	}
+	if !preM2b2(older) {
+		t.Fatal("a trace with no commit basis and no score basis was not recognized as pre-M2b.2")
+	}
+	current := older
+	current.Steps = []schedule.Step{{Step: 1, Considered: []schedule.Considered{
+		{World: "mv0:aa", Oracle: "guard", ScoreBPPS: 12, ScoreBasis: schedule.ScoreBasisRung},
+	}}}
+	if preM2b2(current) {
+		t.Fatal("a current voc race, which records a score basis on every row, was dated pre-M2b.2")
+	}
+	reserved := older
+	reserved.Steps = []schedule.Step{{Step: 1, CommitBasis: schedule.CommitBasisReserved}}
+	if preM2b2(reserved) {
+		t.Fatal("a race that recorded a commit basis was dated pre-M2b.2")
 	}
 }

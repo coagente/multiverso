@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // fullyPopulatedHidden is a hidden oracle with EVERY field non-zero, so a
@@ -393,7 +394,7 @@ func TestFreezeNamesWhatMoved(t *testing.T) {
 		t.Fatalf("the committed freeze does not load: %v", err)
 	}
 	// Nothing moved.
-	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants, nil); len(d) != 0 {
+	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants, fz.Rules, nil); len(d) != 0 {
 		t.Errorf("an unmoved world reported drift: %+v", d)
 	}
 	// The committed freeze pins the SHIPPED DEFAULT policy digest. If this
@@ -405,7 +406,7 @@ func TestFreezeNamesWhatMoved(t *testing.T) {
 	// A moved policy digest and a moved constant are both named.
 	consts := SchedulerConstants()
 	consts["executor_bp.candidate-process"] = 1234
-	d := fz.CheckFreeze("mv0:moved", consts, nil)
+	d := fz.CheckFreeze("mv0:moved", consts, fz.Rules, nil)
 	var what []string
 	for _, x := range d {
 		what = append(what, x.What)
@@ -419,12 +420,123 @@ func TestFreezeNamesWhatMoved(t *testing.T) {
 	}
 	// An oracle digest the run did not score cannot have drifted.
 	fz.OracleDigests = map[string]string{"i1": "sha256:aaa"}
-	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants, nil); len(d) != 0 {
+	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants, fz.Rules, nil); len(d) != 0 {
 		t.Errorf("an unscored instance reported oracle drift: %+v", d)
 	}
-	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants,
+	if d := fz.CheckFreeze(fz.PolicyDigest, fz.Constants, fz.Rules,
 		map[string]string{"i1": "sha256:bbb"}); len(d) != 1 {
 		t.Errorf("a moved oracle digest was not reported: %+v", d)
+	}
+}
+
+// M2b.2 DECISION 8: THE FREEZE PINNED THE SCHEDULER'S NUMBERS AND NOT ITS
+// RULE, and that was a defect in the check.
+//
+// M2b.2 changes no constant and no policy field, so the committed freeze would
+// have passed it in silence — the mechanism that exists to make post-freeze
+// tuning impossible to do quietly failing to notice a change to the allocation
+// rule itself, which is larger than anything it does pin. The fix is in the
+// direction of MORE REFUSAL, and it needs no byte of the frozen artifact to
+// move: an absent `adaptive_rule` means "voc" EXACTLY, because no binary
+// before M2b.2 could allocate by any other rule.
+func TestFreezeRefusesOnAMovedAllocationRule(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "eval", "freeze", "local-derived-v1.json")
+	fz, err := LoadFreeze(path)
+	if err != nil {
+		t.Fatalf("the committed freeze does not load: %v", err)
+	}
+	// THE COMMITTED FILE IS UNMODIFIED and carries no adaptive_rule key.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read freeze: %v", err)
+	}
+	if strings.Contains(string(b), FreezeKeyAdaptiveRule) {
+		t.Fatalf("the frozen artifact was edited to carry %s; writing a retroactive value into a freeze is editing the instrument",
+			FreezeKeyAdaptiveRule)
+	}
+	if got := fz.Rules[FreezeKeyAdaptiveRule]; got != "voc" {
+		t.Fatalf("an absent %s normalized to %q, want \"voc\" exactly", FreezeKeyAdaptiveRule, got)
+	}
+	// THE CHECK REFUSES ON A MOVED RULE, and that is what F-9 asks for. It is
+	// exercised against a rules map naming the revision rather than against the
+	// live binary, because M2b.2 ships `voc` as the default — the revision is
+	// selectable and is NOT what `--schedule=adaptive` allocates by — so
+	// nothing moved and the live check must not refuse. Testing the mechanism
+	// against a hypothetical is the only honest way to test a refusal that
+	// correctly does not fire today.
+	moved := map[string]string{FreezeKeyAdaptiveRule: schedule.SelectorNameVOC2}
+	drift := fz.CheckFreeze(fz.PolicyDigest, SchedulerConstants(), moved, nil)
+	found := ""
+	for _, d := range drift {
+		if d.What == "constants."+FreezeKeyAdaptiveRule {
+			found = d.Frozen + " -> " + d.Now
+		}
+	}
+	if found != "voc -> voc2" {
+		t.Fatalf("the freeze did not refuse on a moved rule (drift: %+v)", drift)
+	}
+	// And NOTHING ELSE moved: the frozen constants and the frozen policy
+	// digest are untouched by this block, which is the claim the unfreeze
+	// reason makes and which must be checkable rather than asserted.
+	for _, d := range drift {
+		if d.What != "constants."+FreezeKeyAdaptiveRule {
+			t.Errorf("a second thing moved with the allocation rule: %+v", d)
+		}
+	}
+	// AND THE LIVE BINARY DOES NOT TRIP IT. A freeze that is refused on every
+	// run is a rubber stamp: the file's own notes say committing a value
+	// guaranteed to mismatch "would train every reader to pass --unfreeze,
+	// which is worse than not checking". The shipped default rule is what the
+	// committed freeze pins, so the eval-use counter stays honest without an
+	// unfreeze on every measurement.
+	if d := fz.CheckFreeze(fz.PolicyDigest, SchedulerConstants(), SchedulerRules(), nil); len(d) != 0 {
+		t.Errorf("the committed freeze refuses the SHIPPED binary — every eval run would carry an unfreeze: %+v", d)
+	}
+}
+
+// THE FREEZE MUST HAVE A FIXED POINT: a freeze written by this build and
+// re-read by this build reports zero drift.
+//
+// It did not. `FreezeFile.Rules` is `json:"-"` and there was no MarshalJSON,
+// so `mvo-eval freeze` emitted a file with no `adaptive_rule` key, which the
+// reader normalizes to "voc" — so any legitimate re-freeze by a binary whose
+// default rule was anything else was refused by that same binary on the very
+// next read, permanently, with no way to record the truth except by hand-
+// editing the artifact. That is the "trained to pass --unfreeze" failure the
+// committed freeze's own notes name.
+func TestAFreezeWrittenByThisBuildIsAcceptedByThisBuild(t *testing.T) {
+	fz := FreezeFile{
+		Schema: SchemaFreeze, Corpus: "local-derived", Version: "v1",
+		FrozenAt:      "2026-08-17T00:00:00Z",
+		PolicyDigest:  "mv0:deadbeef",
+		Constants:     SchedulerConstants(),
+		Rules:         SchedulerRules(),
+		OracleDigests: map[string]string{},
+	}
+	b, err := json.Marshal(fz)
+	if err != nil {
+		t.Fatalf("marshal freeze: %v", err)
+	}
+	if !strings.Contains(string(b), FreezeKeyAdaptiveRule) {
+		t.Fatalf("a freeze written by this build carries no %s:\n%s", FreezeKeyAdaptiveRule, b)
+	}
+	var back FreezeFile
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("re-read freeze: %v", err)
+	}
+	if got, want := back.Rules[FreezeKeyAdaptiveRule], SchedulerRules()[FreezeKeyAdaptiveRule]; got != want {
+		t.Fatalf("round trip lost the rule: %q, want %q", got, want)
+	}
+	if d := back.CheckFreeze(fz.PolicyDigest, SchedulerConstants(), SchedulerRules(), nil); len(d) != 0 {
+		t.Fatalf("a freeze written by this build is refused by this build: %+v", d)
+	}
+	// And the numeric constants survived the same merge: the block is ONE
+	// block in the file and stays one block.
+	for k, v := range SchedulerConstants() {
+		if back.Constants[k] != v {
+			t.Errorf("constant %s round-tripped as %d, want %d", k, back.Constants[k], v)
+		}
 	}
 }
 

@@ -96,6 +96,23 @@ type StartBudget struct {
 // the numbers M2d is going to sweep: a trace whose constants were re-read
 // from the binary would describe an allocation nobody made.
 type Constants struct {
+	// AdaptiveRule is the rule THE BINARY uses for --schedule=adaptive by
+	// default — a property of the build, constant across the arms of one
+	// protocol run, and NOT the per-run selector: `--selector=voc2` records
+	// `selector: "voc2"` while `adaptive_rule` still reports whatever the
+	// build defaults to, because what the freeze has to notice is the BINARY
+	// moving. It is therefore NOT a way to date a trace, and the renderer that
+	// tried to date one with it was wrong: M2b.2 ships `voc` as the default,
+	// so "voc" is what a pre-M2b.2 ledger AND a current race both record.
+	//
+	// It is here because M2d's freeze pinned the scheduler's NUMBERS and not
+	// its RULE: M2b.2 changes no constant and no policy field, so the
+	// mechanism that exists to make post-freeze tuning impossible to do
+	// quietly would have failed to notice a change to the allocation rule
+	// itself. An ABSENT value in a freeze file or an old trace normalizes to
+	// "voc" EXACTLY rather than by assumption — no binary before M2b.2 could
+	// allocate by any other rule (M2b.2 decision 8).
+	AdaptiveRule string           `json:"adaptive_rule"`
 	ExecutorBP   map[string]int64 `json:"executor_bp"`
 	RedundancyBP map[string]int64 `json:"redundancy_bp"`
 }
@@ -199,13 +216,27 @@ type Considered struct {
 	// failure, which is a decision change the ordering terms may not veto.
 	Admissible bool   `json:"admissible"`
 	Affordable bool   `json:"affordable"`
-	Basis      string `json:"basis"`      // BasisDecision | BasisResearch
-	CostBasis  string `json:"cost_basis"` // CostRow.CostBasisText()
-	CostMS     int64  `json:"cost_ms"`    // PREDICTED; the receipt records actual
-	Declined   string `json:"declined"`   // "" when bought
-	DiscountBP int64  `json:"discount_bp"`
-	ExecutorBP int64  `json:"executor_bp"`
-	Flip       int    `json:"flip"` // 0 | 1 — a reachability test, NOT a probability
+	Basis      string `json:"basis"` // BasisDecision | BasisResearch
+	// Committed is M2b.2 decision 3: this world is in the commit set C at this
+	// step — the pool is reserved to FINISH it, so every one of its remaining
+	// rungs is affordable until it completes or is eliminated. It is
+	// recomputed every step and is never a property of the world: elimination
+	// releases a world's whole reserve immediately and C re-forms in the same
+	// step.
+	Committed bool   `json:"committed"`
+	CostBasis string `json:"cost_basis"` // CostRow.CostBasisText()
+	CostMS    int64  `json:"cost_ms"`    // PREDICTED; the receipt records actual
+	Declined  string `json:"declined"`   // "" when bought
+	// FinishMS is Σ ĉost_ms over this world's UNBOUGHT ladder, in policy gate
+	// order: the cost to make the world capable of being `Subject` at all,
+	// because under M2a's purchase law a world holding two of three rungs is
+	// worth exactly what a world holding zero is worth. 0 means UNKNOWN — a
+	// declared-rank rung has no millisecond figure and this rule does not
+	// invent one — and a `voc` row carries no finish cost at all.
+	FinishMS   int64 `json:"finish_ms"`
+	DiscountBP int64 `json:"discount_bp"`
+	ExecutorBP int64 `json:"executor_bp"`
+	Flip       int   `json:"flip"` // 0 | 1 — a reachability test, NOT a probability
 	// FlipOutcomes names what each bracket outcome would have decided:
 	// "fail-closed:REJECT(unchanged)", "pass-max:REJECT->SELECT mv0:aa1…".
 	// It is what makes flip auditable instead of asserted.
@@ -221,6 +252,12 @@ type Considered struct {
 	// and races without ever seeing the seam.
 	ScoreBPPS int64 `json:"score_bpps"`
 	ScoreRank int64 `json:"score_rank"`
+	// ScoreBasis says WHICH DENOMINATOR priced this row: ScoreBasisRung is
+	// M2b's rung cost, ScoreBasisFinish is M2b.2's cost to finish the world
+	// under scarcity. They share a unit and measure different things, so no
+	// aggregate may pool them. "" is a ladder row, which computed no score at
+	// all and renders "—".
+	ScoreBasis string `json:"score_basis"`
 	// Order is the LADDER arm's depth-first rank of this row within its own
 	// step — 1 for the world the arm is currently completing — and 0 on a VOC
 	// row, which has no depth-first rank at all. It is the one field a ladder
@@ -251,6 +288,13 @@ const ReasonTopScore = "highest score_bpps among affordable frontier"
 // no score at all, and recording "highest score_bpps" beside a row whose
 // score is absent would put a rule nobody ran into the permanent record.
 const ReasonLadderOrder = "next rung of the leading world in control-plane order"
+
+// ReasonFinishScore is the VOC2 arm's purchase reason UNDER SCARCITY, and it
+// is a separate sentence because it is a separate fact: the score that put
+// this row at the head of the queue was divided by the cost to FINISH the
+// world, not by the cost of the rung, and a trace that spelled them the same
+// way would hide the one change the block exists to make.
+const ReasonFinishScore = "highest score_bpps (finish denominator) among affordable frontier purchases"
 
 // There is no cohort-close reason, and its absence is recorded rather than
 // left as a gap. §2.2 and §10 describe `corpus-differential` as a dependent
@@ -287,13 +331,39 @@ type DecisionNow struct {
 // seeing the first, so a reader can see which purchases were scored against
 // a decision that had already moved.
 type Step struct {
-	Batch       int          `json:"batch"`
-	Budget      BudgetState  `json:"budget"`
-	Chosen      []Chosen     `json:"chosen"`
+	Batch  int         `json:"batch"`
+	Budget BudgetState `json:"budget"`
+	Chosen []Chosen    `json:"chosen"`
+	// CommitBasis names WHICH RULE apportioned this step's pool:
+	// CommitBasisNotScarce (M2b's, because the pool can finish everybody),
+	// CommitBasisReserved (M2b.2's reservation), or CommitBasisUnpriced with
+	// the kinds named (finish_ms is unknown, so the scarcity test is
+	// undecidable and the race falls back to M2b for the whole race). "" is an
+	// arm that holds no such concept, and renders "—".
+	//
+	// It is recorded because a reader has to be able to tell FROM THE TRACE
+	// ALONE which rule allocated a race — the second of the three reasons the
+	// revision is gated on scarcity at all.
+	CommitBasis string `json:"commit_basis"`
+	// CommitSet is the world digests the pool is committed to finishing, IN
+	// COMMIT ORDER (M2b.2 decision 3). Empty under ¬scarce and on every arm
+	// that reserves nothing.
+	CommitSet   []string     `json:"commit_set"`
 	Considered  []Considered `json:"considered"`
 	DecisionNow DecisionNow  `json:"decision_now"`
-	Staleness   int          `json:"staleness"`
-	Step        int          `json:"step"`
+	// Scarce is decision 1's regime AND decision 4's precondition, which
+	// until now lived in prose: M2b decision 4's restored FAR claim holds
+	// "whenever the budget can pay for every hard gate of every live world",
+	// and that condition is exactly ¬scarce. A race whose every step records
+	// `scarce: false` therefore carries the FAR claim with equality, provably,
+	// from its own ledger.
+	Scarce    bool `json:"scarce"`
+	Staleness int  `json:"staleness"`
+	Step      int  `json:"step"`
+	// UncommittedMS is the pool the reservation deliberately did not commit:
+	// what the worlds outside C divide equally, and what a world eliminated
+	// mid-step releases back into.
+	UncommittedMS int64 `json:"uncommitted_ms"`
 }
 
 // Finished is schedule.finished: the totals and, above all, THE STOP CLAUSE
@@ -452,12 +522,23 @@ func normalizeStarted(s Started) Started {
 	if s.Constants.RedundancyBP == nil {
 		s.Constants.RedundancyBP = map[string]int64{}
 	}
+	// An ABSENT adaptive_rule means "voc" EXACTLY rather than by assumption:
+	// no binary before M2b.2 could allocate by any other rule. This is M2b1
+	// decision 6's normalization argument reused, because it is the same
+	// argument — and it is the reason no byte of any frozen artifact has to
+	// move for the freeze check to see the change (M2b.2 decision 8).
+	if s.Constants.AdaptiveRule == "" {
+		s.Constants.AdaptiveRule = SelectorNameVOC
+	}
 	return s
 }
 
 func normalizeStep(s Step) Step {
 	if s.Chosen == nil {
 		s.Chosen = []Chosen{}
+	}
+	if s.CommitSet == nil {
+		s.CommitSet = []string{}
 	}
 	rows := make([]Considered, 0, len(s.Considered))
 	for _, c := range s.Considered {

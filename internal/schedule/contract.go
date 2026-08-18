@@ -137,6 +137,55 @@ const (
 	TierIndependent   = "independent"
 )
 
+// AdaptiveRuleDefault is the rule THIS BINARY allocates by for
+// `--schedule=adaptive` when no `--selector` is given (M2b.2 decision 6).
+//
+// It is a property of the BUILD, not of a run: `--selector=voc2` records
+// `selector: "voc2"` on that race while `adaptive_rule` still reports what the
+// binary defaults to, because what the freeze has to notice is that the
+// BINARY's rule moved. M2d's freeze pinned the scheduler's NUMBERS and not its
+// RULE, and M2b.2 changes no constant and no policy field — so without this
+// the mechanism that exists to make post-freeze tuning impossible to do
+// quietly would have missed a change larger than any constant it pins.
+//
+// IT IS `voc`, AND THAT IS M2b.2's RESULT RATHER THAN ITS PLAN. The revision
+// shipped as a selectable arm and NOT as the default, on two measurements the
+// block's own pre-registration did not have a falsifier for:
+//
+//   - MEASURED FALSE ADMISSION. On `testdata/toyrepo/patches-tie` under the
+//     SHIPPED DEFAULT policy the unbounded reference decides ESCALATE
+//     (`on_ranking_tie`). Deterministic sweep, `--budget-basis=predicted`, at
+//     B = 1 200/1 400/1 600/1 800/2 000 ms: `voc` REJECTs at every level and
+//     `voc2` SELECTs at every level, with the rival's suite never bought. At
+//     B ≈ S all three arms ESCALATE, so the divergence is exactly the budgeted
+//     band the revision exists for. §7.3's F-4 was stated against the LADDER
+//     and cannot fire — `voc2` ties the ladder there — and no falsifier was
+//     stated against `voc`, the arm being replaced. The trade §3.3 predicted
+//     (false rejection → starved admission) is real, is one-way at the shipped
+//     default, and a rule that makes it may not become the default in the same
+//     block that measures it.
+//   - NO SAFETY MEASUREMENT EXISTS FOR IT. Every gate that could catch a
+//     regression runs `voc2` on a code path it never enters: the adversarial
+//     corpus builds a FRESH workspace per vector, so no kind is priced,
+//     `finish_ms` is unknown, and the whole race falls back to M2b's rule
+//     (`commit_basis: "unpriced-fallback(…)"`, `scarce: false`, `|C| = 0`);
+//     21 of the 22 vectors carry no budget at all. Every eval cell is
+//     byte-identical between the two rules for the same reason. "FAR unchanged"
+//     and "adversarial 22/22" are true statements about `voc`.
+//
+// Promoting it needs a cell in which `commit_basis` is `reserved` on at least
+// one step of a LABELLED instance, and a policy layer that answers the starved
+// admission (`on_evidence_incomplete`, still off by default, base rate still
+// unmeasured). Until then the freeze does not refuse, because nothing moved —
+// which is the check working, not the check sleeping.
+const AdaptiveRuleDefault = SelectorNameVOC
+
+// AdaptiveRule renders the compiled default rule for the trace and for the
+// eval freeze check. Both call this rather than restating the string: a
+// snapshot that can disagree with the thing it snapshots is worse than no
+// snapshot.
+func AdaptiveRule() string { return AdaptiveRuleDefault }
+
 // ExecutorConstants renders decision 6's compiled constant as the map
 // schedule.started records. It calls correlate.go's ExecutorBP rather than
 // restating the numbers: a snapshot that could disagree with the constant it

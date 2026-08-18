@@ -590,18 +590,109 @@ func copyMetrics(m map[string]int64) map[string]int64 {
 	return out
 }
 
-// Lookahead is the flip test for one prospective purchase: at most three
-// calls into the decision rule, on CLAMPED receipts, comparing Type and
-// Subject only.
+// Verdict is one bracket outcome, evaluated: what it decided, and whether
+// that moved the decision at all.
+type Verdict struct {
+	Name  string
+	Moved bool
+	Note  string
+}
+
+// Verdicts is one prospective purchase's whole bracket, evaluated ONCE.
 //
-//	flip(w,o) = 1 iff some bracket outcome changes Decide in Type or Subject
+// It exists because M2b.2 decision 4 conditions the bracket's PASS outcomes on
+// reachability — `Bracket ∋ {pass-min, pass-max} iff finish_ms(w) ≤
+// allowance(w)` — and the naive implementation of that is a second lookahead
+// pass, i.e. a second set of `Decide` calls per step. The metalevel/object-level
+// ratio the whole design rests on (0.07–0.3 % of the purchase it prices) is
+// what makes metareasoning worth doing at all, so the conditioned flip is
+// derived from the SAME calls as the unconditioned one: the outcomes are
+// evaluated once and the caller reads whichever subset its regime licenses.
+// M2b.2 §3.1's "zero additional Decide calls per step" is a property of this
+// type.
+type Verdicts struct {
+	// Unbounded is decision 3b's fail-open direction: some bound the bracket
+	// needs is not control-plane held, so the purchase is priced as if it
+	// could matter under EVERY regime — there is no unknown for decision 4's
+	// conservative term to fail on, because an unknown makes the whole rule
+	// fall back rather than making a purchase look worthless.
+	Unbounded bool
+	Outcomes  []Verdict
+}
+
+// Flip is M2b's flip: 1 iff SOME bracket outcome changes the decision.
+func (v Verdicts) Flip() int64 {
+	if v.Unbounded {
+		return 1
+	}
+	for _, o := range v.Outcomes {
+		if o.Moved {
+			return 1
+		}
+	}
+	return 0
+}
+
+// FailClosedFlip is decision 4's flip for a world the budget cannot finish:
+// only `fail-closed` is a reachable outcome, because a pass outcome completes
+// the world's entire remaining ladder and the budget cannot buy that ladder.
+// Certifying a purchase against an outcome the race can never reach is
+// certifying it against money that does not exist.
+//
+// `fail-closed` stays unconditional because a world can always fail — failing
+// costs one rung, not a ladder.
+func (v Verdicts) FailClosedFlip() int64 {
+	if v.Unbounded {
+		return 1
+	}
+	for _, o := range v.Outcomes {
+		if o.Name == OutcomeFailClosed && o.Moved {
+			return 1
+		}
+	}
+	return 0
+}
+
+// Notes is `flip_outcomes`: what each evaluated outcome would have decided,
+// which is what makes flip auditable instead of asserted.
+func (v Verdicts) Notes() []string {
+	if v.Unbounded {
+		return []string{"unbounded: no control-plane ceiling for this purchase"}
+	}
+	out := make([]string, 0, len(v.Outcomes))
+	for _, o := range v.Outcomes {
+		out = append(out, o.Note)
+	}
+	return out
+}
+
+// FailClosedNotes is `flip_outcomes` for the CONDITIONED bracket: the
+// fail-closed row alone. A row whose bracket held one outcome must not record
+// the verdicts of two outcomes it was not allowed to consider — the trace would
+// then describe a lookahead nobody ran.
+func (v Verdicts) FailClosedNotes() []string {
+	if v.Unbounded {
+		return v.Notes()
+	}
+	out := make([]string, 0, 1)
+	for _, o := range v.Outcomes {
+		if o.Name == OutcomeFailClosed {
+			out = append(out, o.Note+" [pass outcomes unreachable at this world's allowance]")
+		}
+	}
+	return out
+}
+
+// Evaluate constructs the bracket for one prospective purchase and calls the
+// decision rule once per outcome, on CLAMPED receipts, comparing Type and
+// Subject only.
 //
 // base must be dec(pol, worlds, receipts) on the SAME clamped receipt set —
 // the caller computes it once per batch, so a step costs 1 + 3×|frontier|
 // calls rather than 4×|frontier|.
-func Lookahead(dec DecideFn, pol policy.Policy, worlds []object.RecordedWorld,
+func Evaluate(dec DecideFn, pol policy.Policy, worlds []object.RecordedWorld,
 	receipts []object.RecordedReceipt, base object.Decision,
-	w object.RecordedWorld, r Rung, rest []Rung, b Bounds) (int64, []string) {
+	w object.RecordedWorld, r Rung, rest []Rung, b Bounds) Verdicts {
 
 	outcomes, ok := Bracket(pol, w, r, rest, receipts, b)
 	if !ok {
@@ -610,22 +701,40 @@ func Lookahead(dec DecideFn, pol policy.Policy, worlds []object.RecordedWorld,
 		// open (an unknown bound makes a purchase look valuable and gets it
 		// bought). Two layers, two opposite fail directions, each safe in
 		// its own layer.
-		return 1, []string{"unbounded: no control-plane ceiling for this purchase"}
+		return Verdicts{Unbounded: true}
 	}
-	flip := int64(0)
-	notes := make([]string, 0, len(outcomes))
+	out := Verdicts{Outcomes: make([]Verdict, 0, len(outcomes))}
 	next := make([]object.RecordedReceipt, len(receipts), len(receipts)+1)
 	copy(next, receipts)
 	for _, o := range outcomes {
 		d := dec(pol, worlds, append(next, o.receipts...))
+		v := Verdict{Name: o.name}
 		if decisionMoved(base, d) {
-			flip = 1
-			notes = append(notes, fmt.Sprintf("%s:%s->%s%s", o.name, base.Type, d.Type, subjectNote(base, d)))
-			continue
+			v.Moved = true
+			v.Note = fmt.Sprintf("%s:%s->%s%s", o.name, base.Type, d.Type, subjectNote(base, d))
+		} else {
+			v.Note = fmt.Sprintf("%s:%s(unchanged)", o.name, d.Type)
 		}
-		notes = append(notes, fmt.Sprintf("%s:%s(unchanged)", o.name, d.Type))
+		out.Outcomes = append(out.Outcomes, v)
 	}
-	return flip, notes
+	return out
+}
+
+// Lookahead is the flip test for one prospective purchase: at most three
+// calls into the decision rule, on CLAMPED receipts, comparing Type and
+// Subject only.
+//
+//	flip(w,o) = 1 iff some bracket outcome changes Decide in Type or Subject
+//
+// It is M2b's own signature, kept: the retained `voc` arm reads exactly this
+// and nothing else, so the published rule is not re-expressed in terms of the
+// revision that replaced it.
+func Lookahead(dec DecideFn, pol policy.Policy, worlds []object.RecordedWorld,
+	receipts []object.RecordedReceipt, base object.Decision,
+	w object.RecordedWorld, r Rung, rest []Rung, b Bounds) (int64, []string) {
+
+	v := Evaluate(dec, pol, worlds, receipts, base, w, r, rest, b)
+	return v.Flip(), v.Notes()
 }
 
 // decisionMoved compares two decisions in Type and Subject — never in

@@ -56,10 +56,46 @@ func (b *budget) share(contenders int) int64 {
 	if b.unbounded() {
 		return 0
 	}
-	if contenders < 1 {
+	return equalShare(b.remaining(), contenders)
+}
+
+// equalShare is decision 8's apportionment as a pure function of a pool, so
+// the loop's share and a selector's allowance are ONE piece of arithmetic
+// rather than two that can drift. `SelectorVOC.Allowances` is asserted
+// bit-identical to `budget.share(len(frontier))` for every frontier, and it is
+// bit-identical because it is the same line of code.
+func equalShare(pool int64, contenders int) int64 {
+	if contenders < 1 || pool <= 0 {
 		return 0
 	}
-	return b.remaining() / int64(contenders)
+	return pool / int64(contenders)
+}
+
+// reserve is M2b.2 decision 3's allowance for a COMMITTED world: the pool
+// minus what its co-committed siblings still need to finish.
+//
+//	allowance(w) = pool − Σ_{v∈C, v≠w} finish_ms(v)
+//
+// It is the half of the revision that moves MONEY rather than ORDER, and it is
+// what makes the commitment invariant hold: since Σ_{v∈C} finish_ms(v) ≤ pool
+// by construction of C, allowance(w) ≥ finish_ms(w) for every committed world,
+// so every remaining rung of a committed world is affordable until that world
+// is complete or eliminated.
+//
+// It replaces equal shares ONLY under scarcity. `share = remaining /
+// |contenders|` imputed every world an equal NEED; `reserve` uses the need the
+// policy and the fitted cost table actually declare. Decision 8's own
+// objection to unequal shares — "a world granted a large share because it
+// looked promising can burn it" — does not reach it: nothing is granted for
+// looking promising, the allowance is a function of the DECLARED ladder and
+// the fitted per-kind cost, both control-plane, and a candidate cannot make
+// its own ladder look short.
+func reserve(pool, committedTotal, mine int64) int64 {
+	v := pool - (committedTotal - mine)
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // affordable reports whether a predicted cost fits within its world's

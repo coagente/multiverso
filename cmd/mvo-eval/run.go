@@ -82,6 +82,7 @@ type runOpts struct {
 	repoRoot   string
 	keep       string
 	python     string
+	selector   string
 }
 
 func cmdRun(args []string) error {
@@ -115,6 +116,12 @@ func cmdRun(args []string) error {
 	fs.StringVar(&o.repoRoot, "repo-root", ".", "repository root, for the split and freeze files")
 	fs.StringVar(&o.keep, "keep", "", "keep the run's workspaces in this directory")
 	fs.StringVar(&o.python, "python", "python3", "interpreter for the hidden suite")
+	fs.StringVar(&o.selector, "selector", "",
+		"which allocation RULE the adaptive arm races under: voc (M2b's published rule, the binary "+
+			"default) or voc2 (M2b.2's finishing rule). It is how the published M2d numbers stay reproducible "+
+			"on a binary that ships the revision: the arm, the instances, the labels, the scoring and the "+
+			"metrics are unchanged, and only the rule moves. Recorded in the manifest's notes, because a "+
+			"cell that cannot say which rule it raced under is a cell whose caption is a guess")
 	if err := fs.Parse(args); err != nil {
 		return codedError{code: exitUsage, msg: err.Error()}
 	}
@@ -146,6 +153,17 @@ func cmdRun(args []string) error {
 				"and expectation_violated 0. Every FAR here is therefore a FLOOR, and a FAR of 100% on a " +
 				"family-B cell carries no information about a real cohort.",
 		},
+	}
+	if o.selector != "" {
+		// A cell that cannot say which allocation rule produced it is a cell
+		// whose caption is a guess (M2b.2 §5.2). The binary's default rule is
+		// already recorded per race in schedule.started.constants; this is the
+		// per-CELL statement, printed with the numbers.
+		man.Notes = append(man.Notes, fmt.Sprintf(
+			"THE ADAPTIVE ARM RACED UNDER --selector=%s. The arm, the instances, the split, the labels, "+
+				"the scoring and the metrics are unchanged; the ALLOCATION RULE is what moved. "+
+				"M2b.2 ships voc2 as the binary default and retains voc so every published M2b.1 and M2d "+
+				"number stays reproducible under ONE binary.", o.selector))
 	}
 
 	// Degradation first: an absent corpus is a NAMED SKIP for every instance
@@ -527,6 +545,11 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 				Arm: st.arm, MVO: o.mvo, Instance: inst, Patches: patches,
 				WorkRoot: dir, EvalHome: home, RepoSrc: store.RepoPath(inst),
 				PolicyFile: policyFile, Parallel: 1, BudgetMS: budget, Needles: needles,
+				// M2b.2 decision 6: the RULE is a flag on the adaptive arm and
+				// on no other. The arm table does not move — no new arm, no new
+				// instance, no new metric — so the only thing this changes about
+				// a published cell is which allocation rule produced it.
+				ExtraFlags: selectorFlags(o.selector, st.arm.ID),
 			})
 			if err != nil {
 				man.Census.Add(inst.ID, eval.SkipPreflightAbort,
@@ -889,6 +912,18 @@ func coverage(b eval.Batch) (avail bool, availUnknown bool) {
 	return avail, availUnknown
 }
 
+// selectorFlags is `--selector` applied to the ADAPTIVE ARM ALONE. The ladder
+// is depth-first and reserves nothing and the reference is the ladder handed an
+// unbounded budget, so naming a rule for either would be a flag `mvo race`
+// refuses — and refusing loudly there is what keeps a mis-flagged cell from
+// being raced and published.
+func selectorFlags(selector, armID string) []string {
+	if selector == "" || armID != eval.ArmAdaptive {
+		return nil
+	}
+	return []string{"--selector=" + selector}
+}
+
 // modalWinner returns the winner label of the replicates that produced the
 // modal decision. Replicates that decided otherwise are not consulted: their
 // winner is a different decision's winner.
@@ -1092,7 +1127,7 @@ func checkFreeze(repoRoot, corpus, version, split, unfreeze, verb string) (strin
 	// default and not against a cell's own --policy: racing a cell under a named
 	// alternative policy is a declared experiment, not quiet tuning of the
 	// default.
-	drift := fz.CheckFreeze(defaultPolicyDigest(), eval.SchedulerConstants(), nil)
+	drift := fz.CheckFreeze(defaultPolicyDigest(), eval.SchedulerConstants(), eval.SchedulerRules(), nil)
 	if len(drift) > 0 && split == eval.SplitEval && unfreeze == "" {
 		var what []string
 		for _, d := range drift {

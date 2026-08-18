@@ -614,8 +614,34 @@ $VALIDATE_OUT"
   || fail "policy validate rejected the shipped default policy"
 "$MVO" policy use default --dir "$REPO" >/dev/null || fail "policy use default failed"
 DEFAULT_DIG="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["default_policy"])' "$REPO/.multiverso/config.json")"
-"$MVO" policy list --dir "$REPO" | grep -qE "^default +$DEFAULT_DIG +policy/v1 .*recorded \(default\)$" \
-  || fail "policy list does not show the default as recorded:
+# PARSED AS DATA, NOT AS ALIGNED COLUMNS. This assertion used to be an
+# anchored grep against a tabwriter table whose column widths depend on which
+# policies happen to be recorded at that moment, and it failed once in four
+# runs of an otherwise identical tree — a verification gate that is a coin flip
+# is not a verification gate. Re-grepping the failing line from the log with
+# the same pattern MATCHED, so what differed was the assertion's INPUT and not
+# its regex; the parse below prints the whole table on failure so the next
+# occurrence is diagnosable instead of mysterious.
+"$MVO" policy list --dir "$REPO" | DEFAULT_DIG="$DEFAULT_DIG" python3 -c '
+import os, re, sys
+want = os.environ["DEFAULT_DIG"]
+lines = [l.rstrip("\n") for l in sys.stdin if l.strip()]
+rows = []
+for l in lines[1:]:
+    # Columns are separated by RUNS of spaces; a cell may contain single
+    # spaces ("recorded (default)"), which is why this is a split and not a
+    # fixed-width read.
+    f = re.split(r"\s{2,}", l.strip())
+    if len(f) >= 6 and f[1].startswith("mv0:"):
+        rows.append(f)
+mine = [f for f in rows if f[1] == want]
+if not mine:
+    sys.exit("no policy list row carries the configured default %s\n%s" % (want, "\n".join(lines)))
+name, dig, schema = mine[0][0], mine[0][1], mine[0][2]
+state = mine[0][-1]
+if name != "default" or schema != "policy/v1" or state != "recorded (default)":
+    sys.exit("the default row reads name=%r schema=%r state=%r\n%s" % (name, schema, state, "\n".join(lines)))
+' || fail "policy list does not show the default as recorded:
 $("$MVO" policy list --dir "$REPO")"
 SHOWN="$("$MVO" policy show "$DEFAULT_DIG" --json --dir "$REPO")"
 SHOWN_DIG="mv0:$(printf '%s' "$SHOWN" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
@@ -1667,6 +1693,12 @@ forbidden = [
     "S-frontier", "S-budget", "S-ranking", "S-empty",
     "collect-inert", "paths-unmodified", "collect-nonempty", "status-pass",
     "tree-guard", "pytest-collect", "pytest-suite", "wall_ms_asc",
+    # M2b.2 §6: the revision adds one new protocol internal — WHICH WORLD THE
+    # POOL IS COMMITTED TO — and a candidate that learned it was uncommitted
+    # would know exactly when its rivals go unmeasured. The adaptive attacks
+    # on protocol internals in ch. 13 are the reason this list exists.
+    "commit_set", "commit_basis", "finish_ms", "uncommitted_ms", "score_basis",
+    "adaptive_rule", "unpriced-fallback", "voc2",
 ]
 digests = [dig for dig, _ in mine]
 for dig, p in mine:
@@ -1986,7 +2018,12 @@ assert sa["parallel"] == sb["parallel"], "F9: different dispatch degrees"
 assert sa["rotation"] == sb["rotation"], "F12: different rotations in one pair"
 assert len(sa["world_order"]) == len(sb["world_order"]) > 0, "the arms ranked over different world sets"
 assert sa["selector"] != sb["selector"], ("both arms recorded the same selector", sa["selector"])
-assert sa["selector"] == "voc" and sb["selector"] == "ladder", (sa["selector"], sb["selector"])
+# The adaptive arm records THE RULE IT RAN, which is the binary default unless
+# --selector says otherwise (M2b.2 decision 6). Both spellings are the adaptive
+# arm; `ladder` is the reference and does not move.
+assert sa["selector"] in ("voc", "voc2") and sb["selector"] == "ladder", (sa["selector"], sb["selector"])
+assert sa["adaptive_rule"] == sb["adaptive_rule"], \
+    ("the arms ran different BINARIES", sa["adaptive_rule"], sb["adaptive_rule"])
 # Both arms charge the SAME pool through the same predicate, so both report
 # the same fields — including the ones only one of them used to have.
 for s in (sa, sb):
@@ -2580,6 +2617,216 @@ PYH
   echo "        read off a REAL race rather than claimed in a comment"
 fi
 
+
+# ===========================================================================
+# M2b.2 — THE FINISHING RULE (docs/design/M2b2-finishing-rule.md §8)
+#
+#   m2b2-8a  the finishing invariant, as a paired race under ONE binary
+#   m2b2-8b  decision 1's gate is inert where it claims to be
+#   m2b2-8c  absent is absent: a ladder row holds no finish cost
+#   m2b2-8d  the reason strings are honest and the skips are complete
+#
+# None of them changes the shipped default policy. The freeze half (8e) is a
+# unit test in internal/eval — it needs no corpus, and asserting it here would
+# need one.
+# ===========================================================================
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "m2b2-8a: policy use default failed"
+
+# --- m2b2-8a. THE FINISHING INVARIANT, AS A RACE. At a budget that can finish
+# exactly ONE world and not two, the published rule advances everybody one rung
+# and finishes nobody — 943 ms unspent on the cell M2d priced at
+# FRR_reachable = 2/2 — and the revision finishes one. Both arms are the SAME
+# BINARY, the same cost table and the same seeded workspace, so the difference
+# is the rule (F15). This is F-1 as a test. ---
+INTENT_M2B2_REF="$("$MVO" intent new --dir "$REPO" --title "m2b2: reference spend" --budget-oracle-ms 0)"
+"$MVO" race "$INTENT_M2B2_REF" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --budget-basis predicted >/dev/null || fail "m2b2-8a: the reference race failed"
+M2B2_S="$("$MVO" explain "$INTENT_M2B2_REF" --dir "$REPO" --json --schedule \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule"]["spent_ms"])')"
+[ "$M2B2_S" -gt 0 ] 2>/dev/null || fail "m2b2-8a: the reference race recorded no spend"
+# 70 % of the two-world spend: more than one ladder, less than two.
+M2B2_B=$(( M2B2_S * 7 / 10 ))
+INTENT_M2B2="$("$MVO" intent new --dir "$REPO" --title "m2b2: one ladder and not two" \
+  --budget-oracle-ms "$M2B2_B")"
+"$MVO" race "$INTENT_M2B2" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --selector voc --budget-basis predicted >/dev/null 2>&1 || true
+M2B2_VOC="$("$MVO" explain "$INTENT_M2B2" --dir "$REPO" --json --schedule)"
+"$MVO" race "$INTENT_M2B2" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --selector voc2 --budget-basis predicted >/dev/null 2>&1 || true
+M2B2_VOC2="$("$MVO" explain "$INTENT_M2B2" --dir "$REPO" --json --schedule)"
+VOC_JSON="$M2B2_VOC" VOC2_JSON="$M2B2_VOC2" BUDGET="$M2B2_B" python3 -c '
+import json, os
+
+def worlds_finished(sched):
+    """A world is FINISHED when it bought every rung of the ladder. Under
+    M2a purchase law only a finished world can be Subject, so a race that
+    finishes nobody rejects however much money it has left."""
+    rungs = {}
+    for r in sched["steps"]:
+        if r["bought"]:
+            rungs.setdefault(r["world"], set()).add(r["oracle"])
+    n = max((len(v) for v in rungs.values()), default=0)
+    return [w for w, v in rungs.items() if len(v) == n and n >= 3]
+
+voc = json.loads(os.environ["VOC_JSON"])["schedule"]
+voc2 = json.loads(os.environ["VOC2_JSON"])["schedule"]
+budget = int(os.environ["BUDGET"])
+assert voc["selector"] == "voc" and voc2["selector"] == "voc2", (voc["selector"], voc2["selector"])
+# F15: ONE BINARY. `adaptive_rule` is the default rule OF THE BUILD and must be
+# same on both halves of a paired race; WHICH rule that is, this step does not
+# assert — M2b.2 ships `voc` as the default and `voc2` behind the flag, and a
+# gate that hardcoded either would have to be edited to promote the rule, which
+# is how a gate stops being a gate.
+assert voc["adaptive_rule"] == voc2["adaptive_rule"] != "", \
+    ("the arms ran different binaries", voc["adaptive_rule"], voc2["adaptive_rule"])
+done = worlds_finished(voc2)
+assert done, ("voc2 finished no world at %d ms" % budget, voc2["spent_ms"])
+# The commit set NAMES the world that was finished, on at least one step.
+committed = set()
+scarce = 0
+for reg in voc2["regimes"]:
+    if reg["scarce"]:
+        scarce += 1
+        assert reg["commit_basis"] == "reserved", reg
+        committed |= set(reg["commit_set"])
+assert scarce > 0, "no step recorded scarce: true; the budget did not bind"
+assert committed & set(done), ("the commit set names no finished world", committed, done)
+# And the published rule, on the same fixture, spread the pool across every
+# world and refused the finishing purchase to all of them.
+voc_done = worlds_finished(voc)
+print("m2b2-8a: at %d ms — voc2 finished %d world(s) for %d ms; voc finished %d for %d ms (stop %s vs %s)"
+      % (budget, len(done), voc2["spent_ms"], len(voc_done), voc["spent_ms"], voc2["stop"], voc["stop"]))
+assert voc2["spent_ms"] >= voc["spent_ms"], (
+    "F-7: the revision spent LESS than the rule it replaces", voc2["spent_ms"], voc["spent_ms"])
+' || fail "m2b2-8a: the finishing invariant does not hold under a binding budget"
+
+# --- m2b2-8b. THE GATE IS INERT WHERE IT CLAIMS TO BE. Under an unbounded
+# budget `scarce` is false on every step and the revision buys exactly what the
+# published rule buys — decision 1's "the same code path, not an equivalent
+# one", which is what keeps every M2b/M2b1 null-case proof standing. ---
+INTENT_M2B2_NULL="$("$MVO" intent new --dir "$REPO" --title "m2b2: the null case" --budget-oracle-ms 0)"
+"$MVO" race "$INTENT_M2B2_NULL" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --selector voc >/dev/null || fail "m2b2-8b: the voc race failed"
+NULL_VOC="$("$MVO" explain "$INTENT_M2B2_NULL" --dir "$REPO" --json --schedule)"
+"$MVO" race "$INTENT_M2B2_NULL" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --selector voc2 >/dev/null || fail "m2b2-8b: the voc2 race failed"
+NULL_VOC2="$("$MVO" explain "$INTENT_M2B2_NULL" --dir "$REPO" --json --schedule)"
+A_JSON="$NULL_VOC" B_JSON="$NULL_VOC2" python3 -c '
+import json, os
+a = json.loads(os.environ["A_JSON"])
+b = json.loads(os.environ["B_JSON"])
+sa, sb = a["schedule"], b["schedule"]
+assert a["type"] == b["type"], ("the null case moved the DECISION", a["type"], b["type"])
+buy = lambda s: sorted((r["oracle"], r["step"]) for r in s["steps"] if r["bought"])
+assert buy(sa) == buy(sb), ("the null case moved the RECEIPT SET", buy(sa), buy(sb))
+assert all(not reg["scarce"] for reg in sb["regimes"]), sb["regimes"]
+assert all(reg["commit_basis"] == "not-scarce" for reg in sb["regimes"]), sb["regimes"]
+assert all(r["score_basis"] == "rung" for r in sb["steps"]), "a non-scarce row was priced by the finish denominator"
+print("m2b2-8b: unbounded — %d purchases, identical under both rules, scarce false on all %d step(s)"
+      % (len(buy(sb)), len(sb["regimes"])))
+' || fail "m2b2-8b: decision 1's gate leaks; the revision is not confined to the regime it claims"
+
+# --- m2b2-8c. ABSENT IS ABSENT. A ladder row computes no finish cost and
+# belongs to no commit set, and the rendering prints an em dash rather than a
+# zero a reader could aggregate. A voc2 row under ¬scarce carries a finish cost
+# it did NOT divide by, and the rendering says which. ---
+"$MVO" race "$INTENT_M2B2_NULL" --dir "$REPO" --agent script --patches "$REPO/patches" \
+  --schedule=fixed-budget >/dev/null || fail "m2b2-8c: the ladder race failed"
+LADDER_RENDER="$("$MVO" explain "$INTENT_M2B2_NULL" --dir "$REPO" --schedule)"
+printf '%s' "$LADDER_RENDER" | grep -q 'regime:     — (the ladder arm computes no scarcity test' \
+  || fail "m2b2-8c: the ladder race reports a regime it never computed:
+$LADDER_RENDER"
+"$MVO" explain "$INTENT_M2B2_NULL" --dir "$REPO" --json --schedule | python3 -c '
+import json, sys
+sched = json.load(sys.stdin)["schedule"]
+assert sched["selector"] == "ladder", sched["selector"]
+for r in sched["steps"]:
+    assert r["score_basis"] == "", ("a ladder row carries a score basis", r)
+    assert r["finish_ms"] == 0 and r["committed"] is False, ("a ladder row carries a commitment", r)
+assert sched["regimes"] == [] or all(reg["commit_basis"] == "" for reg in sched["regimes"]), sched["regimes"]
+print("m2b2-8c: %d ladder rows, none carrying a finish cost or a commitment" % len(sched["steps"]))
+' || fail "m2b2-8c: a ladder row carries a finishing-rule term it never computed"
+
+# --- m2b2-8d. THE REASON STRINGS ARE HONEST. No bought row carries a decline;
+# `reserved` and `unreachable` are mutually exclusive and neither carries the
+# decision-inert sentence, which is a claim about the POLICY; and every rung a
+# declined world will never buy has its oracle.skipped, because "skipped,
+# assume fine" is not a state and never will be. ---
+VOC2_JSON="$M2B2_VOC2" python3 -c '
+import json, os
+sched = json.loads(os.environ["VOC2_JSON"])["schedule"]
+declined = {}
+for r in sched["steps"]:
+    d = r["declined"]
+    assert (d == "") == r["bought"], ("Bought disagrees with Declined", r)
+    if d.startswith("reserved: ") or d.startswith("unreachable: "):
+        assert not (d.startswith("reserved: ") and d.startswith("unreachable: ")), r
+        assert "decision-inert" not in d, ("a money sentence carries a policy claim", r)
+        assert " ms" in d, ("the sentence names no arithmetic", r)
+        declined.setdefault(r["world"], set()).add(r["oracle"])
+skipped = {}
+for s in sched["skipped"]:
+    skipped.setdefault(s["world"], set()).add(s["oracle"])
+for world in declined:
+    bought = {r["oracle"] for r in sched["steps"] if r["bought"] and r["world"] == world}
+    missing = {"guard", "collect", "suite"} - bought - skipped.get(world, set())
+    assert not missing, ("a starved world left rungs with no oracle.skipped", world, missing)
+print("m2b2-8d: %d declined world(s), every unbought rung accounted for" % len(declined))
+' || fail "m2b2-8d: a decline sentence or a terminal skip is missing or dishonest"
+
+# --- m2b2-8e. THE GATE THAT CAN REFUTE THE BLOCK. Every other step here
+# asserts the direction the block wants — that the revision finishes worlds and
+# spends more — and none of them asserts anything about DECISION QUALITY. The
+# withholding-monotonicity property test does not cover it either: it proves
+# the pass-set property, and this project's own docs say SELECT is not monotone
+# in the pass set.
+#
+# So: on the tie fixture, under the SHIPPED DEFAULT policy, where the unbounded
+# reference decides ESCALATE on a genuine ranking tie, the shipped adaptive arm
+# must not convert that full-evidence ESCALATE into a SELECT. A SELECT there is
+# a starved admission — vector 25 — with the rival's suite never bought.
+#
+# IT FAILS UNDER --selector=voc2, MEASURED, WHICH IS WHY THE DEFAULT IS voc:
+# voc REJECTs and voc2 SELECTs at every budget in 1 200–2 000 ms. The step
+# prints both arms so the trade is in the acceptance log rather than only in
+# the BUILDLOG. ---
+"$MVO" policy use default --dir "$REPO" >/dev/null || fail "m2b2-8e: policy use default failed"
+for i in 1 2; do
+  WARM="$("$MVO" intent new --dir "$REPO" --title "m2b2-8e warm $i" --budget-oracle-ms 0)"
+  "$MVO" race "$WARM" --dir "$REPO" --agent script --patches "$REPO/patches-tie" >/dev/null 2>&1 || true
+done
+INTENT_TIE_REF="$("$MVO" intent new --dir "$REPO" --title "m2b2-8e: full evidence" --budget-oracle-ms 0)"
+"$MVO" race "$INTENT_TIE_REF" --dir "$REPO" --agent script --patches "$REPO/patches-tie" \
+  --budget-basis predicted >/dev/null || fail "m2b2-8e: the full-evidence reference race failed"
+TIE_REF="$("$MVO" explain "$INTENT_TIE_REF" --dir "$REPO" --json)"
+printf '%s' "$TIE_REF" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["type"] == "ESCALATE", ("the tie fixture no longer escalates on full evidence", r["type"])
+assert r["escalation"]["rule"] == "on_ranking_tie", r["escalation"]
+' || fail "m2b2-8e: the fixture does not produce the full-evidence decision the step is about"
+TIE_S="$("$MVO" explain "$INTENT_TIE_REF" --dir "$REPO" --json --schedule \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["schedule"]["spent_ms"])')"
+# Two budgets inside the informative band: below the reference spend (so the
+# budget binds) and above one world's ladder (so an admission is reachable).
+for FRAC in 6 8; do
+  TIE_B=$(( TIE_S * FRAC / 10 ))
+  I_DEF="$("$MVO" intent new --dir "$REPO" --title "m2b2-8e default $FRAC" --budget-oracle-ms "$TIE_B")"
+  "$MVO" race "$I_DEF" --dir "$REPO" --agent script --patches "$REPO/patches-tie" \
+    --budget-basis predicted >/dev/null 2>&1 || true
+  I_ALT="$("$MVO" intent new --dir "$REPO" --title "m2b2-8e voc2 $FRAC" --budget-oracle-ms "$TIE_B")"
+  "$MVO" race "$I_ALT" --dir "$REPO" --agent script --patches "$REPO/patches-tie" \
+    --selector voc2 --budget-basis predicted >/dev/null 2>&1 || true
+  DEF_T="$("$MVO" explain "$I_DEF" --dir "$REPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')"
+  ALT_T="$("$MVO" explain "$I_ALT" --dir "$REPO" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["type"])')"
+  echo "m2b2-8e: at $TIE_B ms of $TIE_S — shipped default $DEF_T, --selector=voc2 $ALT_T (full evidence: ESCALATE)"
+  [ "$DEF_T" != "SELECT" ] || fail "m2b2-8e: at $TIE_B ms the SHIPPED DEFAULT adaptive arm turned a full-evidence
+ESCALATE into a SELECT — a starved admission (vector 25) with the rival's hard gates never bought.
+That is a false admission traded for the false rejection M2d priced, and it is a blocker, not a
+trade-off: withdraw the rule from the default until the shipped default policy declares
+on_evidence_incomplete or the reservation refuses to commit while the rivals' decision-relevant
+hard gates are unaffordable."
+done
 
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"

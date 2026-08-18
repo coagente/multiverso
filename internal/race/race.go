@@ -59,6 +59,15 @@ type Config struct {
 	// allocation-sensitive the two buy the same receipts and decide
 	// identically (decision 13), which is a test rather than a claim.
 	Schedule string
+	// Selector is `mvo race --selector` (M2b.2 decision 6): WHICH ALLOCATION
+	// RULE the adaptive arm runs. "" takes the binary's default, which is
+	// `schedule.AdaptiveRuleDefault`; "voc2" runs the finishing rule — the
+	// finish-cost denominator plus the commit-set reservation, both inert
+	// unless the pool cannot finish every alive world — and "voc" runs M2b's
+	// published rule unchanged, which is what keeps every M2b.1 and M2d number
+	// reproducible on the binary that also runs the revision. It applies to
+	// the adaptive arm only: the ladder IS depth-first and reserves nothing.
+	Selector string
 	// CollectInert is `mvo race --collect-inert` (M2b decision 11): buy the
 	// decision-inert rungs M2a ships unranked, labelled `research` in the
 	// trace and excluded from the waste metric. Off by default.
