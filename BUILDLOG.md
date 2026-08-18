@@ -2,6 +2,76 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-18 — M2d.1: a positive result that did not survive review
+
+**A block ends on a branch instead of on `main`, and that is the entry.**
+M2b.2 closed by naming its own blocker: `mvo-eval` never warms the cost table,
+so every rung is priced `declared-rank`, `finish_ms` is unknown, and any new
+allocation rule falls back to the old one on every step. Every eval cell came
+out byte-identical between the two rules. M2d.1 set out to make the instrument
+capable of testing a rule and honest about when it did not, and it produced a
+**positive** result: with the instrument warmed, the finishing rule moved
+`FRR_reachable` at B1 family A from 1/1 to 0/1. The measuring agent wrote *"this
+is not a second null."*
+
+It was not a result. The hostile reviewer landed five blockers, three verified by
+running, and two of them kill the headline independently:
+
+- **The two rules were never compared at the same budget.** `B` is derived inside
+  each run from that run's own reference races, so the `voc` run and the `voc2`
+  run of the same cell got *different budgets* — under a cell captioned
+  ORACLE-BUDGET-MATCHED. Measured on one host, same instance, same day: minspend
+  1553 against 1013.
+- **The B1 result is inside the harness's own noise.** Six runs of the identical
+  command gave **SELECT once and REJECT five times**, and one REJECT run had a
+  replicate disagree while `stable` still read `true`, because the modal
+  threshold at R=3 is 2.
+- Coverage counted a step where the rule was **consulted**, not where the step
+  **depended** on it — `commit_basis` becomes `reserved` the moment scarcity is
+  true, before the commit set is built, so a step whose allowance is M2b's equal
+  share exactly still counted as exercised. The 68% is inflated.
+- The vacuity refusal — the safeguard this block existed to build — is
+  satisfiable by a single step, and by the wrong arm: a probe merging 99 vacuous
+  races with one race holding one exercised step printed `1 of 199 steps (0%)`
+  and `vacuous=false`. A verdict reported at a printed 0% coverage.
+- `--require-coverage` is opt-in and nothing opts in. Neither `accept.sh` nor the
+  `gate` skill passes it, so the "adversarial 22/22" in the green result came
+  from a run where the new refusal was never armed. A gate nobody runs is this
+  block's own vacuum, one level up.
+
+And the corpus baseline had been re-recorded by the same change that was being
+judged, with `19-differential_conformity` moving — which is this block's own
+declared falsifier V-4. Restoring the committed baseline and re-running showed
+genuine drift on vectors 22 and 23: `honest_pass: true → false`, the honest fix
+now failing the suite gate in the duel. That is most likely the *correct*
+consequence of fixing a real bug (below), but "most likely correct" is not a
+justification, and a corpus re-record that lands in the same commit as the result
+it validates is not evidence.
+
+**What the block did contribute, by measuring instead of assuming, and it is
+worth more than the retracted number.** A second vacuity nobody had named: on a
+cold workspace **the budget does not bind at all** — 2164 ms spent against a
+1500 ms bound, stopping `S-empty` rather than `S-budget` — because an unpriced
+purchase is affordable while any pool remains. So every "budgeted" comparison
+ever run on a cold workspace was a comparison of two *exhaustive ladders*. And
+M2b.2's claim that `--budget-basis=predicted` was an alternative route to a
+priced table is false: measured, it refuses at pre-flight when cold.
+
+**Where it lives.** Branch
+[`m2d1-instrument`](https://github.com/coagente/multiverso/tree/m2d1-instrument),
+unmerged, with the five blockers enumerated in its commit message and a line
+saying no number from it may be quoted. The warming design, the race window, the
+inertness predicate and the exercised-vs-divergent split are all real and should
+be finished rather than rediscovered. `main` stays at M2b.2: 20 packages, both
+acceptance scripts, corpus 22/22 against the baseline it was recorded against.
+
+The sequence now reads: adaptive lost (M2b.1), labels said failure not caution
+(M2d), the repair was falsified by its own pre-registration (M2b.2), and the
+instrument built to re-judge it could not yet judge honestly (M2d.1). Four
+blocks, no result, and a measurement apparatus that refuses louder each time.
+That is slower than a number and it is the only kind of number that would have
+been worth anything.
+
 ## 2026-08-17 — M2b.2: a rule that finishes what it starts
 
 **A pre-registered falsifier fired: on the instrument that convicted the rule,
