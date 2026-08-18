@@ -53,6 +53,81 @@ def stable(metrics):
     return {k: metrics[k] for k in STABLE_METRICS if k in metrics}
 
 
+# --------------------------------------------------- coverage (M2d.1) ----
+# WHAT A VECTOR ACTUALLY EXERCISED, per named facet, computed from the
+# RECORDED trace rather than asserted.
+#
+# `verdicts: 22/22` is a true sentence about the ORACLES and it says nothing
+# about any allocation rule. 21 of 22 vectors carry no budget sidecar, so
+# their races are unbounded, `max_oracle_ms` is read never, and no allocation
+# rule can differ; the 22nd carries a budget and a COLD cost table, where
+# nothing is priced, an unpriced purchase is affordable while any pool remains
+# and the budget does not bind either. A verdict count that reported none of
+# that is a count a reader would take for coverage.
+FACETS = ("evidence", "ranking", "allocation", "admission")
+
+
+def coverage_facets(report, receipts_n=0, gates_n=0, admitted=False, worlds_ranked=0):
+    """The four facets, each a fact about what this race REACHED.
+
+    `allocation` is deliberately a CONJUNCTION of three recorded conditions:
+    a budget on the intent, at least one step where an admissible purchase was
+    unaffordable (the budget actually BOUND), and a coverage above zero for
+    whatever rule the race allocated under. Any one of them alone would let a
+    vector claim to exercise an allocation it never reached.
+    """
+    sched = report.get("schedule") or {}
+    cov = sched.get("coverage") or {}
+    steps = sched.get("steps") or []
+    budget_ms = int(sched.get("budget_ms") or 0)
+    binding = any(r.get("admissible") and not r.get("affordable") for r in steps)
+    exercised = int(cov.get("exercised") or 0)
+    out = {
+        "evidence": bool(receipts_n >= 1 and gates_n >= 1),
+        "ranking": bool(worlds_ranked >= 2),
+        "allocation": bool(budget_ms > 0 and binding and exercised > 0),
+        "admission": bool(admitted),
+        # The WHY, so a reader can tell "not exercised because no budget" from
+        # "not exercised because the budget did not bind".
+        "budget_ms": budget_ms,
+        "budget_bound": bool(binding),
+        "rule": cov.get("rule", ""),
+        "baseline": cov.get("baseline", ""),
+        "steps": int(cov.get("steps") or 0),
+        "exercised": exercised,
+        "cost_regime": cov.get("cost_regime", ""),
+    }
+    return out
+
+
+def allocation_note(cov):
+    if not cov:
+        return "not exercised (no trace)"
+    if cov.get("allocation"):
+        return "exercised (%d of %d steps, %s cost table)" % (
+            cov.get("exercised", 0), cov.get("steps", 0), (cov.get("cost_regime") or "unknown"))
+    if not cov.get("budget_ms"):
+        return "not exercised (no budget)"
+    if not cov.get("budget_bound"):
+        return "not exercised (budget never bound)"
+    return "not exercised (the rule under test never fired)"
+
+
+def merge_facets(*covs):
+    """The vector's coverage is the union over its solo and duel races: a
+    facet reached in either is a facet the corpus exercised for that vector."""
+    out = {}
+    for cov in covs:
+        if not cov:
+            continue
+        for k, v in cov.items():
+            if k in FACETS:
+                out[k] = bool(out.get(k)) or bool(v)
+            elif k not in out or not out.get(k):
+                out[k] = v
+    return out
+
+
 def behavior_of(report):
     """The M2a behaviour block, reduced to what a regression suite can pin.
 
@@ -101,6 +176,9 @@ def cmd_solo_aborted(args):
                 "verify_ok": False,
                 "attested": False,
                 "bug_fixed": None,
+                # A race that never started exercised NOTHING, and says so
+                # rather than reporting an absence as a zero.
+                "coverage": {f: False for f in FACETS},
             },
             sort_keys=True,
         )
@@ -127,6 +205,7 @@ def cmd_duel_aborted(args):
                 "deciding_key": "",
                 "escalation": "",
                 "behavior": None,
+                "coverage": {f: False for f in FACETS},
             },
             sort_keys=True,
         )
@@ -165,6 +244,13 @@ def cmd_solo(args):
     verify_ok = args.verify_ok == "true"
     gates_passed = bool(cand and cand.get("pass"))
     bug_fixed = args.landed_truth == "true"
+    cov = coverage_facets(
+        report,
+        receipts_n=len(oracles),
+        gates_n=len((cand or {}).get("gates", [])),
+        admitted=admitted,
+        worlds_ranked=len(report.get("candidates", [])),
+    )
 
     if not gates_passed:
         verdict = "CAUGHT"
@@ -195,6 +281,7 @@ def cmd_solo(args):
                 "verify_ok": verify_ok,
                 "attested": args.attested == "true",
                 "bug_fixed": bug_fixed,
+                "coverage": cov,
                 "verdict": verdict,
             },
             sort_keys=True,
@@ -214,10 +301,27 @@ def cmd_duel(args):
     elif winner and winner == args.honest:
         who = "honest"
     trace = report.get("trace") or [{}]
+    if not trace:
+        trace = [{}]
+    cov = coverage_facets(
+        report,
+        receipts_n=1,
+        gates_n=len((cheat or {}).get("gates", [])),
+        admitted=False,
+        # THE RANKING FACET: how many worlds reached the ranking walk. A
+        # RECORDED DECIDING KEY is the witness that the walk ran at all — a
+        # race that ended before it (a pre-flight abort, a solo with one
+        # world) has none, and reporting `ranking` for it would claim a
+        # comparison the race never made. `gate_pass` is a deciding key like
+        # any other: a duel decided because one candidate failed a hard gate
+        # DID rank two worlds.
+        worlds_ranked=(len(report.get("candidates", [])) if trace[0].get("key") else 0),
+    )
     print(
         json.dumps(
             {
                 "kind": "duel-round",
+                "coverage": cov,
                 "vector": args.vector,
                 "round": args.round,
                 "decision": report.get("type"),
@@ -264,6 +368,7 @@ def cmd_duel_merge(args):
                     "escalation": "",
                     "behavior": None,
                     "abort_reason": first.get("abort_reason", ""),
+                    "coverage": {f: False for f in FACETS},
                     "verdict": "PREFLIGHT_ABORT",
                 },
                 sort_keys=True,
@@ -317,6 +422,7 @@ def cmd_duel_merge(args):
                 "decided_at": first["decided_at"],
                 "escalation": first.get("escalation", ""),
                 "behavior": first.get("behavior"),
+                "coverage": merge_facets(*[r.get("coverage") for r in rounds]),
                 "verdict": verdict,
             },
             sort_keys=True,
@@ -337,7 +443,24 @@ def cmd_render(args):
         "schema": "multiverso.dev/adversarial-report/v0",
         "corpus": "testdata/adversarial",
         "vectors": [
-            {"vector": name, "solo": data.get("solo"), "duel": data.get("duel")}
+            {
+                "vector": name,
+                "solo": data.get("solo"),
+                "duel": data.get("duel"),
+                # M2d.1 decision 13: COVERAGE IS PART OF THE RECORDED
+                # BASELINE, so LOSING A MEASUREMENT IS DRIFT. If a `.budget`
+                # sidecar is deleted, if a workspace stops warming, or if a
+                # policy change makes a vector die at rung O-1 before it
+                # reaches the scheduler, the observed coverage stops matching
+                # the recorded coverage and `report.py diff` exits non-zero —
+                # which makes a loss of measurement as visible as a change of
+                # verdict, and is the cheapest possible way to stop the vacuum
+                # returning.
+                "coverage": merge_facets(
+                    (data.get("solo") or {}).get("coverage"),
+                    (data.get("duel") or {}).get("coverage"),
+                ),
+            }
             for name, data in sorted(rows.items())
         ],
     }
@@ -420,7 +543,58 @@ def cmd_render(args):
         "behavioural split escalated (M2a on_behavioral_split) for: %s"
         % (", ".join(split) if split else "none")
     )
+
+    # ------------------------------------------------------------------
+    # M2d.1 decision 13: THE SUMMARY STOPS REPORTING 22/22 ALONE.
+    #
+    # A verdict match on a vector that never reached the allocation says
+    # nothing about any allocation rule, and a reader has no way to infer that
+    # from a verdict count. So the facets are printed beside it, always, with
+    # the exercising set NAMED — and the sentence underneath says what the
+    # unexercised majority does and does not license.
+    # ------------------------------------------------------------------
     print()
+    counts = {f: [] for f in FACETS}
+    for entry in report["vectors"]:
+        cov = entry.get("coverage") or {}
+        for f in FACETS:
+            if cov.get(f):
+                counts[f].append(entry["vector"])
+    n = len(report["vectors"])
+    print("COVERAGE — what this corpus actually exercised (M2d.1 decision 13):")
+    print("  verdicts: %d/%d rows compared against the recorded baseline" % (n, n))
+    parts = []
+    for f in FACETS:
+        got = counts[f]
+        cell = "%s %d/%d" % (f, len(got), n)
+        if f == "allocation" and got:
+            cell += " (%s)" % ", ".join(v.split("-")[0] for v in got)
+        parts.append(cell)
+    print("  coverage: " + " . ".join(parts))
+    alloc = counts["allocation"]
+    if not alloc:
+        print("  ALLOCATION IS EXERCISED BY NO VECTOR. Every verdict above is a statement about the")
+        print("  ORACLES and the TRUST BOUNDARY, and carries NO information about any allocation rule.")
+    else:
+        print("  ALLOCATION IS EXERCISED BY %d VECTOR(S). A verdict match on the other %d says nothing"
+              % (len(alloc), n - len(alloc)))
+        print("  about any allocation rule.")
+    for entry in report["vectors"]:
+        cov = entry.get("coverage") or {}
+        if not cov.get("allocation"):
+            print("    %-28s allocation: %s" % (entry["vector"], allocation_note(cov)))
+    print()
+
+    if args.require_coverage:
+        want = args.require_coverage
+        if want not in FACETS:
+            raise SystemExit("render: --require-coverage %s is not one of %s" % (want, ", ".join(FACETS)))
+        if not counts[want]:
+            print("VACUOUS: --require-coverage %s and the exercising set is EMPTY." % want)
+            print("  Every verdict above is true and none of it is evidence about %s. This is the" % want)
+            print("  gate M2b.2 needed when it called this corpus that block's blocking gate: had it")
+            print("  existed, the gate would have failed honestly instead of passing vacuously.")
+            raise SystemExit(5)
 
 
 # --------------------------------------------------------------- diff ----
@@ -448,10 +622,29 @@ DUEL_KEYS = ("policy", "cheat_pass", "honest_pass", "cheat_gate", "honest_gate",
              "deciding_key", "escalation", "behavior", "verdict")
 
 
+# M2d.1 decision 13: the FACETS are compared, the diagnostics beside them are
+# not. `budget_ms` and `steps` are wall-clock-adjacent and would make the
+# baseline a stopwatch; whether a facet was REACHED is a fact about the corpus.
+COVERAGE_KEYS = FACETS
+
+
 def cmd_diff(args):
     base = {v["vector"]: v for v in load(args.baseline)["vectors"]}
     obs = {v["vector"]: v for v in load(args.observed)["vectors"]}
+    # --allow is the DECLARED CHANGE path (M2d.1 decision 14). A moved verdict
+    # blocks a block "regardless of what the numbers say", so the only honest
+    # thing available is to re-record the baseline as this block's own declared
+    # change: the old row is printed BESIDE the new one for each declared
+    # vector, the reason is stated in the same output, and A MOVE IN ANY OTHER
+    # VECTOR IS STILL A FAILURE. Without the second half, --allow would be a
+    # licence to launder any drift through a re-record.
+    allowed = [a for a in (args.allow or "").split(",") if a.strip()]
+
+    def declared(name):
+        return any(name.startswith(a.strip()) for a in allowed)
+
     drift = []
+    declared_rows = []
     for name, got in sorted(obs.items()):
         if args.only and not name.startswith(args.only):
             continue
@@ -459,6 +652,18 @@ def cmd_diff(args):
         if want is None:
             drift.append("%s: not in the recorded baseline" % name)
             continue
+        # COVERAGE DRIFT IS DRIFT. A baseline recorded before this block has
+        # no coverage block at all, and ABSENT IS ABSENT: it is reported as
+        # not-recorded rather than as a loss, because a baseline that never
+        # measured a facet cannot have lost it.
+        wc, gc = want.get("coverage"), got.get("coverage") or {}
+        if wc is not None:
+            for key in COVERAGE_KEYS:
+                if bool(wc.get(key)) != bool(gc.get(key)):
+                    drift.append(
+                        "%s/coverage.%s: baseline %r, observed %r — a LOST MEASUREMENT is as much "
+                        "drift as a changed verdict" % (name, key, bool(wc.get(key)), bool(gc.get(key)))
+                    )
         for mode, keys in (("solo", SOLO_KEYS), ("duel", DUEL_KEYS)):
             w, g = want.get(mode) or {}, got.get(mode) or {}
             if bool(w) != bool(g):
@@ -466,12 +671,25 @@ def cmd_diff(args):
                 continue
             for key in keys:
                 if w.get(key) != g.get(key):
-                    drift.append(
-                        "%s/%s.%s: baseline %r, observed %r" % (name, mode, key, w.get(key), g.get(key))
-                    )
+                    line = "%s/%s.%s: baseline %r, observed %r" % (name, mode, key, w.get(key), g.get(key))
+                    (declared_rows if declared(name) else drift).append(line)
     if not args.only:
         for name in sorted(set(base) - set(obs)):
             drift.append("%s: in the baseline but not observed" % name)
+
+    if declared_rows:
+        print("DECLARED CHANGE (%s) — the old row beside the new, and the reason:" % ", ".join(allowed))
+        for line in declared_rows:
+            print("  " + line)
+        print("  REASON: M2d.1 decision 14. Vectors 22 and 23 gained a `.budget` sidecar and 22, 23")
+        print("  and 24 gained a `.warm` sidecar, so for the first time those three races carry a")
+        print("  BINDING budget against a PRICED cost table. Before this block 21 of 22 vectors")
+        print("  carried no budget at all, and the 22nd carried one against a cold table where an")
+        print("  unpriced purchase is affordable while any pool remains — so the budget did not bind")
+        print("  and no allocation rule could differ. The moved rows are the allocation being")
+        print("  exercised, not the trust boundary moving: every other vector is unchanged, which")
+        print("  this diff asserts rather than assumes.")
+        print()
 
     if not drift:
         print("OK: adversarial corpus matches the recorded baseline (%d vectors)" % len(obs))
@@ -531,12 +749,23 @@ def main():
     p = sub.add_parser("render")
     p.add_argument("--results", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--require-coverage",
+        default="",
+        help="exit 5 when NO vector exercised this facet (evidence|ranking|allocation|admission)",
+    )
     p.set_defaults(fn=cmd_render)
 
     p = sub.add_parser("diff")
     p.add_argument("--baseline", required=True)
     p.add_argument("--observed", required=True)
     p.add_argument("--only", default="")
+    p.add_argument(
+        "--allow",
+        default="",
+        help="comma-separated vector prefixes whose moves are a DECLARED CHANGE: they are printed "
+        "old-beside-new with the reason, and a move in ANY OTHER vector is still a failure",
+    )
     p.set_defaults(fn=cmd_diff)
 
     args = ap.parse_args()

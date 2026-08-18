@@ -2139,7 +2139,15 @@ set -e
 # this step ran beside a busy test suite. The assertion that carries the
 # meaning is "a verdict was produced at or above the documented floor".
 COMPARE_R3="$WORK/compare-r3.json"
-if bash "$ROOT/scripts/schedule-compare.sh" --replicates 5 --level B2 --warmup 1 --json >"$COMPARE_R3" 2>"$WORK/compare-r3.err"; then
+# --warmup 2, NOT 1, AND THAT IS AN M2d.1 FINDING RATHER THAN A TUNING.
+# `testdata/toyrepo` carries two candidates, so ONE warm-up race yields two
+# samples per kind — below `MinSamples` = 3 — and every rung stays priced
+# `declared-rank`. On a cold table an unpriced purchase is affordable while any
+# pool remains (M2b.1 decision 5), so THE BUDGET DOES NOT BIND, and this step
+# was asserting a verdict about two arms that were both the exhaustive ladder.
+# The comparison now exits 5 (VACUOUS) at --warmup 1, which is the refusal
+# working; two races price the table and the step measures what it claims to.
+if bash "$ROOT/scripts/schedule-compare.sh" --replicates 5 --level B2 --warmup 2 --json >"$COMPARE_R3" 2>"$WORK/compare-r3.err"; then
   python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -2160,12 +2168,24 @@ print("m2b1-6f: R=%d, kept %d, disagreement %.0f%%, noise floor %.0f%%"
 ' "$COMPARE_R3" || fail "m2b1-6f: the replicated comparison printed no usable verdict"
 else
   code=$?
-  [ "$code" = "77" ] || fail "m2b1-6f: schedule-compare.sh --replicates 3 exited $code
+  [ "$code" = "77" ] || fail "m2b1-6f: schedule-compare.sh --replicates 5 exited $code
+(exit 5 is M2d.1's VACUOUS: the budget never bound, so both arms were the exhaustive ladder
+and there is no verdict to assert. Warm the fixture rather than lowering the bar.)
 $(cat "$WORK/compare-r3.err")"
   echo "SKIP m2b1-6f (verdict half): this binary does not expose both budgeted arms"
 fi
 set +e
-bash "$ROOT/scripts/schedule-compare.sh" --replicates 1 --warmup 1 --strict >"$WORK/compare-r1.out" 2>&1
+# Warmed for the same reason: this half asserts that the ANECDOTE refusal fires
+# at R = 1, and a cold run would be refused ONE LEVEL EARLIER as VACUOUS — a
+# true refusal, but not the one this step is about. The two refusals are
+# siblings and the harness prints whichever is the stronger statement: "not a
+# measurement of anything" outranks "a thin measurement".
+# --level B2, not the default B3. B3 is S — the exhaustive spend — where the
+# budget cannot bind, `voc` is provably the M1 ladder (M2b decision 13's null
+# case) and M2d.1's coverage rule correctly refuses the comparison as VACUOUS
+# one level EARLIER than the anecdote rule. Both refusals are real; this half
+# is about the ANECDOTE one, so it is run where the budget binds.
+bash "$ROOT/scripts/schedule-compare.sh" --replicates 1 --level B2 --warmup 2 --strict >"$WORK/compare-r1.out" 2>&1
 R1_CODE=$?
 set -e
 [ "$R1_CODE" = "3" ] || [ "$R1_CODE" = "77" ] \
@@ -2827,6 +2847,240 @@ trade-off: withdraw the rule from the default until the shipped default policy d
 on_evidence_incomplete or the reservation refuses to commit while the rivals' decision-relevant
 hard gates are unaffordable."
 done
+
+# ===========================================================================
+# M2d.1 — THE INSTRUMENT CAN TEST: warming, the refusal, and coverage.
+#
+# Five steps, and NONE of them changes the shipped default or the allocation
+# rule. m2b2-8e above stands exactly as it is.
+#
+# The pair (9a, 9b) is the whole design of this gate. A gate that only ever
+# refuses is M2b.2 F-9's rubber stamp — "a freeze that is refused on every run
+# trains every reader to pass --unfreeze, which the file's own notes call worse
+# than not checking" — and a gate that only ever passes is what we already had.
+# Both halves or neither.
+# ===========================================================================
+
+# --- m2d1-9a. THE REFUSAL FIRES. The block's failing test, written first.
+#
+# This is a re-run of the EXACT configuration whose output M2b.2's BUILDLOG had
+# to disclaim in prose: a cold workspace, a binding budget, voc against voc2.
+# With nothing priced, `finish_ms` is unknown, the unpriced fallback fires on
+# every step, voc2 IS voc — and, the failure nobody had named, an unpriced
+# purchase is affordable while any pool remains, so the budget does not bind
+# either and BOTH arms are the exhaustive ladder. The harness must refuse to
+# report a comparison between two rules when the rule under test provably never
+# fired: exit 5, the banner, no verdict, and the recorded field NAMED. ---
+COLD_OUT="$WORK/m2d1-9a.out"
+set +e
+bash "$ROOT/scripts/schedule-compare.sh" --warmup 0 --budget 1500 --replicates 1 \
+  --arm-a --selector=voc --arm-b --selector=voc2 >"$COLD_OUT" 2>&1
+COLD_RC=$?
+set -e
+[ "$COLD_RC" = "5" ] || fail "m2d1-9a: the cold voc-vs-voc2 comparison exited $COLD_RC, want 5 (VACUOUS).
+A comparison at 0% coverage is not a thin measurement — it is not a measurement of anything.
+$(tail -30 "$COLD_OUT")"
+grep -q '^VACUOUS' "$COLD_OUT" || fail "m2d1-9a: no VACUOUS banner:
+$(tail -30 "$COLD_OUT")"
+grep -q 'NO VERDICT' "$COLD_OUT" || fail "m2d1-9a: the refusal did not say NO VERDICT"
+grep -q 'unpriced-fallback' "$COLD_OUT" \
+  || fail "m2d1-9a: the refusal does not NAME the recorded commit_basis that proves it:
+$(tail -30 "$COLD_OUT")"
+grep -q 'unpriced-fallback(.*pytest-suite.*)' "$COLD_OUT" \
+  || fail "m2d1-9a: the refusal does not name the UNPRICED KINDS"
+# NO VERDICT MEANS NO VERDICT: the words the ordinary report ends with must be
+# absent, or the refusal is a caption over a comparison that was printed anyway.
+! grep -q '^verdict:' "$COLD_OUT" || fail "m2d1-9a: a verdict was printed under a VACUOUS banner"
+! grep -q 'disagreement rate' "$COLD_OUT" || fail "m2d1-9a: the paired comparison was printed anyway"
+echo "m2d1-9a: the cold comparison is REFUSED (exit 5), names unpriced-fallback and prints no verdict"
+
+# --- m2d1-9b. THE REFUSAL DOES NOT FIRE ON A WARMED RUN — the anti-rubber-
+# stamp half. It asserts coverage above 0 with the per-witness breakdown, and
+# asserts NOTHING about which way the comparison went: MEASURED-NULL and an
+# ordinary verdict are both a pass. A refusal that fired on every run would be
+# the rubber stamp F-9 already named. ---
+WARM_OUT="$WORK/m2d1-9b.out"
+set +e
+bash "$ROOT/scripts/schedule-compare.sh" --warmup 2 --budget 1500 --replicates 1 \
+  --arm-a --selector=voc --arm-b --selector=voc2 >"$WARM_OUT" 2>&1
+WARM_RC=$?
+set -e
+[ "$WARM_RC" = "0" ] || fail "m2d1-9b: the WARMED comparison exited $WARM_RC, want 0.
+If it exited 5 the warming does not warm or the witnesses do not witness (falsifier V-3).
+$(tail -40 "$WARM_OUT")"
+! grep -q '^VACUOUS' "$WARM_OUT" || fail "m2d1-9b: the refusal fired on a warmed run (V-3):
+$(tail -40 "$WARM_OUT")"
+grep -q 'COVERAGE — did the rule under test ever fire' "$WARM_OUT" \
+  || fail "m2d1-9b: no coverage block was printed"
+for W in W2 W3 W4 W5; do
+  grep -q "      $W " "$WARM_OUT" || fail "m2d1-9b: the per-witness breakdown is missing $W"
+done
+grep -q 'cost table: WARM' "$WARM_OUT" || fail "m2d1-9b: the warmed run did not report a WARM cost table"
+python3 - "$WARM_OUT" <<'M2D1_9B' || fail "m2d1-9b: the warmed comparison reported 0% coverage on BOTH arms"
+import re, sys
+text = open(sys.argv[1]).read()
+pct = [int(m) for m in re.findall(r"steps \((\d+)%\)", text)]
+assert pct, ("no coverage percentage was printed", text[-2000:])
+assert max(pct) > 0, ("every arm reported 0% coverage on a warmed run", pct)
+print("m2d1-9b: coverage above zero on a warmed run: %s" % pct)
+M2D1_9B
+echo "m2d1-9b: the warmed comparison is NOT refused (exit 0) and prints coverage with all four witnesses"
+
+# --- m2d1-9c. WARMING IS CHARGED TO NOBODY, AND THE WINDOW HOLDS.
+#
+# The warm-up is a DIFFERENT INTENT and a DIFFERENT RACE, and the budget is an
+# intent field with a per-race pool, so its spend is structurally outside every
+# arm's pool. What has to be got right is the REPORT: a workspace that holds
+# both races must report the measured race's spend alone, and `mvo audit` must
+# stay OK over the whole ledger, because the window is a READ and reads
+# invalidate nothing. ---
+WARMREPO="$WORK/m2d1-warm"
+mkdir -p "$WARMREPO"
+cp -R "$ROOT/testdata/toyrepo/." "$WARMREPO/"
+rm -rf "$WARMREPO/__pycache__" "$WARMREPO/.pytest_cache"
+$GIT -C "$WARMREPO" init -q -b main
+$GIT -C "$WARMREPO" add -A
+$GIT -C "$WARMREPO" commit -qm "m2d1 warm baseline"
+"$MVO" init --dir "$WARMREPO" >/dev/null
+# TWO warm-ups, and the count is the fixture's rather than a preference:
+# `testdata/toyrepo` carries two candidates, so one race yields two samples per
+# kind — below `MinSamples` = 3 — and the table would stay `declared-rank`.
+# That is decision 1's whole argument for making warming a PREDICATE ON THE
+# COST TABLE rather than a count, and this step is where the count bites.
+for _w in 1 2; do
+  W_INTENT="$("$MVO" intent new --dir "$WARMREPO" --title "m2d1-9c warm-up $_w" --budget-oracle-ms 0)"
+  "$MVO" race "$W_INTENT" --dir "$WARMREPO" --agent script --patches "$WARMREPO/patches" \
+    --schedule=fixed >/dev/null || fail "m2d1-9c: the warm-up race failed"
+done
+W_RECEIPTS="$(sqlite3 "$WARMREPO/.multiverso/ledger.db" \
+  "SELECT count(*) FROM events WHERE type='receipt.recorded';")"
+[ "$W_RECEIPTS" -ge 1 ] || fail "m2d1-9c: the warm-up bought nothing, so there is nothing to keep out of the arm"
+M_INTENT="$("$MVO" intent new --dir "$WARMREPO" --title "m2d1-9c measured" --budget-oracle-ms 1500)"
+"$MVO" race "$M_INTENT" --dir "$WARMREPO" --agent script --patches "$WARMREPO/patches" \
+  --selector voc2 >/dev/null || fail "m2d1-9c: the measured race failed"
+INTENT_W="$W_INTENT" INTENT_M="$M_INTENT" python3 - "$WARMREPO" <<'M2D1_9C' \
+  || fail "m2d1-9c: the arm's reported spend includes warm-up milliseconds (falsifier V-5)"
+import json, os, sqlite3, sys
+repo = sys.argv[1]
+db = sqlite3.connect(os.path.join(repo, ".multiverso", "ledger.db"))
+rows = db.execute("SELECT type, cast(payload AS text), payload_dig FROM events ORDER BY seq").fetchall()
+
+worlds = {}
+receipts = []
+for typ, payload, dig in rows:
+    if typ == "world.created":
+        worlds[dig] = json.loads(payload)["intent"]
+    elif typ == "receipt.recorded":
+        r = json.loads(payload)
+        receipts.append((r["world"], int(r.get("cost", {}).get("wall_ms", 0))))
+
+warm, measured = os.environ["INTENT_W"], os.environ["INTENT_M"]
+# INTENT_W names the LAST warm-up; every receipt that is not the measured
+# race's is warm-up spend, which is what the arm must not be charged.
+warm_ms = sum(ms for w, ms in receipts if worlds.get(w) != measured)
+meas_ms = sum(ms for w, ms in receipts if worlds.get(w) == measured)
+assert warm_ms > 0, "the warm-up spent nothing"
+assert meas_ms > 0, "the measured race spent nothing"
+
+# The WARM INTENT carries max_oracle_ms 0: the warm-up is unbudgeted, so it can
+# never take money from an arm's pool, and the measured race carries the bound
+# the cell's caption claims.
+intents = {dig: json.loads(p) for t, p, dig in rows if t == "intent.created"}
+assert intents[warm]["budget"]["max_oracle_ms"] == 0, intents[warm]["budget"]
+assert intents[measured]["budget"]["max_oracle_ms"] == 1500, intents[measured]["budget"]
+
+# The measured race's own schedule.finished reports ITS spend alone, not the
+# workspace's: a number assembled across two races would describe a race
+# nobody ran.
+starts = [i for i, (t, p, _) in enumerate(rows)
+          if t == "race.started" and json.loads(p).get("intent") == measured]
+assert starts, "no race.started for the measured intent"
+fin = [json.loads(p) for t, p, _ in rows[starts[-1]:] if t == "schedule.finished"]
+assert fin, "the measured race recorded no schedule.finished"
+spent = fin[-1]["budget"]["spent_ms"]
+assert spent < warm_ms + meas_ms, (
+    "the arm was charged the warm-up too", spent, warm_ms, meas_ms)
+print("m2d1-9c: warm-up %d ms (unbudgeted, charged to no arm), measured race %d ms, "
+      "schedule.finished reports %d ms" % (warm_ms, meas_ms, spent))
+M2D1_9C
+"$MVO" audit --dir "$WARMREPO" | grep -q '^OK:' \
+  || fail "m2d1-9c: mvo audit is not OK over a warmed workspace — the ledger must be APPENDED to and never edited"
+echo "m2d1-9c: the warm-up is unbudgeted, uncharged and audited; the window narrows measurement and not the chain"
+
+# --- m2d1-9d. THE DETECTORS STILL SEE EVERYTHING. The window narrows what is
+# MEASURED and never what is SCANNED: a detector that respected the window
+# would stop looking at precisely the races nobody is reading, which is where a
+# leak would be least likely to be noticed. Asserted here as the property that
+# `mvo audit` and the CAS sweep cover BOTH races' bytes. ---
+"$MVO" audit --dir "$WARMREPO" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["cas_checked"] > 0, r
+assert r["cas_missing"] == [] and r["cas_corrupt"] == [], r
+assert r["events"] > 0, r
+print("m2d1-9d: audit scanned %d event(s) and %d CAS object(s) across BOTH races" % (r["events"], r["cas_checked"]))
+' || fail "m2d1-9d: the audit sweep does not cover a warmed workspace's full ledger"
+
+# --- m2d1-9e. COVERAGE IS DERIVED, AND ABSENCE IS ABSENCE.
+#
+# A ladder trace reports "—" (it computes no scarcity test at all); a voc2
+# trace from THIS binary reports a number with its baseline NAMED; two
+# computations over one trace agree byte-for-byte; and `explain --schedule`
+# RENDERS the figure rather than recomputing a score, which extends step 5d's
+# rule to the coverage line. ---
+L_INTENT="$("$MVO" intent new --dir "$WARMREPO" --title "m2d1-9e ladder" --budget-oracle-ms 1500)"
+"$MVO" race "$L_INTENT" --dir "$WARMREPO" --agent script --patches "$WARMREPO/patches" \
+  --schedule=fixed-budget >/dev/null || fail "m2d1-9e: the ladder race failed"
+"$MVO" explain "$L_INTENT" --dir "$WARMREPO" --json --schedule | python3 -c '
+import json, sys
+cov = (json.load(sys.stdin)["schedule"] or {}).get("coverage") or {}
+assert cov.get("rule") == "ladder", cov
+assert not cov.get("applicable"), ("a ladder race reported an applicable coverage", cov)
+assert cov.get("steps", 0) == 0, cov
+' || fail "m2d1-9e: a ladder trace does not report the not-applicable answer"
+# CAPTURED, NOT PIPED. `grep -q` exits on its first match and the coverage line
+# is printed mid-report, so under `set -o pipefail` the writer's EPIPE turns a
+# HIT into a failure — the same trap step m2b1-6e already documents.
+LADDER_COV="$("$MVO" explain "$L_INTENT" --dir "$WARMREPO" --schedule)"
+printf '%s' "$LADDER_COV" | grep -q 'coverage:   — (computes no scarcity test)' \
+  || fail "m2d1-9e: the rendered ladder line does not say the figure is not applicable:
+$(printf '%s' "$LADDER_COV" | sed -n '1,12p')"
+COV1="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --json --schedule \
+  | python3 -c 'import json,sys; print(json.dumps((json.load(sys.stdin)["schedule"] or {}).get("coverage"), sort_keys=True))')"
+COV2="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --json --schedule \
+  | python3 -c 'import json,sys; print(json.dumps((json.load(sys.stdin)["schedule"] or {}).get("coverage"), sort_keys=True))')"
+[ "$COV1" = "$COV2" ] || fail "m2d1-9e: two computations of coverage over ONE trace disagree:
+$COV1
+$COV2"
+printf '%s' "$COV1" | python3 -c '
+import json, sys
+cov = json.load(sys.stdin)
+assert cov["rule"] == "voc2", cov
+assert cov["baseline"] == "voc", ("the baseline a 0% would mean is not named", cov)
+assert cov["known"] and cov["applicable"], cov
+assert cov["steps"] > 0, cov
+# The workspace was warmed by m2d1-9c, so the rule under test DID fire and the
+# derived figure must say so. A `0 of N` here would mean warming did not warm.
+assert cov["exercised"] > 0, ("the measured race on a WARMED workspace reports 0% coverage", cov)
+ids = {w["id"] for w in cov["witnesses"]}
+assert ids == {"W2", "W3", "W4", "W5"}, ids
+print("m2d1-9e: voc2 coverage %d of %d step(s), baseline %s, four witnesses reported separately"
+      % (cov["exercised"], cov["steps"], cov["baseline"]))
+' || fail "m2d1-9e: the derived coverage report is missing its rule, baseline or witnesses"
+# THE RENDERED LINE RECOMPUTES NOTHING: racing again moves the workspace's
+# fitted coefficients, and the coverage of a PAST race must not move with them
+# (step 5d's rule, extended to the coverage line).
+COVLINE_BEFORE="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep '^  coverage:')"
+X_INTENT="$("$MVO" intent new --dir "$WARMREPO" --title "m2d1-9e cost drift" --budget-oracle-ms 0)"
+"$MVO" race "$X_INTENT" --dir "$WARMREPO" --agent script --patches "$WARMREPO/patches" \
+  --schedule=fixed >/dev/null || fail "m2d1-9e: the cost-drift race failed"
+COVLINE_AFTER="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep '^  coverage:')"
+[ "$COVLINE_BEFORE" = "$COVLINE_AFTER" ] \
+  || fail "m2d1-9e: the coverage line MOVED after the workspace's cost fit moved — it is being
+recomputed rather than derived from the recorded trace:
+before: $COVLINE_BEFORE
+after:  $COVLINE_AFTER"
+echo "m2d1-9e: coverage is derived, deterministic, rendered and unmoved by a later fit"
 
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"

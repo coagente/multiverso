@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/coagente/multiverso/internal/object"
+	"github.com/coagente/multiverso/internal/schedule"
 	"github.com/coagente/multiverso/internal/signing"
 )
 
@@ -87,6 +88,40 @@ type RunManifest struct {
 	// came out 1961 / 1537 / 983 ms and B1 collapsed to 0 on a different
 	// instance each time.
 	ReferenceSpread []string `json:"reference_spread"`
+
+	// ---------------------------------------------------------------------
+	// M2d.1 — THE INSTRUMENT'S OWN RECORD.
+	//
+	// Warmups is what warming cost and what it produced, per (instance,
+	// policy, binary) template — an uncharged cost that is also unreported is
+	// a cost nobody can audit (decision 4). RuleCoverage is decision 10's
+	// block: what fraction of the recorded steps exercised the rule under
+	// test, per witness, printed ALWAYS and above the metrics. Vacuous is
+	// decision 7's named non-verdict.
+	// ---------------------------------------------------------------------
+
+	Warmups []WarmReport `json:"warmups"`
+	// CoverageByArm is one report per RACED arm, never pooled across arms:
+	// two arms' coverage are two numbers and averaging them would be a number
+	// about neither.
+	CoverageByArm map[string]schedule.CoverageReport `json:"coverage_by_arm"`
+	// RuleCoverage is the report for THE RULE UNDER TEST — the adaptive arm's
+	// selector, which is what a cell's caption is a claim about.
+	RuleCoverage *schedule.CoverageReport `json:"rule_coverage,omitempty"`
+	// Vacuous is decision 7's refusal: the rule under test provably never
+	// fired, so NO METRIC LINE IS PRINTED AT ALL and the run exits 5.
+	Vacuous bool `json:"vacuous"`
+	// AllowVacuous is the escape hatch, and it does not suppress the caption:
+	// a flag that silences a refusal must not also silence its reason.
+	AllowVacuous bool `json:"allow_vacuous"`
+	// CostTableDrift names arms whose cost table was NOT byte-equal to the
+	// template's (falsifier V-6). A nonempty list means every per-arm
+	// difference in this cell is confounded with pricing.
+	CostTableDrift []string `json:"cost_table_drift"`
+	// Divergence is decision 6's PAIRED question, kept separate from
+	// coverage: coverage comes from one trace, divergence from the pair, and
+	// collapsing them would swallow M2b.2's genuine measured null.
+	Divergence []string `json:"purchase_order_divergence"`
 
 	Rows    []Row        `json:"rows"`
 	Metrics []ArmMetrics `json:"metrics"`
@@ -218,7 +253,20 @@ func (m RunManifest) Render() []string {
 			out = append(out, "    refusal: "+r)
 		}
 	}
-	// 2. The metrics — or nothing.
+	// 2. THE INSTRUMENT'S OWN BLOCK, above the metrics — the skip census's
+	// position, and for the skip census's reason. A metric printed without
+	// its coverage block is a metric this harness may not print (decision 10).
+	out = append(out, m.InstrumentLines()...)
+
+	// 2b. THE REFUSAL. A vacuous cell prints NO METRIC LINE AT ALL, which is
+	// M2d decision 1b's own shape: the assertion is on the absence of a
+	// number, and that is the only way to test the rule.
+	if m.Vacuous && !m.AllowVacuous {
+		out = append(out, ArmMapping()...)
+		return out
+	}
+
+	// 3. The metrics — or nothing.
 	scored := 0
 	for _, mm := range m.Metrics {
 		scored += mm.Instances
@@ -253,6 +301,49 @@ func (m RunManifest) Render() []string {
 	out = append(out, "labels on every number above: "+strings.Join(m.Captions, " "))
 	for _, n := range m.Notes {
 		out = append(out, "note: "+n)
+	}
+	return out
+}
+
+// InstrumentLines is M2d.1's block: what warming cost, what fraction of the
+// recorded steps exercised the rule under test, per witness, and — when the
+// answer is "none" — the named non-verdict instead of a comparison.
+//
+// IT IS PRINTED ALWAYS, INCLUDING AT 100 %. A number that appears only when
+// it is bad is a number nobody learns to read, and this one is printed beside
+// ORACLE-BUDGET-MATCHED and SYNTHETIC-CANDIDATES, which are there for the
+// same reason.
+func (m RunManifest) InstrumentLines() []string {
+	var out []string
+	for _, w := range m.Warmups {
+		for _, l := range w.Lines() {
+			out = append(out, "instrument: "+l)
+		}
+	}
+	for _, d := range m.CostTableDrift {
+		out = append(out, "COST TABLE NOT BYTE-EQUAL ACROSS ARMS: "+d+
+			" — every per-arm difference in this cell is confounded with pricing (V-6)")
+	}
+	for _, id := range sortedKeys(m.CoverageByArm) {
+		c := m.CoverageByArm[id]
+		out = append(out, fmt.Sprintf("rule coverage [%s]: %s", id, c.Summary()))
+	}
+	if m.RuleCoverage != nil {
+		for _, l := range m.RuleCoverage.Lines() {
+			out = append(out, l)
+		}
+	}
+	for _, d := range m.Divergence {
+		out = append(out, "purchase-order divergence: "+d)
+	}
+	if m.Vacuous && m.RuleCoverage != nil {
+		out = append(out, m.RuleCoverage.VacuityBanner()...)
+		if m.AllowVacuous {
+			// The flag that suppresses a refusal must not also suppress its
+			// caption: every table below carries the stamp.
+			out = append(out, "  --allow-vacuous was passed: the tables below are stamped VACUOUS "+
+				"and may not be quoted as a measurement of any allocation rule")
+		}
 	}
 	return out
 }
@@ -320,6 +411,19 @@ func RenderArm(m ArmMetrics) []string {
 	return out
 }
 
+// costRegimeCaption renders decision 11's caption. It is part of the cell
+// NAME rather than a warning above it, because a warning above a pooled table
+// is exactly what M2d decision 8 amendment 3 already found not to work.
+func costRegimeCaption(regime string) string {
+	switch regime {
+	case schedule.CostRegimeWarm:
+		return "WARM-COST-TABLE"
+	case schedule.CostRegimeCold:
+		return "COLD-COST-TABLE"
+	}
+	return "COST-TABLE-" + strings.ToUpper(regime)
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "—"
@@ -345,12 +449,22 @@ func orDash(s string) string {
 // pooled the numbers anyway, which is precisely the untagged aggregate
 // decision 8 exists to stop. Splitting here makes every printed cell uniform
 // by construction and puts the policy in the cell's own name.
+// The COST-REGIME half is M2d.1 decision 11, and it is the same argument a
+// third time. Warming changes what every arm can AFFORD — on a cold workspace
+// nothing is priced, so an unpriced purchase is affordable while any pool
+// remains and the budget does not bind at all — so a warm cell and a cold
+// cell are two experiments. The regime is derived from the RECORDED cost
+// table, so it is read off the artifact rather than off the flag that was
+// passed, and it lands in the cell's own name exactly as the policy does.
 func FamilyColumns(rows []Row) map[string][]Row {
 	out := map[string][]Row{}
 	for _, r := range rows {
 		key := r.Family
 		if r.Policy != "" {
 			key += "@" + r.Policy
+		}
+		if r.CostRegime != "" {
+			key += " " + costRegimeCaption(r.CostRegime)
 		}
 		out[key] = append(out[key], r)
 	}

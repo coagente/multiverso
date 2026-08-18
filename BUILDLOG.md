@@ -2,6 +2,212 @@
 
 > Public journal of building Multiverso. Newest first. See [PRD.md](PRD.md) for the plan; milestones M0–M4.
 
+## 2026-08-17 — M2d.1: the instrument can test (warming, the refusal, coverage)
+
+**This block exists because of one sentence in [M2b.2](#2026-08-17--m2b2-a-rule-that-finishes-what-it-starts)'s
+own entry, and the sentence is about the instrument rather than about the rule.**
+*"Every eval cell is identical between the two rules"* — because `mvo-eval` built a
+fresh workspace per instance, so no oracle kind had a local fit, `finish_ms` was
+UNKNOWN, and M2b.2 decision 1's unpriced fallback fired on every step. The
+corpus had the same hole from the other side: 21 of 22 vectors carried no budget
+at all. **`adversarial 22/22` and `FAR unchanged` were true statements about
+`voc`**, and neither carried a bit of information about the rule M2b.2 added.
+
+**The generalization is worse than the instance, and it is why this got its own
+block.** The harness could not test *any* allocation rule — not `voc2`, not its
+successor, not a per-world cost signal — and the vacuity was invisible: a run at
+zero coverage printed exactly what a run at full coverage printed.
+
+**A SECOND FAILURE NOBODY HAD NAMED, MEASURED HERE.** On a cold workspace the
+budget **does not bind**. M2b.1 decision 5 makes an unpriced purchase affordable
+while any pool remains, so with every rung unpriced the arm buys until the pool
+crosses zero. Reproduced on this host through the committed harness: at
+B = 1 500 ms both arms spent **≈ 1 986 / 1 966 ms and stopped `S-empty`** — a
+33 % overrun, and a cell whose caption says ORACLE-BUDGET-MATCHED containing two
+arms that are both the exhaustive ladder. So the refusal is not only about
+`voc2`: **a budgeted comparison at a budget that never binds is a comparison of
+one rule against itself**, and `voc`'s own coverage row catches it.
+
+**THE PAIR IS THE WHOLE DESIGN OF THE GATE.** `accept.sh` gains `m2d1-9a…9e`,
+and 9a/9b are one test in two halves — a gate that only ever refuses is M2b.2
+F-9's rubber stamp, a gate that only ever passes is what we already had:
+
+| step | command | required |
+|---|---|---|
+| **m2d1-9a** | `schedule-compare.sh --warmup 0 --budget 1500 --arm-a --selector=voc --arm-b --selector=voc2` | exit **5**, `VACUOUS`, **no verdict**, `unpriced-fallback(pytest-collect,pytest-suite,tree-guard)` named |
+| **m2d1-9b** | the same command with `--warmup 2` | exit **0**, coverage > 0 with all four witnesses, a verdict printed — and **nothing about which way it went** |
+
+Measured, warmed, one seeded template copied per arm, B = 1 500 ms:
+
+| selector | coverage | W2 | W3 | W4 | W5 | decision |
+|---|---|---|---|---|---|---|
+| `voc` | 2 of 5 steps (40 %) | 0/5 | 0/5 | 0/5 | 0/5 | **REJECT** |
+| `voc2` | 6 of 6 steps (100 %) | 6/6 | **3/6** | 6/6 | 3/6 | **SELECT** |
+
+Purchase-order divergence 1 of 1. The witnesses are reported **separately and
+never pooled**: a single "100 %" would have hidden that the reservation stopped
+reserving the moment the head world completed, which is M2b.2 decision 5's
+amendment doing exactly what it says.
+
+**AND THE EVAL HARNESS NOW TESTS SOMETHING.** `scripts/eval.sh --instances
+toyrepo-mean-A --levels B2`, end to end on this host, with `--warmup auto` as
+the shipped default:
+
+```
+instrument: warm-up: 1 race(s), 5462 ms, charged to NO ARM (a separate intent at --budget-oracle-ms 0)
+instrument:   every kind the pinned policy can buy carries a local fit
+rule coverage [A1-fixed-budget]: — (computes no scarcity test)
+rule coverage [A2-adaptive]: 6 of 13 steps (46%)
+  cost table: WARM   budget bound: 1 of 1 races
+arm A1-fixed-budget [A-gold-present@default WARM-COST-TABLE] over 1 instance(s) …
+```
+
+**One warm-up race, on a four-candidate instance, priced every kind** — C1's
+prediction held as written — and the cell is captioned `WARM-COST-TABLE` in its
+own name rather than in a warning above it. Before this block that same cell
+reported 0 % coverage and printed a table anyway. The demonstration ran on the
+**dev half**, so no eval-split cell was scored and the published
+leaderboard-query count did not move.
+
+**Warming is a PREDICATE ON THE COST TABLE, not a count of races.** `--warmup
+auto` races into a **template** until every kind the pinned policy can buy
+carries a local fit — read from `mvo oracles --json --policy`, a read-only verb
+that costs no race — then stops, or refuses by name with `warm_incomplete` and
+the unpriced kinds listed. A count is wrong in both directions and the corpus
+proves both: one race on a 2-candidate fixture yields 2 samples (< `MinSamples`
+= 3) and prices nothing; one race on an 8-candidate fixture yields 8 and a
+second is waste. The template is keyed on **(instance, policy digest, binary
+digest)** and every arm and every replicate inherits it **by copy**, so the cost
+table is byte-identical across arms by construction — and the harness now
+asserts it rather than assuming it.
+
+**Warming is charged to nobody, and what it cost is recorded.** A warm-up is a
+*different intent* at `--budget-oracle-ms 0` and a *different race*, so its
+spend is structurally outside every arm's pool: there is no accounting to get
+right, only a report to get right. `LedgerView` gains the **race window** that
+gets it right — `oracleSpend`, `schedule.Bound`, `DStar` and `ScoreBatch` all
+silently assumed one race per workspace, and each breaks differently once a
+template holds warm-up receipts. **The window narrows what is MEASURED and never
+what is SCANNED**: the leak detectors, the canary and `mvo audit` keep reading
+the whole workspace, because a detector that respected the window would stop
+looking at precisely the races nobody is reading. The ledger is not edited: no
+truncation, no rewrite, `mvo audit` is OK over a warmed workspace, and every
+M0–M2d ledger still replays byte-for-byte.
+
+**Coverage is DERIVED, never recorded.** `schedule.finished` gains no coverage
+field — a recorded aggregate would be a number computed by the binary being
+measured. `internal/schedule/coverage.go` is pure and total over a `Trace`, so
+an improved definition never invalidates a race and **every ledger already on
+disk can be priced retroactively**. Absence is absence: a ladder trace reports
+`— (computes no scarcity test)`, a pre-M2b.2 trace reports `unknown (pre-M2b.2
+trace)`, and neither reports `0 %`. The era test moved out of `cmd/mvo` and into
+the file with the witnesses, with `cmd/mvo` calling it: two copies of an era test
+are how the two copies eventually disagree about which era a ledger is from.
+
+**The inertness predicate is PINNED, not believed.** Each arm declares the
+condition under which it is provably a named baseline, over RECORDED fields
+alone, and a property test over M2b.2's own generator compares **180 inert steps
+across 39 races**: on every step where `voc2` is declared inert it bought
+exactly what `voc` bought. The test also fails if the generator produces *no*
+exercised step, so it cannot pass against a definition of inertness that is a
+constant true.
+
+**AND THE GATE CAUGHT ONE OF OUR OWN STEPS.** `accept.sh` step **m2b1-6f** —
+the one that asserts a replicated verdict at R ≥ 3 — ran
+`schedule-compare.sh --warmup 1`, and `testdata/toyrepo` carries **two**
+candidates, so one warm-up race yields two samples per kind, below
+`MinSamples` = 3, and every rung stayed `declared-rank`. The step exited **5**
+the first time the refusal existed. It was asserting a verdict about two arms
+that were both the exhaustive ladder. It now runs `--warmup 2`, and its R = 1
+half runs at `--level B2` rather than the default B3 = S, where the budget
+cannot bind by construction and the coverage rule correctly refuses one level
+*earlier* than the anecdote rule. Warming the fixture, not lowering the bar.
+
+**One refinement the first implementation got wrong, and the measurement that
+found it.** `INERTNESS VIOLATED` first compared the purchase **order**, and
+fired immediately on `voc` vs `ladder` at B3 — correctly reporting that the two
+arms buy in different orders, which they do **by construction**: the ladder is
+depth-first and the adaptive arm interleaves by score. M2b decision 13's null
+case (accept step 5b) states that equivalence over the **evidence set**, not the
+order. So the failure test is over the purchase **set** — the claim that holds
+for every declared baseline — the order stays a reported measurement, and the
+violation requires **two priced, inert rules**: it takes two declarations to
+falsify one, and a ladder declares none.
+
+**THE CORPUS STOPS REPORTING 22/22 ALONE.** Vectors 22 and 23 gained `.budget`
+sidecars (1 200 ms) and 22/23/24 gained `.warm` sidecars; the warm set is the
+**honest control** (`01-honest_fix`) except for vector 22, where self-pricing
+*is* the declared mechanism. Every run now prints:
+
+```
+coverage: evidence 22/22 . ranking 21/22 . allocation 3/22 (22, 23, 24) . admission 5/22
+ALLOCATION IS EXERCISED BY 3 VECTOR(S). A verdict match on the other 19 says nothing
+about any allocation rule.
+```
+
+`--require-coverage allocation` exits 5 when the exercising set is empty, which
+is what M2b.2 §6 needed when it called the corpus that block's blocking gate:
+had the flag existed, the gate would have failed honestly instead of passing
+vacuously. Coverage is part of the **recorded baseline**, so a deleted `.budget`
+sidecar or a workspace that stops warming is now **drift** — a lost measurement
+is as visible as a changed verdict.
+
+**Two rows moved, and both are the allocation being exercised for the first
+time.** `22-schedule_cost_poison` and `23-schedule_starvation` go from
+`CHEAT_WINS` (`tests_passed_desc`) to **`HONEST_REJECTED` (`gate_pass`)**: under
+a binding budget against a priced table, the cheat's purchases starve the honest
+fix out of `status-pass@suite`. That is PRD's starved-admission residual,
+observed in the corpus rather than described in a doc. The baseline was
+re-recorded as a **declared change** — old row printed beside new, reason in the
+same output — and `report.py diff --allow` fails the record if any vector
+*outside* the declared set moves. **The other 19 rows are byte-identical**
+(falsifier V-4 holds), and a verification run after the re-record reported 0
+drift.
+
+**What this block does NOT do, and the fence is absolute.** `AdaptiveRuleDefault`
+stays `voc`; `voc2` stays behind `--selector`; accept step **m2b2-8e stands
+unchanged and green**; M2b.2's verdict is not re-opened. `Decide` is untouched
+and gains nothing. No metric definition in `internal/eval/metrics.go` moved —
+what moved is the **cell key** they are grouped by: `cost_regime` joins it beside
+`policy`, derived from the recorded `schedule.started.cost_table` rather than
+from the flag that was passed, so a table may never pool a warm row with a cold
+one. **Every number M2d published is `COLD-COST-TABLE`**, and that normalizes
+exactly rather than by assumption: no binary before this block could warm an eval
+workspace. Nothing is re-scored. **No labelled measurement was taken**: the
+demonstration runs on the dev half, and the published leaderboard-query count
+does not move.
+
+**The freeze gained an `instrument` block and was re-cut ONCE, as a declared
+change.** It pinned the policy digest, the constants and the allocation rule and
+pinned *nothing* about what the instrument could afford — the same defect M2b.2
+found one level in, fixed in the same direction: more refusal. An absent block
+normalizes to `{warmup_races: 0, cost_regime: "cold", budget_basis: "actual"}`
+**exactly**, so the check sees the change without a byte of any frozen artifact
+having to move; then the file is re-cut to `warm`, with the old values and the
+reason quoted in its own `notes`, and a round-trip test pins the fixed point the
+freeze did not have in M2b.2.
+
+**Wire delta: two additive observational fields on `schedule.Considered`** —
+`allowance_ms` (the number the one affordability predicate actually tested
+against, already in the ledger as *prose* in the decline sentences, which is
+worse than either having it or not) and `pass_withheld` (M2b.2 decision 4's
+reachability condition dropped this row's pass outcomes; legible before only as
+the *absence* of `pass-min`/`pass-max` from `flip_outcomes`). Nothing else moves:
+no `Step` field, no constant, no receipt field, no policy field, no ranking key,
+no ledger event, no stop clause. Both are ignored by replay and carry no payload
+digest.
+
+**Still true, and this block does not change it.** Warming removes a vacuum; it
+does not create signal. `Table.Predict` holds nothing per world, so on symmetric
+worlds `finish_ms` is identical at equal ladder positions and the commit order
+falls through to the control-plane ordinal — M2b.2's withdrawn adaptivity claim
+stands. A fully warmed, fully covered protocol on a symmetric two-world corpus
+is still expected to reproduce the ladder, and **that is a real null, not a
+failure of this block**. The per-world cost signal and the asymmetric corpus stay
+where M2b.2 put them. F10's host-load probe is still absent from `mvo-eval`, and
+warming makes the budget bind, which makes host load matter, which makes that gap
+start costing something — named, not closed.
+
 ## 2026-08-17 — M2b.2: a rule that finishes what it starts
 
 **A pre-registered falsifier fired: on the instrument that convicted the rule,

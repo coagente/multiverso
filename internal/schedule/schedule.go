@@ -519,6 +519,9 @@ func (s *Scheduler) Next() (Step, bool) {
 		row := r.Row
 		a := allowOf[row.World]
 		row.Affordable = s.bud.affordable(r.Cost, a)
+		// M2d.1: the number the ONE affordability predicate above tested
+		// against, recorded rather than left as prose in a decline sentence.
+		row.AllowanceMS = a
 		if row.Declined == "" && row.Admissible && !row.Affordable {
 			// The arm's own sentence when it has one: two different budget
 			// facts must not print the same sentence, and only the arm knows

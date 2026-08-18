@@ -41,9 +41,16 @@ const (
 	exitOK       = 0
 	exitFailure  = 1
 	exitUsage    = 2
-	exitNoMetric = 3  // nothing could be scored, and --strict was passed
-	exitLeak     = 4  // a leak detector fired: the instance is voided
-	exitSkip     = 77 // a prerequisite is absent; the reason is printed
+	exitNoMetric = 3 // nothing could be scored, and --strict was passed
+	exitLeak     = 4 // a leak detector fired: the instance is voided
+	// exitVacuous is M2d.1 decision 7's NAMED NON-VERDICT: the rule under
+	// test provably never fired, so there is no comparison to report. It is
+	// NOT behind --strict, and that is deliberate — `R < 3` is a THIN
+	// measurement a reader may reasonably want to look at, while a 0 %
+	// comparison is NOT A MEASUREMENT OF ANYTHING, and printing it beside a
+	// claim is the exact failure the block exists to correct.
+	exitVacuous = 5
+	exitSkip    = 77 // a prerequisite is absent; the reason is printed
 )
 
 func main() {
@@ -123,7 +130,8 @@ common flags:
   --version V           corpus version (default v1)
 
 exit codes: 0 ok, 1 failure, 2 usage, 3 nothing scorable under --strict,
-            4 a leak detector fired, 77 a named prerequisite is absent
+            4 a leak detector fired, 5 VACUOUS (the rule under test never fired:
+            no verdict, no metric line), 77 a named prerequisite is absent
 `)
 }
 

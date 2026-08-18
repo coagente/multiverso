@@ -65,6 +65,13 @@ type explainSchedule struct {
 	// a pre-M2b.2 trace — absent, never a fabricated `false` — and empty on an
 	// arm that holds no such concept.
 	Regimes []explainRegime `json:"regimes"`
+	// Coverage is M2d.1 decision 8's DERIVED figure: what fraction of this
+	// race's recorded steps exercised the rule the race allocated under, per
+	// witness. It is RENDERED and never recomputed into a score — extending
+	// accept step 5d's rule to the coverage line — and it is absent for a
+	// race with no trace, `unknown` for a pre-M2b.2 one and `—` for a ladder,
+	// never 0 %.
+	Coverage *schedule.CoverageReport `json:"coverage,omitempty"`
 	// noRegime says the regime fields were NEVER RECORDED rather than recorded
 	// empty: a pre-M2b.2 trace, which ran no scarcity test at all. It is not on
 	// the wire because it is not a fact about the race — it is what the
@@ -174,16 +181,23 @@ type explainScheduleRow struct {
 	// finish cost — a measurement the rule computed and did NOT divide by —
 	// and the rendering labels it as such rather than letting it read as the
 	// denominator.
-	FinishMS   int64  `json:"finish_ms"`
-	Committed  bool   `json:"committed"`
-	Affordable bool   `json:"affordable"`
-	HardGate   bool   `json:"hard_gate"`
-	Basis      string `json:"basis"`
-	Bought     bool   `json:"bought"`
-	Declined   string `json:"declined"`
-	Receipt    string `json:"receipt"`
-	Status     string `json:"status"` // the receipt's verdict; "" when unjoined
-	ActualMS   int64  `json:"actual_ms"`
+	FinishMS  int64 `json:"finish_ms"`
+	Committed bool  `json:"committed"`
+	// Admissible, AllowanceMS and PassWithheld are what the COVERAGE
+	// witnesses are computed from (M2d.1 decision 5). They are rendered
+	// because a coverage figure a reader cannot re-derive from the same JSON
+	// the harness read is a figure nobody can check.
+	Admissible   bool   `json:"admissible"`
+	Affordable   bool   `json:"affordable"`
+	AllowanceMS  int64  `json:"allowance_ms"`
+	PassWithheld bool   `json:"pass_withheld"`
+	HardGate     bool   `json:"hard_gate"`
+	Basis        string `json:"basis"`
+	Bought       bool   `json:"bought"`
+	Declined     string `json:"declined"`
+	Receipt      string `json:"receipt"`
+	Status       string `json:"status"` // the receipt's verdict; "" when unjoined
+	ActualMS     int64  `json:"actual_ms"`
 }
 
 // explainCostRow is one kind's recorded cost model. A row whose basis is
@@ -252,6 +266,8 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 	if out.Skipped == nil {
 		out.Skipped = []schedule.Skipped{}
 	}
+	cov := schedule.Coverage(tr)
+	out.Coverage = &cov
 	if out.WorldOrder == nil {
 		out.WorldOrder = []string{}
 	}
@@ -297,6 +313,7 @@ func scheduleBlock(st *ledgerState, dr *decisionRec, pol policy.Policy,
 				ExecutorBP: r.ExecutorBP, ValueBP: r.ValueBP, CostMS: r.CostMS,
 				CostBasis: r.CostBasis, ScoreBPPS: r.ScoreBPPS, ScoreBasis: r.ScoreBasis,
 				FinishMS: r.FinishMS, Committed: r.Committed, Affordable: r.Affordable,
+				Admissible: r.Admissible, AllowanceMS: r.AllowanceMS, PassWithheld: r.PassWithheld,
 				HardGate: r.HardGate, Basis: r.Basis, Bought: r.Declined == "",
 				Declined: r.Declined,
 			}
@@ -364,33 +381,13 @@ func rowKey(step int, world, oracle string) string {
 // preM2b2 reports whether this trace was written by a binary that predates the
 // finishing rule.
 //
-// IT CANNOT BE READ OFF `adaptive_rule`, and the first version of this
-// function did. That field is the BINARY's default rule; an absent value
-// normalizes to "voc" EXACTLY (decision 8); and M2b.2 ships with `voc` as the
-// default, so "voc" is what a pre-M2b.2 ledger AND a race run this morning
-// both record. A renderer that dated the binary from it would stamp "pre-M2b.2
-// trace" on current races — inventing evidence in exactly the direction M2b.1
-// decision 6 forbids, and doing it in the sentence written to prevent that.
-//
-// What actually separates the eras is the finishing rule's OWN VOCABULARY: a
-// binary that has the rule records a `commit_basis` on every step of a `voc2`
-// race and a `score_basis` on every VOC row of any race, and a binary that
-// does not, records neither. A LADDER race carries neither in either era — it
-// computes no scarcity test and no score at all — so its regime line is
-// answered before this test is reached, from the arm rather than from the era.
-func preM2b2(tr schedule.Trace) bool {
-	for _, s := range tr.Steps {
-		if s.CommitBasis != "" {
-			return false
-		}
-		for _, c := range s.Considered {
-			if c.ScoreBasis != "" {
-				return false
-			}
-		}
-	}
-	return true
-}
+// THE TEST LIVES IN `internal/schedule/coverage.go`, beside the witnesses it
+// belongs with, and this is the call (M2d.1 decision 8). A second copy of an
+// era test is how the two copies eventually disagree about which era a ledger
+// is from — and this renderer already made the version of that mistake the
+// package comment there records: dating the binary off `adaptive_rule`, which
+// normalizes to "voc" for a pre-M2b.2 ledger AND for a race run this morning.
+func preM2b2(tr schedule.Trace) bool { return schedule.PreM2b2(tr) }
 
 // unscheduledPhase names the phase a receipt the allocator never chose came
 // from. The cohort reducer is the only one v0 produces: it runs after phase
@@ -510,6 +507,13 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 	fmt.Fprintf(w, "  charged:    %s\n", basisText(s.BudgetBasis))
 	fmt.Fprintf(w, "  order:      %s\n", worldOrderText(s))
 	fmt.Fprintf(w, "  regime:     %s\n", regimeText(s))
+	// M2d.1 decision 10: printed ALWAYS, including at 100 %. A number that
+	// appears only when it is bad is a number nobody learns to read. It is
+	// RENDERED from the derived report and recomputes no score.
+	if s.Coverage != nil {
+		fmt.Fprintf(w, "  coverage:   %s (rule %s, baseline %s)\n",
+			s.Coverage.Summary(), s.Coverage.Rule, dash(s.Coverage.Baseline))
+	}
 
 	// The table is laid out ALONE and the decline reasons are interleaved
 	// afterwards, and that two-step is not fussiness. §4.4 puts a declined

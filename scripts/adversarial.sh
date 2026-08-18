@@ -33,6 +33,9 @@
 #   scripts/adversarial.sh --repeat 9         # coin-flip duels, 9 rounds
 #   scripts/adversarial.sh --json out.json    # also write the report here
 #   scripts/adversarial.sh --arm fixed        # race the M1 exhaustive ladder
+#   scripts/adversarial.sh --require-coverage allocation
+#                                             # exit 5 if NO vector exercised
+#                                             # the allocation (M2d.1 dec. 13)
 #
 # NO REAL AGENT CLI IS EVER INVOKED. Only `--agent script` is used, and the
 # harness front-loads PATH with poisoned stubs (below) so that any code path
@@ -56,9 +59,18 @@ JSON_OUT=""
 # recorded baseline wherever a vector attacks the allocation — that drift is
 # the measurement, not a failure.
 ARM=""
+# REQUIRE_COVERAGE is M2d.1 decision 13. `verdicts 22/22` is a true sentence
+# about the ORACLES and carries no information about any allocation rule: 19
+# vectors carry no budget at all, so their races are unbounded and
+# max_oracle_ms is read never. This flag makes that failure LOUD instead of
+# invisible — it is what M2b.2 needed when it called this corpus that block's
+# blocking gate.
+REQUIRE_COVERAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) RECORD=1; shift ;;
+    --declare) DECLARE="${2:?--declare needs a comma-separated vector prefix list}"; shift 2 ;;
+    --require-coverage) REQUIRE_COVERAGE="${2:?--require-coverage needs a facet}"; shift 2 ;;
     --arm) ARM="${2:?--arm needs adaptive or fixed}"; shift 2 ;;
     --only) ONLY="${2:?--only needs a vector prefix}"; shift 2 ;;
     --repeat) REPEAT="${2:?--repeat needs a count}"; shift 2 ;;
@@ -145,6 +157,45 @@ policy_for() {
 budget_for() {
   local f="$VECTORS/$1.budget"
   [ -f "$f" ] && tr -d '[:space:]' < "$f" || true
+}
+
+# warm_for VECTOR — the `.warm` sidecar's contents: the patch file the warm-up
+# races, or "" for no warm-up.
+#
+# WHY THE DEFAULT IS THE HONEST CONTROL, and why that is the OPPOSITE of
+# mvo-eval's default (M2d.1 decision 14). In `mvo-eval` the candidate set IS
+# the population, so warming on it reproduces the product's own exposure
+# SYMMETRICALLY across the arms. Here there is one arm and one attacker, and
+# letting the attacker price its own race by default would fold vector 22's
+# mechanism into all three schedule vectors without anybody declaring it. So
+# the warm set is named per vector, in the artifact, and vector 22 declares
+# ITSELF because self-pricing is its own declared mechanism.
+warm_for() {
+  local f="$VECTORS/$1.warm"
+  [ -f "$f" ] && tr -d "[:space:]" < "$f" || true
+}
+
+# warmup REPO WARMPATCH — race the named patch UNBUDGETED until the cost table
+# is priced, in the same workspace the vector will then race in.
+#
+# It is charged to nothing: the warm-up is a SEPARATE INTENT at
+# --budget-oracle-ms 0 and the pool is per race, so its spend is structurally
+# outside the vector's budget. On a cold workspace nothing is priced, an
+# unpriced purchase is affordable while any pool remains, and the budget does
+# not bind at all — which is why 24-schedule_budget_burn already fell back to
+# M2b's rule despite carrying a budget.
+warmup() {
+  local repo="$1" warm="$2" i=0 wi wp
+  [ -n "$warm" ] || return 0
+  wp="$repo.warmpatches"
+  mkdir -p "$wp"
+  cp "$VECTORS/$warm.patch" "$wp/01-warm.patch" 2>/dev/null || return 0
+  while [ "$i" -lt 2 ]; do
+    i=$((i + 1))
+    wi="$("$MVO" intent new --dir "$repo" --title "warm-up $i" --budget-candidates 1 --budget-oracle-ms 0)"
+    [ -n "$wi" ] || return 0
+    "$MVO" race "$wi" --dir "$repo" --agent script --patches "$wp" --schedule=fixed >/dev/null 2>&1 || return 0
+  done
 }
 
 # worldof REPO INTENT PATCHFILE — the world digest whose captured patch is
@@ -234,6 +285,7 @@ solo() {
   mkdir -p "$pdir"
   cp "$VECTORS/$vec.patch" "$pdir/01-candidate.patch"
   mkrepo "$repo" "$policy"
+  warmup "$repo" "$(warm_for "$vec")"
   intent="$(race_once "$repo" "$pdir" 1 "solo: $vec" "$WORK/$vec/solo.abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$vec/solo.abort" ]; then
     python3 "$CORPUS/report.py" solo-aborted \
@@ -242,7 +294,10 @@ solo() {
     return 0
   fi
   world="$(worldof "$repo" "$intent" "$pdir/01-candidate.patch")"
-  "$MVO" explain "$intent" --dir "$repo" --json > "$WORK/$vec/solo.explain.json"
+  # --schedule so the report can compute COVERAGE from the RECORDED trace
+  # rather than assert it (M2d.1 decision 8: coverage is derived, never
+  # recorded, and never asked of the arm).
+  "$MVO" explain "$intent" --dir "$repo" --json --schedule > "$WORK/$vec/solo.explain.json"
 
   # Dumped BEFORE admission, so oracles_run is the RACE ladder alone: a
   # vector stopped at O0 must show exactly one oracle, which is how the
@@ -283,6 +338,7 @@ duel_round() {
   cp "$VECTORS/$vec.patch" "$pdir/01-cheat.patch"
   cp "$HONEST" "$pdir/02-honest.patch"
   mkrepo "$repo" "$policy"
+  warmup "$repo" "$(warm_for "$vec")"
   intent="$(race_once "$repo" "$pdir" 2 "duel: $vec" "$WORK/$tag/abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$tag/abort" ]; then
     python3 "$CORPUS/report.py" duel-aborted \
@@ -292,7 +348,7 @@ duel_round() {
   fi
   cheat="$(worldof "$repo" "$intent" "$pdir/01-cheat.patch")"
   honest="$(worldof "$repo" "$intent" "$pdir/02-honest.patch")"
-  "$MVO" explain "$intent" --dir "$repo" --json > "$WORK/$tag/explain.json"
+  "$MVO" explain "$intent" --dir "$repo" --json --schedule > "$WORK/$tag/explain.json"
   python3 "$CORPUS/report.py" duel \
     --vector "$vec" --round "$round" --cheat "$cheat" --honest "$honest" \
     --policy "${policy:-default}" --explain "$WORK/$tag/explain.json"
@@ -324,13 +380,31 @@ $(duel_round "$vec" "$r")"
 done
 
 REPORT="$WORK/report.json"
-python3 "$CORPUS/report.py" render --results "$RESULTS" --out "$REPORT"
+RENDER_ARGS=(render --results "$RESULTS" --out "$REPORT")
+[ -n "$REQUIRE_COVERAGE" ] && RENDER_ARGS+=(--require-coverage "$REQUIRE_COVERAGE")
+set +e
+python3 "$CORPUS/report.py" "${RENDER_ARGS[@]}"
+RENDER_RC=$?
+set -e
+if [ "$RENDER_RC" != "0" ] && [ "$RENDER_RC" != "5" ]; then
+  die "report.py render exited $RENDER_RC"
+fi
 [ -z "$JSON_OUT" ] || cp "$REPORT" "$JSON_OUT"
 
 if [ "$RECORD" = "1" ]; then
+  # RE-RECORDING IS NOT A FORMALITY (M2d.1 decision 14). A moved verdict blocks
+  # a block regardless of what any table says, so the old rows are printed
+  # BESIDE the new ones with the reason, and a move in any vector OUTSIDE the
+  # declared set fails the record rather than being laundered through it.
+  if [ -f "$BASELINE" ]; then
+    echo
+    python3 "$CORPUS/report.py" diff --baseline "$BASELINE" --observed "$REPORT" \
+      --allow "${DECLARE:-22-schedule_cost_poison,23-schedule_starvation,24-schedule_budget_burn}" \
+      || die "a vector OUTSIDE the declared set moved: this block changed the trust boundary while claiming to change only the instrument (falsifier V-4)"
+  fi
   cp "$REPORT" "$BASELINE"
   echo "adversarial: recorded baseline -> $BASELINE"
-  exit 0
+  exit "$RENDER_RC"
 fi
 
 if [ ! -f "$BASELINE" ]; then
@@ -338,3 +412,7 @@ if [ ! -f "$BASELINE" ]; then
   exit 0
 fi
 python3 "$CORPUS/report.py" diff --baseline "$BASELINE" --observed "$REPORT" ${ONLY:+--only "$ONLY"}
+# The coverage gate outranks a clean diff: a corpus that matches its baseline
+# perfectly and exercised nothing is exactly the vacuum this flag exists to
+# make visible.
+exit "$RENDER_RC"

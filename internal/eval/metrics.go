@@ -140,6 +140,17 @@ type Row struct {
 	// forbids — the harness printed a NOT UNIFORM warning and then pooled the
 	// numbers anyway. Metrics are now computed per (arm, family, policy).
 	Policy string `json:"policy"`
+	// CostRegime is M2d.1 decision 11: `warm` or `cold`, DERIVED from the
+	// recorded `schedule.started.cost_table` rather than from the flag that
+	// was passed. It joins the cell key BESIDE the policy, for the policy's
+	// own reason — warming changes what every arm can AFFORD, so a warm cell
+	// and a cold cell are two experiments and a table that pooled them would
+	// be the untagged aggregate M2d decision 8 already forbids.
+	//
+	// Every number M2d published is `cold`, and that normalizes EXACTLY
+	// rather than by assumption: no binary before this block could warm an
+	// eval workspace.
+	CostRegime string `json:"cost_regime"`
 	// Cluster is the independent BUG this instance is a slice of: the fixture
 	// repository. Five instances over two repositories are not five independent
 	// observations, and every denominator prints its cluster count beside it.

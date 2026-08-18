@@ -56,6 +56,17 @@ UNFREEZE=""
 # revision, which is the only way the before/after is a paired comparison
 # rather than a comparison against a moving baseline.
 SELECTOR=""
+# WARMUP is M2d.1 decision 1: how the COST TABLE is priced before the arms
+# race against it. On a cold workspace nothing is priced, so an unpriced
+# purchase is affordable while any pool remains, THE BUDGET DOES NOT BIND, and
+# both arms are the exhaustive ladder — which is why every M2d cell was
+# byte-identical between voc and voc2. `auto` warms into a template every arm
+# and every replicate inherits by copy; `0` is the cold instrument, kept so the
+# vacuum can be reproduced on purpose.
+WARMUP="auto"
+# ALLOW_VACUOUS prints a vacuous cell's tables stamped VACUOUS instead of
+# refusing. It does not suppress the caption.
+ALLOW_VACUOUS=0
 
 usage() {
   cat >&2 <<'EOF'
@@ -71,6 +82,22 @@ usage: scripts/eval.sh [options]
   --instances A,B      restrict to these instance ids
   --split dev|eval     restrict to a split half (the file's own recorded function)
   --arms A,B           budgeted arms to race (default adaptive + fixed-budget)
+  --warmup auto|N|0    how the COST TABLE is priced before the arms race against
+                       it (M2d.1 decision 1; default auto). `auto` races an
+                       UNBUDGETED warm-up into a TEMPLATE until every kind the
+                       pinned policy can buy carries a local fit (cap 3, then
+                       `warm_incomplete` naming the unpriced kinds), and every
+                       arm and every replicate inherits that template BY COPY,
+                       so the cost table is byte-identical across arms. `0` is
+                       the COLD instrument: nothing is priced, the budget does
+                       not bind, and every allocation rule collapses to the
+                       exhaustive ladder. Warming is charged to NO arm — it is a
+                       separate intent at --budget-oracle-ms 0 — and what it
+                       cost is printed
+  --allow-vacuous      print a vacuous cell's tables, stamped VACUOUS, and exit
+                       0 instead of 5. The banner and its reason print either
+                       way: a flag that suppresses a refusal must not also
+                       suppress its caption
   --selector RULE      allocation rule the ADAPTIVE arm races under: voc (M2b's
                        published rule, the binary default) or voc2 (M2b.2's
                        finishing rule). Run the protocol once per rule to get
@@ -97,6 +124,8 @@ usage: scripts/eval.sh [options]
 
 exit codes: 0 ran, 1 a run or an assertion failed, 2 usage,
             3 nothing scorable under --strict, 4 a leak detector fired,
+            5 VACUOUS — the rule under test never fired on some cell, so no
+              verdict and no metric line was printed for it,
             77 SKIP — a named prerequisite is absent
 EOF
 }
@@ -109,6 +138,8 @@ while [ $# -gt 0 ]; do
     --split) SPLIT="${2:?--split needs a value}"; shift 2 ;;
     --arms) ARMS="${2:?--arms needs a value}"; shift 2 ;;
     --selector) SELECTOR="${2:?--selector needs a rule}"; shift 2 ;;
+    --warmup) WARMUP="${2:?--warmup needs auto, a count, or 0}"; shift 2 ;;
+    --allow-vacuous) ALLOW_VACUOUS=1; shift ;;
     --policy-configs) POLICY_CONFIGS="${2:?--policy-configs needs a value}"; shift 2 ;;
     --no-fetch) FETCH=0; shift ;;
     --strict) STRICT=1; shift ;;
@@ -233,6 +264,8 @@ for policy in $POLICY_CONFIGS; do
     [ -n "$SPLIT" ] && args+=(--split "$SPLIT")
     [ -n "$UNFREEZE" ] && args+=(--unfreeze "$UNFREEZE")
     [ -n "$SELECTOR" ] && args+=(--selector "$SELECTOR")
+    [ -n "$WARMUP" ] && args+=(--warmup "$WARMUP")
+    [ "$ALLOW_VACUOUS" = "1" ] && args+=(--allow-vacuous)
     [ "$STRICT" = "1" ] && args+=(--strict)
     if [ -n "$JSON_DIR" ]; then
       args+=(--json "$JSON_DIR/cell-$policy-$level.json")
@@ -246,6 +279,15 @@ for policy in $POLICY_CONFIGS; do
       0) ;;
       3) echo "eval.sh: cell $CELL scored nothing (--strict)"; RC=3 ;;
       4) echo "eval.sh: cell $CELL VOIDED an instance: a leak detector fired" >&2; exit 4 ;;
+      # M2d.1 decision 7. THIS IS NOT A SKIP AND IT IS NOT BEHIND --strict. A
+      # cell at 0 % coverage is not a thin measurement a reader may reasonably
+      # want to look at — it is NOT A MEASUREMENT OF ANYTHING, and printing it
+      # beside a claim is the exact failure the block exists to correct. The
+      # cell printed its coverage block, its named reason and no metric line.
+      5) echo "eval.sh: cell $CELL is VACUOUS: the rule under test never fired, so NO VERDICT and no" >&2
+         echo "         metric line were printed. Warm the workspace (--warmup auto), lower the budget" >&2
+         echo "         until it binds, or pass --allow-vacuous to print the tables stamped VACUOUS." >&2
+         RC=5 ;;
       77) echo "eval.sh: cell $CELL skipped: a named prerequisite is absent"; ;;
       *) fail "cell $CELL exited $code" ;;
     esac
@@ -253,7 +295,13 @@ for policy in $POLICY_CONFIGS; do
     # a caveat. That asymmetry is the whole signal: "no instance scored" is a
     # legitimate outcome when nothing can score (no corpus, no python), and a
     # bug when the previous cell scored fine under the same prerequisites.
-    if grep -q 'no metric line is printed' "$CELL_OUT"; then
+    if [ "$code" = "5" ]; then
+      # A REFUSED cell printed no metric line ON PURPOSE, and the asymmetry
+      # check below is about a cell that scored nothing for a reason nobody
+      # named. Conflating the two would turn the refusal into a second,
+      # differently-worded failure and hide which one actually fired.
+      SCORED=1
+    elif grep -q 'no metric line is printed' "$CELL_OUT"; then
       SCORED=0
     else
       SCORED=1
@@ -266,6 +314,24 @@ $(sed -n '1,40p' "$CELL_OUT")"
     [ "$SCORED" = "1" ] && ANY_SCORED=1
   done
 done
+
+echo
+echo "--------------------------------------------------------------------------------"
+echo "WHAT THE INSTRUMENT COULD AFFORD (M2d.1)"
+echo "--------------------------------------------------------------------------------"
+echo "Every cell above printed, ABOVE its metrics and on every run including at 100 %:"
+echo "  * what WARMING cost and what it produced (charged to no arm — a separate"
+echo "    intent at --budget-oracle-ms 0 — and recorded, because an uncharged cost"
+echo "    that is also unreported is a cost nobody can audit);"
+echo "  * COVERAGE: what fraction of the recorded steps exercised the rule under"
+echo "    test, per witness, with the baseline it collapses to when inert NAMED;"
+echo "  * the purchase-order divergence between the arms, which is a DIFFERENT"
+echo "    question from coverage: >0 % coverage with 0 divergence is a MEASURED"
+echo "    NULL and is a publishable result, not a failure."
+echo "A cell at 0 % coverage measured NOTHING about any allocation rule and was"
+echo "printed where a failure is printed (exit 5), not as a footnote."
+grep -h -E '^(COVERAGE|  steps exercised|  races exercised|  W[2-5] |  cost table:|instrument:|rule coverage|VACUOUS)' \
+  "$WORK"/cell-*.out 2>/dev/null | sed 's/^/  /' || true
 
 cat <<'CAVEATS'
 

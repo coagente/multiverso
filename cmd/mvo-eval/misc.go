@@ -16,6 +16,7 @@ import (
 
 	"github.com/coagente/multiverso/internal/eval"
 	"github.com/coagente/multiverso/internal/gitx"
+	"github.com/coagente/multiverso/internal/schedule"
 )
 
 // cmdArms prints the arm declaration table. It is a separate verb because the
@@ -135,7 +136,7 @@ func cmdScore(args []string) error {
 			effSplit = assigned
 		}
 	}
-	freezeDigest, drift, ferr := checkFreeze(*repoRoot, common.corpus, common.version, effSplit, *unfreeze, "score")
+	freezeDigest, drift, ferr := checkFreeze(*repoRoot, common.corpus, common.version, effSplit, *unfreeze, "score", nil)
 	if ferr != nil {
 		return ferr
 	}
@@ -450,7 +451,13 @@ func cmdFreeze(args []string) error {
 		// The ALLOCATION RULE, not only the scheduler's numbers (M2b.2
 		// decision 8). A freeze that could not pin it would be refused by the
 		// binary that wrote it the moment it was read.
-		Rules:         eval.SchedulerRules(),
+		Rules: eval.SchedulerRules(),
+		// M2d.1 decision 12: WHAT THE INSTRUMENT COULD AFFORD. A freeze with
+		// no write path for a field it checks has no fixed point, which is
+		// exactly the failure the `adaptive_rule` marshaller was added to fix
+		// — so the block is written by the same build that checks it, and the
+		// round-trip test pins the two together.
+		Instrument:    eval.LiveInstrument(eval.WarmupAuto, schedule.BudgetBasisActual, schedule.CostRegimeWarm),
 		OracleDigests: map[string]string{},
 	}
 	for _, id := range ids {

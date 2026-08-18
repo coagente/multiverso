@@ -9,6 +9,7 @@ package eval
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/coagente/multiverso/internal/race"
@@ -468,5 +469,50 @@ func TestExpectationViolatedIsReportedNotAsserted(t *testing.T) {
 	r.Expected = ExpectUnknown
 	if m := Compute("a", []Row{r}); m.ExpectationViolated != 0 {
 		t.Errorf("an unknown expectation was counted as violated")
+	}
+}
+
+// M2d.1 DECISION 11: A TABLE MAY NEVER POOL WARM AND COLD ROWS. Warming
+// changes what every arm can afford, so a warm cell and a cold cell are two
+// experiments — and the regime lands in the cell's NAME rather than in a
+// warning above it, because a warning above a pooled table is exactly what
+// M2d decision 8 amendment 3 already found not to work.
+func TestWarmAndColdRowsOfOneArmLandInTwoCells(t *testing.T) {
+	rows := []Row{
+		{Instance: "i1", Arm: ArmAdaptive, Family: FamilyGoldPresent, Policy: "default",
+			CostRegime: "warm", Decision: "SELECT", Stable: true, Avail: true,
+			WinnerLabel: VerdictCorrect, DStar: "SELECT", DStarWinnerLabel: VerdictCorrect},
+		{Instance: "i1", Arm: ArmAdaptive, Family: FamilyGoldPresent, Policy: "default",
+			CostRegime: "cold", Decision: "REJECT", Stable: true, Avail: true,
+			WinnerLabel: "", DStar: "SELECT", DStarWinnerLabel: VerdictCorrect},
+	}
+	cells := FamilyColumns(rows)
+	if len(cells) != 2 {
+		t.Fatalf("warm and cold rows of one (arm, family, policy) pooled into %d cell(s): %v",
+			len(cells), sortedKeys(cells))
+	}
+	var warm, cold string
+	for k := range cells {
+		if strings.Contains(k, "WARM-COST-TABLE") {
+			warm = k
+		}
+		if strings.Contains(k, "COLD-COST-TABLE") {
+			cold = k
+		}
+	}
+	if warm == "" || cold == "" {
+		t.Fatalf("the cost regime is not in the cell's own name: %v", sortedKeys(cells))
+	}
+	if len(cells[warm]) != 1 || len(cells[cold]) != 1 {
+		t.Fatalf("cells are not one row each: warm=%d cold=%d", len(cells[warm]), len(cells[cold]))
+	}
+	// A row with no recorded regime keeps M2d's own key exactly: absent is
+	// absent, and no byte of any published artifact has to move for the split
+	// to exist.
+	plain := FamilyColumns([]Row{{Instance: "i1", Arm: ArmAdaptive, Family: FamilyGoldPresent, Policy: "default"}})
+	for k := range plain {
+		if strings.Contains(k, "COST-TABLE") {
+			t.Errorf("a row with no recorded cost regime was captioned %q", k)
+		}
 	}
 }

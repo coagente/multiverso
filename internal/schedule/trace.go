@@ -214,9 +214,20 @@ type Considered struct {
 	// some bracket outcome moves the decision (flip == 1) OR a hard gate
 	// reads the rung — withholding a hard-gated receipt fabricates a gate
 	// failure, which is a decision change the ordering terms may not veto.
-	Admissible bool   `json:"admissible"`
-	Affordable bool   `json:"affordable"`
-	Basis      string `json:"basis"` // BasisDecision | BasisResearch
+	Admissible bool `json:"admissible"`
+	Affordable bool `json:"affordable"`
+	// AllowanceMS is the number the ONE affordability predicate actually
+	// tested this row's predicted cost against. It is DERIVABLE by a reader
+	// (pool, commit_set and every alive world's finish_ms are all recorded)
+	// and it is recorded anyway, because M2b decision 17 says the trace is
+	// recorded and never recomputed, and because the number is ALREADY in the
+	// ledger as PROSE — M2b.2 decision 7's `reserved:` and `unreachable:`
+	// sentences print it — which is worse than either having it or not.
+	//
+	// M2d.1: additive, observational, no payload digest, ignored by replay. A
+	// pre-M2d.1 row renders "—", never 0.
+	AllowanceMS int64  `json:"allowance_ms"`
+	Basis       string `json:"basis"` // BasisDecision | BasisResearch
 	// Committed is M2b.2 decision 3: this world is in the commit set C at this
 	// step — the pool is reserved to FINISH it, so every one of its remaining
 	// rungs is affordable until it completes or is eliminated. It is
@@ -263,9 +274,20 @@ type Considered struct {
 	// row, which has no depth-first rank at all. It is the one field a ladder
 	// row carries that a VOC row does not, and it is the reason a reader can
 	// reconstruct the arm's order from the trace alone.
-	Order   int    `json:"order"`
-	ValueBP int64  `json:"value_bp"`
-	World   string `json:"world"`
+	Order int `json:"order"`
+	// PassWithheld records that M2b.2 decision 4's reachability condition
+	// dropped this row's pass outcomes: the world's remaining ladder costs
+	// more than its allowance, so `pass-min` and `pass-max` are outcomes this
+	// race can never reach and the flip test was taken over `fail-closed`
+	// alone. Today it is legible only as the ABSENCE of pass-min/pass-max from
+	// flip_outcomes, and a coverage figure must be a field lookup rather than
+	// a scan for a missing string.
+	//
+	// M2d.1: additive, observational, no payload digest, ignored by replay. A
+	// pre-M2d.1 row renders "—", never false.
+	PassWithheld bool   `json:"pass_withheld"`
+	ValueBP      int64  `json:"value_bp"`
+	World        string `json:"world"`
 }
 
 // Bought reports whether this row was purchased in its own batch.

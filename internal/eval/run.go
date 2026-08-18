@@ -62,8 +62,16 @@ type RunSpec struct {
 	// RepoSrc is the directory whose CONTENTS become the workspace. The
 	// caller copies out of the eval home; the runner never resolves an
 	// eval-home path into a race.
-	RepoSrc  string
-	BudgetMS int64
+	RepoSrc string
+	// TemplateSrc is a WARMED TEMPLATE workspace (see warm.go). When it is
+	// set the arm inherits the template's `.multiverso` — its ledger, its CAS
+	// and its pinned policy — BY COPY, so every arm and every replicate
+	// allocates against a byte-identical cost table (M2d.1 decision 2). The
+	// working tree is still copied from RepoSrc, so the base commit is exactly
+	// the one a cold workspace would have and nothing the warm-up left in the
+	// tree can drift into the measured race.
+	TemplateSrc string
+	BudgetMS    int64
 	// PolicyFile installs and pins a policy; empty keeps the workspace
 	// default `mvo init` writes.
 	PolicyFile string
@@ -192,11 +200,34 @@ func Race(spec RunSpec) (RunResult, LedgerView, error) {
 		return nil
 	}
 
-	if err := run("init", "--dir", ws); err != nil {
+	// THE TEMPLATE IS INHERITED BY COPY, AND `mvo init` IS NOT RUN.
+	//
+	// A warmed template already holds an initialized workspace: the ledger
+	// with the warm-up races' receipts (which is the whole point — that is
+	// what costSamples() fits over), the CAS, and the pinned policy. Copying
+	// it is decision 2, and copying is what makes the cost table identical
+	// ACROSS ARMS BY CONSTRUCTION rather than by two independent fits that
+	// happen to agree because both are empty.
+	//
+	// The ledger is NOT edited on the way in: no truncation, no rewrite, no
+	// "warm-up events excluded from the chain". `mvo audit` must stay OK over
+	// a warmed workspace, so the copy is a copy.
+	if spec.TemplateSrc != "" {
+		src := filepath.Join(spec.TemplateSrc, ".multiverso")
+		if _, err := os.Stat(src); err != nil {
+			res.Output = out.String()
+			return res, LedgerView{}, fmt.Errorf(
+				"eval: warmed template %s holds no .multiverso: refusing to race an arm against a table it did not inherit: %w", spec.TemplateSrc, err)
+		}
+		if err := copyAll(src, filepath.Join(ws, ".multiverso")); err != nil {
+			res.Output = out.String()
+			return res, LedgerView{}, err
+		}
+	} else if err := run("init", "--dir", ws); err != nil {
 		res.Output = out.String()
 		return res, LedgerView{}, err
 	}
-	if spec.PolicyFile != "" {
+	if spec.PolicyFile != "" && spec.TemplateSrc == "" {
 		// THERE IS NO `mvo policy install`. The verbs are list, show, validate,
 		// use, and a policy is installed by placing the file in the workspace's
 		// own policies dir and pinning it by NAME — `policy use` requires the
@@ -487,6 +518,45 @@ func copyTree(src, dst string) error {
 		d := filepath.Join(dst, name)
 		if e.IsDir() {
 			if err := copyTree(s, d); err != nil {
+				return err
+			}
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			return fmt.Errorf("eval: stat %s: %w", s, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		b, err := os.ReadFile(s)
+		if err != nil {
+			return fmt.Errorf("eval: read %s: %w", s, err)
+		}
+		if err := os.WriteFile(d, b, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("eval: write %s: %w", d, err)
+		}
+	}
+	return nil
+}
+
+// copyAll copies a directory tree VERBATIM — no skips of any kind. It is used
+// for the warmed template's `.multiverso`, where every skip would be a
+// silently different cost table, and it is a separate function from copyTree
+// precisely so that copyTree's skip list can never grow into this path.
+func copyAll(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("eval: create %s: %w", dst, err)
+	}
+	ents, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("eval: read %s: %w", src, err)
+	}
+	for _, e := range ents {
+		s := filepath.Join(src, e.Name())
+		d := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := copyAll(s, d); err != nil {
 				return err
 			}
 			continue

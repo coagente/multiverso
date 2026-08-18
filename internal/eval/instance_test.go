@@ -659,3 +659,99 @@ func repoRoot(t *testing.T) string {
 }
 
 var _ = json.Marshal
+
+// M2d.1 DECISION 12: an ABSENT `instrument` block normalizes to {0, cold,
+// actual} EXACTLY, the check REFUSES on a moved cost regime and NAMES it, and
+// the round-trip fixed point holds with the block present.
+//
+// The normalization is what lets the check see the change WITHOUT ONE BYTE OF
+// ANY FROZEN ARTIFACT MOVING: no binary before this block could warm an eval
+// workspace, so every number M2d published is cold, as a fact about the
+// binaries that existed rather than a guess about the runs.
+func TestAnAbsentInstrumentBlockMeansColdExactly(t *testing.T) {
+	raw := `{"schema":"` + SchemaFreeze + `","corpus":"local-derived","version":"v1",
+	         "frozen_at":"2026-08-17T00:00:00Z","policy_digest":"mv0:deadbeef",
+	         "constants":{},"oracle_digests":{},"binary_digest":""}`
+	var fz FreezeFile
+	if err := json.Unmarshal([]byte(raw), &fz); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if fz.Instrument != ColdInstrument() {
+		t.Fatalf("an absent instrument block normalized to %+v, want %+v", fz.Instrument, ColdInstrument())
+	}
+	// A COLD run against a cold freeze reports nothing.
+	if d := fz.CheckInstrument(ColdInstrument()); len(d) != 0 {
+		t.Fatalf("a cold run against a cold freeze drifted: %+v", d)
+	}
+	// A WARM run against it REFUSES, naming what moved.
+	warm := LiveInstrument(WarmupAuto, "actual", "warm")
+	d := fz.CheckInstrument(warm)
+	if len(d) == 0 {
+		t.Fatal("a warmed run against a cold freeze reported no drift: warming changes what every arm " +
+			"can afford, and a table that pooled the two would be two experiments under one caption")
+	}
+	named := false
+	for _, x := range d {
+		if x.What == "instrument.cost_regime" && x.Frozen == "cold" && x.Now == "warm" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the drift does not read `instrument.cost_regime: cold -> warm`: %+v", d)
+	}
+}
+
+// The fixed point holds WITH the block present, or the freeze is a lock
+// nobody can work under — the failure the `adaptive_rule` marshaller exists
+// to prevent, one field later.
+func TestAFreezeWithAnInstrumentBlockRoundTripsToItself(t *testing.T) {
+	live := LiveInstrument(WarmupAuto, "actual", "warm")
+	fz := FreezeFile{
+		Schema: SchemaFreeze, Corpus: "local-derived", Version: "v1",
+		FrozenAt: "2026-08-17T00:00:00Z", PolicyDigest: "mv0:deadbeef",
+		Constants: SchedulerConstants(), Rules: SchedulerRules(),
+		Instrument: live, OracleDigests: map[string]string{},
+	}
+	b, err := json.Marshal(fz)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), "instrument") {
+		t.Fatalf("a freeze written by this build carries no instrument block:\n%s", b)
+	}
+	var back FreezeFile
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if d := back.CheckInstrument(live); len(d) != 0 {
+		t.Fatalf("a freeze written by this build is refused by this build: %+v", d)
+	}
+	// A run that ASKED for auto and got warm_incomplete is a COLD run and
+	// says so: the regime is derived from the artifact, never from the flag.
+	cold := LiveInstrument(WarmupAuto, "actual", "cold")
+	if cold.CostRegime != "cold" || cold.WarmupRaces != 0 {
+		t.Errorf("a run that could not warm reported itself as %+v", cold)
+	}
+}
+
+// THE COMMITTED FREEZE FILE IS THE ARTIFACT, and it is checked here rather
+// than described: decision 12 re-cuts it ONCE, in this block, as a declared
+// change, and a file that did not move would leave the check refusing forever
+// — which is the rubber stamp the file's own notes already name.
+func TestTheCommittedFreezeDeclaresItsInstrument(t *testing.T) {
+	fz, err := LoadFreeze(filepath.Join("..", "..", "eval", "freeze", "local-derived-v1.json"))
+	if err != nil {
+		t.Skipf("no committed freeze to check: %v", err)
+	}
+	if fz.Instrument.CostRegime == "" {
+		t.Fatal("the committed freeze declares no cost regime")
+	}
+	if d := fz.CheckInstrument(LiveInstrument(WarmupAuto, "actual", fz.Instrument.CostRegime)); len(d) != 0 {
+		t.Errorf("the committed freeze refuses the instrument this build defaults to: %+v", d)
+	}
+	joined := strings.Join(fz.Notes, " ")
+	if !strings.Contains(joined, "instrument") {
+		t.Error("the re-cut is not declared in the file's own notes: a moved freeze with no stated reason " +
+			"is exactly the quiet tuning the mechanism exists to prevent")
+	}
+}

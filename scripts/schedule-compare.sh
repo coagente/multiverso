@@ -85,7 +85,11 @@ usage: scripts/schedule-compare.sh [options]
   --patches DIR          patch directory under testdata/toyrepo (default: patches)
   --parallel N           dispatch degree for BOTH arms (default: 1, the canonical
                          comparison; results at different k are never pooled)
-  --warmup N             warm-up races used to fit the cost table (default: 2)
+  --warmup N             warm-up races used to fit the cost table (default: 2).
+                         0 is the COLD instrument, kept because M2d.1 accept
+                         step m2d1-9a has to reproduce the vacuum on purpose:
+                         with nothing priced, every allocation rule collapses
+                         to the exhaustive ladder and the comparison is VACUOUS
   --probe-tolerance-bp N host-probe tolerance in basis points (default: 2000 = 20%)
   --arm-a FLAG           first arm (default: --schedule=adaptive)
   --arm-b FLAG           second arm (default: --schedule=fixed-budget)
@@ -100,8 +104,10 @@ usage: scripts/schedule-compare.sh [options]
   --json                 emit the comparison as one JSON object
   -h, --help             this message
 
-exit codes: 0 compared, 1 a run or an assertion failed, 2 usage,
-            3 no verdict (R < 3) under --strict,
+
+exit codes: 0 compared, 1 a run or an assertion failed (INERTNESS VIOLATED is
+              one of them), 2 usage, 3 no verdict (R < 3) under --strict,
+            5 VACUOUS — the rule under test never fired, so no verdict,
             77 SKIP — this binary does not expose the arms to compare
 EOF
 }
@@ -351,6 +357,7 @@ winner = rep.get("winner", "")
 # (F2). Comparing digests would report "different subject" on every run,
 # including the null case where the arms agree perfectly.
 winner_ordinal = next((c.get("ordinal", 0) for c in cands if c.get("world") == winner), 0)
+ord_of = {c.get("world", ""): c.get("ordinal", 0) for c in cands}
 
 # F7: was this race decided at the TERMINAL world_digest_asc key? That is a
 # coin flip over candidate-authored bytes, and it lands differently in each
@@ -405,6 +412,20 @@ out = {
     "declined": [
         {"step": r["step"], "world": r["world"], "oracle": r["oracle"], "why": r["declined"]}
         for r in sched.get("steps", []) if r.get("declined")
+    ],
+    # M2d.1: COVERAGE, DERIVED AND RENDERED. `mvo explain --schedule --json`
+    # computes it from the RECORDED steps of this race; nothing here
+    # recomputes a score. A comparison that cannot say whether the rule under
+    # test ever fired is a comparison of one rule against itself.
+    "coverage": sched.get("coverage") or {},
+    # The PURCHASE ORDER, keyed on the CANDIDATE ORDINAL and never on the
+    # world digest: a world binds created_at, the agent RunCost and a
+    # transcript digest, so the same patch produces a different digest in
+    # every run (F2) and a digest-keyed comparison would report "different
+    # subject" on every run including the perfect null.
+    "purchase_order": [
+        "%s.%s" % (ord_of.get(r["world"], "?"), r["oracle"])
+        for r in sched.get("steps", []) if r.get("bought")
     ],
     "waste_ms": waste.get("waste_ms", 0),
     "waste_bp": waste.get("waste_bp", 0),
@@ -565,6 +586,92 @@ def arm_stats(side):
         "overrun_max_ms": max([r["overrun_ms"] for r in rows], default=0),
     }
 
+# ---------------------------------------------------------------------------
+# M2d.1 — COVERAGE AND THE REFUSAL.
+#
+# COVERAGE and DIVERGENCE are two different questions and collapsing them
+# would swallow M2b.2's genuine null:
+#
+#   coverage   = exercised steps / steps                        -- ONE trace
+#   divergence = replicates whose PURCHASE ORDER differs / reps  -- the PAIR
+#
+#   coverage 0, divergence 0  -> VACUOUS, no verdict, exit 5
+#   coverage >0, divergence 0 -> MEASURED-NULL, reported, exit 0. THIS IS A
+#                                RESULT and must be publishable: it is exactly
+#                                M2b.2 s7.5's pre-registered null.
+#   coverage >0, divergence >0-> the ordinary verdict machinery
+#   coverage 0, divergence >0 -> INERTNESS VIOLATED, a FAILURE, exit 1. The
+#                                arms bought different things on steps where
+#                                an arm declared itself inert, so the
+#                                declaration is wrong and nothing downstream
+#                                may be reported. This fourth row is the
+#                                reason to trust the first three.
+# ---------------------------------------------------------------------------
+def coverage_of(side):
+    rows = [p[side]["coverage"] or {} for p in kept]
+    steps = sum(int(c.get("steps", 0)) for c in rows)
+    exercised = sum(int(c.get("exercised", 0)) for c in rows)
+    races = sum(1 for c in rows if c.get("applicable") and c.get("known"))
+    races_ex = sum(1 for c in rows if int(c.get("exercised", 0)) > 0)
+    wit = {}
+    for c in rows:
+        for w in c.get("witnesses") or []:
+            acc = wit.setdefault(w["id"], {"name": w.get("name", ""), "steps": 0, "total": 0})
+            acc["steps"] += int(w.get("steps", 0))
+            acc["total"] += int(w.get("total", 0))
+    regimes = sorted({g for c in rows for g in (c.get("regimes") or [])})
+    tables = sorted({c.get("cost_regime", "") for c in rows if c.get("cost_regime")})
+    first = rows[0] if rows else {}
+    return {
+        "rule": first.get("rule", ""),
+        "baseline": first.get("baseline", ""),
+        "applicable": bool(first.get("applicable")),
+        "known": bool(first.get("known")),
+        "steps": steps, "exercised": exercised,
+        "races": races, "races_exercised": races_ex,
+        "witnesses": wit, "commit_basis": regimes,
+        "cost_regime": tables[0] if len(tables) == 1 else ("mixed(%s)" % ",".join(tables) if tables else "unknown"),
+        # A trace this binary priced and that never exercised its rule.
+        "vacuous": bool(first.get("applicable") and first.get("known") and steps > 0 and exercised == 0),
+    }
+
+COV_A, COV_B = coverage_of("a"), coverage_of("b")
+priced = [c for c in (COV_A, COV_B) if c["applicable"] and c["known"] and c["steps"] > 0]
+vacuous = bool(priced) and all(c["exercised"] == 0 for c in priced)
+
+# DIVERGENCE is the ORDER; INERTNESS VIOLATION is the SET, and they are two
+# different questions for a reason that is measured rather than stylistic.
+#
+# An arm's declared baseline says what it collapses to when inert, and what
+# that collapse MEANS differs by pair. `voc2` collapses to `voc` through voc's
+# OWN CODE PATH, so M2b.2's testing bar can demand "receipt set and order
+# both". `voc` collapses to the M1 EXHAUSTIVE LADDER, and M2b decision 13's
+# null case — accept step 5b — states that equivalence over the EVIDENCE SET:
+# the ladder is depth-first by construction and the adaptive arm interleaves by
+# score, so at an unbounded budget the two buy the same six receipts in
+# different orders, every time, by design. Measured here at B3 = S: identical
+# receipts, 1 of 1 replicates order-divergent.
+#
+# So the FAILURE test is over the multiset of (ordinal, oracle) purchases —
+# the claim that holds for every declared baseline — and the ORDER stays a
+# reported measurement. Testing the violation on order would have made this
+# harness call M2b's own published null case a broken predicate.
+def purchase_set(order):
+    return sorted(order)
+
+divergent = sum(1 for p in kept if p["a"]["purchase_order"] != p["b"]["purchase_order"])
+bought_differently = sum(
+    1 for p in kept
+    if purchase_set(p["a"]["purchase_order"]) != purchase_set(p["b"]["purchase_order"]))
+# AND IT IS A TEST OF A PAIR OF DECLARED RULES, not of a rule against a
+# baseline that declares nothing. The violation says "the arms bought
+# different things on steps where THE ARM DECLARED ITSELF INERT" — which needs
+# TWO declarations to falsify. A ladder arm computes no scarcity test and makes
+# no such declaration, so a voc-vs-ladder set difference at a budget that bound
+# for one arm and not the other is a MEASUREMENT and is reported as one; only a
+# pair of priced, inert rules can falsify the predicate.
+inertness_violated = len(priced) >= 2 and all(c["exercised"] == 0 for c in priced) and bought_differently > 0
+
 A, B = arm_stats("a"), arm_stats("b")
 table = {}
 for p in kept:
@@ -640,6 +747,12 @@ verdict = {
     "rotation": rotation,
     "verdict_available": verdict_ok,
     "build": os.environ["BUILD"],
+    # M2d.1: printed ALWAYS, including at 100 %.
+    "coverage": {"a": COV_A, "b": COV_B},
+    "purchase_order_divergence": divergent,
+    "purchase_set_divergence": bought_differently,
+    "vacuous": vacuous,
+    "inertness_violated": inertness_violated,
 }
 if verdict_ok:
     disagree_rate = 1 - agree / len(kept)
@@ -656,6 +769,10 @@ if verdict_ok:
 if as_json:
     print(json.dumps({"a": A, "b": B, "verdict": verdict, "pairs": kept,
                       "quarantine": quarantine}, sort_keys=True, indent=1))
+    if inertness_violated:
+        sys.exit(1)
+    if vacuous:
+        sys.exit(5)
     sys.exit(0 if (verdict_ok or not strict) else 3)
 
 def q(x, unit=""):
@@ -683,6 +800,65 @@ for arm in (A, B):
           % (q(arm["waste_ms"], " ms"), q(arm["selection_us"], " us"),
              arm["overrun_count"], arm["overrun_max_ms"]))
 print()
+def cov_line(side, cov, arm):
+    if not cov["steps"]:
+        if not cov["applicable"]:
+            return "  arm %s (%s): coverage -- (computes no scarcity test)" % (side, arm["selector"] or "-")
+        if not cov["known"]:
+            return "  arm %s (%s): coverage unknown (pre-M2b.2 trace)" % (side, arm["selector"] or "-")
+        return "  arm %s (%s): coverage -- (no allocation trace recorded)" % (side, arm["selector"] or "-")
+    pct = cov["exercised"] * 100 // cov["steps"]
+    return ("  arm %s (%s, baseline %s): %d of %d steps (%d%%), %d of %d races"
+            % (side, cov["rule"] or "-", cov["baseline"] or "-",
+               cov["exercised"], cov["steps"], pct, cov["races_exercised"], cov["races"]))
+
+print("COVERAGE — did the rule under test ever fire? (M2d.1 decision 10; printed always)")
+for side, cov, arm in (("a", COV_A, A), ("b", COV_B, B)):
+    print(cov_line(side, cov, arm))
+    for wid in sorted(cov["witnesses"]):
+        w = cov["witnesses"][wid]
+        extra = ""
+        if wid == "W3" and w["total"] > w["steps"]:
+            extra = "   (|C| = 0 on %d: equal shares, M2b decision 8)" % (w["total"] - w["steps"])
+        print("      %s %-26s %d of %d%s" % (wid, w["name"], w["steps"], w["total"], extra))
+    if cov["commit_basis"]:
+        print("      commit_basis observed: %s" % " / ".join(cov["commit_basis"]))
+    print("      cost table: %s" % (cov["cost_regime"] or "unknown").upper())
+print("  purchase-order divergence: %d of %d replicate(s) bought a different (ordinal, oracle) SEQUENCE"
+      % (divergent, len(kept)))
+print("  purchase-set divergence:   %d of %d replicate(s) bought a different (ordinal, oracle) SET"
+      % (bought_differently, len(kept)))
+if bought_differently and len(priced) < 2:
+    print("      (only %d arm declares an inertness predicate here, so a set difference is a"
+          % len(priced))
+    print("       MEASUREMENT and not a falsification: it takes two declarations to falsify one.)")
+print()
+
+if inertness_violated:
+    print("INERTNESS VIOLATED: the arms bought a DIFFERENT SET on %d replicate(s) whose every step"
+          % bought_differently)
+    print("  was declared INERT. The inertness predicate in M2d.1 decision 5 is WRONG for these arms,")
+    print("  the coverage number above is not measuring what it claims, and NOTHING DOWNSTREAM MAY BE")
+    print("  REPORTED. This is a failure of the coverage mechanism, not a result about the arms.")
+    sys.exit(1)
+
+if vacuous:
+    print("VACUOUS (coverage %d of %d steps, %d of %d replicates): NO VERDICT"
+          % (sum(c["exercised"] for c in priced), sum(c["steps"] for c in priced),
+             sum(c["races_exercised"] for c in priced), len(kept)))
+    observed = sorted({g for c in priced for g in c["commit_basis"]}) or ["no commit_basis at all"]
+    print("  the rule under test never fired: commit_basis was %s on every" % " / ".join(observed))
+    print("  step of every replicate, so each arm ran its own BASELINE and this is not a comparison")
+    print("  of two rules:")
+    for c in priced:
+        print("    --selector=%-6s ran %s" % (c["rule"], c["baseline"] or "its undeclared baseline"))
+    print("  Warm the workspace (--warmup auto / --warmup N) or drop the claim.")
+    print()
+    print("  NOTE: on a cold workspace no kind carries a local fit, so an unpriced purchase is")
+    print("  affordable while any pool remains and THE BUDGET DOES NOT BIND AT ALL — measured")
+    print("  2 164 ms spent against a 1 500 ms bound, stopping S-empty rather than S-budget.")
+    sys.exit(5)
+
 print("  paired decisions (arm a / arm b): %s" % (table or "-"))
 print("  same subject (candidate ordinal): %d of %d" % (same_subject, len(kept)))
 for name, reps in quarantine.items():

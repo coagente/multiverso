@@ -337,6 +337,95 @@ type FreezeFile struct {
 	// of the refusal: refusing on it would make the freeze a lock nobody
 	// could work under, and the mechanism must survive being used.
 	BinaryDigest string `json:"binary_digest"`
+	// Instrument is M2d.1 decision 12: WHAT THE INSTRUMENT COULD AFFORD.
+	//
+	// The freeze pinned the policy digest, the scheduler constants and — since
+	// M2b.2 — the allocation rule, and pinned NOTHING about the cost table the
+	// arms allocate against. Warming is at least as large an effect on a
+	// measured cell as `executor_bp` is: on a cold workspace nothing is
+	// priced, so an unpriced purchase is affordable while any pool remains and
+	// THE BUDGET DOES NOT BIND AT ALL. That is the same defect M2b.2 found one
+	// level in, and the fix is in the same direction — more refusal.
+	//
+	// AN ABSENT BLOCK MEANS {0, cold, actual} EXACTLY, so no byte of any
+	// frozen artifact has to move for the check to see the change. Same
+	// argument as M2b.1's `world_order` and M2b.2's `adaptive_rule`, reused
+	// because it is the same argument.
+	Instrument Instrument `json:"instrument"`
+	// Notes is the file's own prose: what this freeze is, and — when it is
+	// re-cut — WHAT MOVED AND WHY, with the old values quoted. A moved freeze
+	// with no stated reason is exactly the quiet tuning the mechanism exists
+	// to prevent, so the reason lives in the artifact rather than in a commit
+	// message.
+	Notes []string `json:"notes"`
+}
+
+// Instrument is what the harness could afford when a cell was measured.
+type Instrument struct {
+	WarmupRaces int    `json:"warmup_races"`
+	CostRegime  string `json:"cost_regime"`  // schedule.CostRegimeWarm | CostRegimeCold
+	BudgetBasis string `json:"budget_basis"` // schedule.BudgetBasisActual | BudgetBasisPredicted
+}
+
+// ColdInstrument is the exact normalization of an ABSENT `instrument` block.
+// It is EXACT rather than assumed: no binary before M2d.1 could warm an eval
+// workspace, so every number M2d published is COLD-COST-TABLE and that is a
+// fact about the binaries that existed rather than a guess about the runs.
+func ColdInstrument() Instrument {
+	return Instrument{WarmupRaces: 0, CostRegime: schedule.CostRegimeCold, BudgetBasis: schedule.BudgetBasisActual}
+}
+
+// LiveInstrument renders the instrument a run is ACTUALLY using, from the
+// flag it was given and the regime its races recorded. The regime is derived
+// from the artifact rather than from the flag wherever a race happened, which
+// is why it is a parameter: a run that asked for `auto` and got
+// `warm_incomplete` is a COLD run and must say so.
+func LiveInstrument(warmup, budgetBasis, regime string) Instrument {
+	races := 0
+	if auto, n, err := ParseWarmup(warmup); err == nil && !auto {
+		races = n
+	} else if err == nil && auto {
+		races = WarmupCapDefault
+	}
+	if regime == "" || regime == schedule.CostRegimeUnknown {
+		regime = schedule.CostRegimeCold
+	}
+	if regime == schedule.CostRegimeCold {
+		races = 0
+	}
+	if budgetBasis == "" {
+		budgetBasis = schedule.BudgetBasisActual
+	}
+	return Instrument{WarmupRaces: races, CostRegime: regime, BudgetBasis: budgetBasis}
+}
+
+// CheckInstrument compares the live instrument against the freeze and names
+// what moved: `instrument.cost_regime: "cold" -> "warm"`.
+//
+// It is a separate method rather than a fourth argument to CheckFreeze because
+// the instrument is a property of the RUN's flags while everything CheckFreeze
+// compares is a property of the BUILD, and folding a run-time value into a
+// build-time check is how the two eventually get compared against each other's
+// era.
+func (f FreezeFile) CheckInstrument(live Instrument) []FreezeDrift {
+	frozen := f.Instrument
+	if frozen == (Instrument{}) {
+		frozen = ColdInstrument()
+	}
+	var out []FreezeDrift
+	if frozen.CostRegime != live.CostRegime {
+		out = append(out, FreezeDrift{What: "instrument.cost_regime",
+			Frozen: frozen.CostRegime, Now: live.CostRegime})
+	}
+	if frozen.BudgetBasis != live.BudgetBasis {
+		out = append(out, FreezeDrift{What: "instrument.budget_basis",
+			Frozen: frozen.BudgetBasis, Now: live.BudgetBasis})
+	}
+	if frozen.WarmupRaces != live.WarmupRaces {
+		out = append(out, FreezeDrift{What: "instrument.warmup_races",
+			Frozen: fmt.Sprint(frozen.WarmupRaces), Now: fmt.Sprint(live.WarmupRaces)})
+	}
+	return out
 }
 
 // FreezeDrift is one thing that moved since the freeze.
@@ -415,6 +504,18 @@ func (f *FreezeFile) UnmarshalJSON(b []byte) error {
 	}
 	if f.Rules[FreezeKeyAdaptiveRule] == "" {
 		f.Rules[FreezeKeyAdaptiveRule] = schedule.SelectorNameVOC
+	}
+	// AN ABSENT `instrument` BLOCK MEANS COLD, EXACTLY. Decision 12's
+	// normalization, and the reason no byte of any pre-M2d.1 freeze file has
+	// to move for the check to see the change.
+	if f.Instrument == (Instrument{}) {
+		f.Instrument = ColdInstrument()
+	}
+	if f.Instrument.CostRegime == "" {
+		f.Instrument.CostRegime = schedule.CostRegimeCold
+	}
+	if f.Instrument.BudgetBasis == "" {
+		f.Instrument.BudgetBasis = schedule.BudgetBasisActual
 	}
 	return nil
 }

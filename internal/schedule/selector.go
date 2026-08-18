@@ -596,6 +596,11 @@ func scoreVOC2(p purchase, st State, pl commitPlan) Ranked {
 		HardGate:     p.rung.HardGate,
 		Kind:         p.rung.Kind,
 		Oracle:       p.rung.Name,
+		// M2d.1 W4: decision 4's reachability condition dropped this row's pass
+		// outcomes. Under `Unbounded` nothing was dropped — FailClosedNotes
+		// returns the full bracket — so the field records what happened rather
+		// than which branch was taken.
+		PassWithheld: !completable && !v.Unbounded,
 		ScoreBasis:   ScoreBasisFinish,
 		ScoreBPPS:    value * 1000 / finishDivisor(finish),
 		ValueBP:      value,

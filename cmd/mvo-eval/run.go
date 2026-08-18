@@ -83,6 +83,19 @@ type runOpts struct {
 	keep       string
 	python     string
 	selector   string
+	// warmup is M2d.1 decision 1: {auto|N|0}. `auto` races into a TEMPLATE
+	// until every kind the pinned policy can buy carries a local fit, or
+	// refuses by name; `0` is the COLD instrument, kept because accept step
+	// m2d1-9a has to be able to reproduce M2b.2's vacuum on purpose.
+	warmup string
+	// warmAuto / warmRaces are ParseWarmup's answer, resolved once.
+	warmAuto  bool
+	warmRaces int
+	// allowVacuous is decision 7's one escape hatch. It prints the same
+	// banner, exits 0, and stamps VACUOUS on every table it produced —
+	// because the flag that suppresses a refusal must not also suppress its
+	// caption.
+	allowVacuous bool
 }
 
 func cmdRun(args []string) error {
@@ -122,8 +135,24 @@ func cmdRun(args []string) error {
 			"on a binary that ships the revision: the arm, the instances, the labels, the scoring and the "+
 			"metrics are unchanged, and only the rule moves. Recorded in the manifest's notes, because a "+
 			"cell that cannot say which rule it raced under is a cell whose caption is a guess")
+	fs.StringVar(&o.warmup, "warmup", eval.WarmupAuto,
+		"how the COST TABLE is priced before the arms race against it (M2d.1 decision 1): `auto` races an "+
+			"UNBUDGETED warm-up into a template until every kind the pinned policy can buy carries a local "+
+			"fit (cap 3, then `warm_incomplete` naming the unpriced kinds); `N` pins a count; `0` is the COLD "+
+			"instrument. On a cold workspace nothing is priced, so an unpriced purchase is affordable while "+
+			"any pool remains, THE BUDGET DOES NOT BIND, and every allocation rule collapses to the "+
+			"exhaustive ladder — which is what made every M2d cell byte-identical between voc and voc2. "+
+			"Warming is charged to NO arm: it is a separate intent at --budget-oracle-ms 0")
+	fs.BoolVar(&o.allowVacuous, "allow-vacuous", false,
+		"print the tables of a cell whose rule under test never fired, stamped VACUOUS, and exit 0 instead "+
+			"of 5. The banner and its reason are printed either way: a flag that suppresses a refusal must "+
+			"not also suppress its caption")
 	if err := fs.Parse(args); err != nil {
 		return codedError{code: exitUsage, msg: err.Error()}
+	}
+	warmAuto, warmRaces, werr := eval.ParseWarmup(o.warmup)
+	if werr != nil {
+		return codedError{code: exitUsage, msg: werr.Error()}
 	}
 
 	home := o.common.home
@@ -138,7 +167,9 @@ func cmdRun(args []string) error {
 		Schema: eval.SchemaRun, Corpus: o.common.corpus, Version: o.common.version,
 		Split: o.split, Replicates: o.replicates, BudgetLevel: o.level,
 		Arms: splitList(o.arms), CanaryVerdict: eval.CanaryNotInUse,
-		Derivations: map[string][]eval.Derived{},
+		Derivations:   map[string][]eval.Derived{},
+		AllowVacuous:  o.allowVacuous,
+		CoverageByArm: map[string]schedule.CoverageReport{},
 		Notes: []string{
 			"n = 1–2 repositories, synthetic candidates, Tier-1 labels, oracle-budget-matched only, " +
 				"selection cost measured and uncharged, tokens and runner time unmeasured, no agent output anywhere in it. " +
@@ -217,7 +248,13 @@ func cmdRun(args []string) error {
 	//
 	// Tuning after the freeze is not forbidden; it is made impossible to do
 	// quietly.
-	digest, drift, ferr := checkFreeze(o.repoRoot, o.common.corpus, o.common.version, o.split, o.unfreeze, "run")
+	// The instrument this run will actually use. The COST REGIME is derived
+	// from the flag here — before any race — and re-derived from the RECORDED
+	// cost tables afterwards; the pre-flight check is what makes the drift
+	// impossible to MISS rather than merely impossible to hide.
+	liveInstrument := eval.LiveInstrument(o.warmup, schedule.BudgetBasisActual, warmRegimeOf(warmAuto, warmRaces))
+	digest, drift, ferr := checkFreeze(o.repoRoot, o.common.corpus, o.common.version, o.split, o.unfreeze, "run",
+		&liveInstrument)
 	if ferr != nil {
 		return ferr
 	}
@@ -245,6 +282,14 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("mvo-eval run: create %s: %w", workRoot, err)
 	}
 
+	// DECISION 2: ONE TEMPLATE PER (INSTANCE, POLICY DIGEST, BINARY), and
+	// every arm and every replicate inherits it by COPY. The cost table is a
+	// property of the host and the repository, not of the arm — and the
+	// amortization is the whole reason it is a decision: a full protocol cell
+	// races 9 times per instance, and one warm-up serves all nine.
+	templates := eval.NewTemplateCache()
+	o.warmAuto, o.warmRaces = warmAuto, warmRaces
+
 	var rows []eval.Row
 	for _, id := range o.instanceIDs(store) {
 		if haveSplit && o.split != "" {
@@ -258,7 +303,7 @@ func cmdRun(args []string) error {
 			man.Census.Add(id, eval.SkipInstanceAbsent, err.Error())
 			continue
 		}
-		iRows, nc, derivs, skip, err := o.runInstance(store, home, inst, workRoot, &man)
+		iRows, nc, derivs, skip, err := o.runInstance(store, home, inst, workRoot, templates, &man)
 		if err != nil {
 			return err
 		}
@@ -277,7 +322,8 @@ func cmdRun(args []string) error {
 // runInstance is the per-instance protocol. It returns the rows, the
 // non-consultation proof, the derivation census and a skip reason.
 func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
-	workRoot string, man *eval.RunManifest) ([]eval.Row, eval.NonConsultation, []eval.Derived, eval.SkipReason, error) {
+	workRoot string, templates *eval.TemplateCache,
+	man *eval.RunManifest) ([]eval.Row, eval.NonConsultation, []eval.Derived, eval.SkipReason, error) {
 
 	nc := eval.NonConsultation{Instance: inst.ID, OracleDigest: inst.OracleDigest, CanaryID: inst.CanaryID}
 	hidden, hiddenBytes, err := store.LoadHidden(inst)
@@ -325,6 +371,25 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 	rowPolicy := policyName(policyFile)
 	man.PolicyByInstance[inst.ID] = rowPolicy
 
+	// 0. WARM THE COST TABLE — decisions 1, 2 and 4.
+	//
+	// It happens BEFORE the reference arm because every arm of this instance,
+	// reference included, must inherit the SAME table: a reference raced
+	// against an empty table and budgeted arms raced against a priced one
+	// would derive B from a race nobody else ran.
+	//
+	// The warm-up is a SEPARATE INTENT at --budget-oracle-ms 0, so its spend
+	// is structurally outside every arm's pool. What it cost is recorded
+	// rather than merely uncharged.
+	warmKey := eval.TemplateKey(inst.ID, rowPolicy+"/"+man.PolicyDigest, man.BinaryDigest)
+	warm := templates.Warm(warmKey, eval.WarmSpec{
+		MVO: o.mvo, Dir: filepath.Join(workRoot, sanitize(inst.ID), "template"),
+		RepoSrc: store.RepoPath(inst), Patches: patches, PolicyFile: policyFile,
+		Parallel: 1, Auto: o.warmAuto, Races: o.warmRaces, EvalHome: home,
+	})
+	man.Warmups = appendWarm(man.Warmups, warm)
+	template := warm.Template
+
 	// 1. The reference arm, REPLICATED.
 	//
 	// B is derived from this race's own bound (B1 = ceil(minspend x 1.1)), so
@@ -358,7 +423,8 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 		run, view, err := eval.Race(eval.RunSpec{
 			Arm: refArm, MVO: o.mvo, Instance: inst, Patches: patches,
 			WorkRoot: dir, EvalHome: home, RepoSrc: store.RepoPath(inst),
-			PolicyFile: policyFile, Parallel: 1, Needles: needles,
+			TemplateSrc: template,
+			PolicyFile:  policyFile, Parallel: 1, Needles: needles,
 		})
 		if err != nil {
 			if r == 0 {
@@ -523,6 +589,17 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 		sources   []string
 		costs     []int64
 		admits    []string
+		// M2d.1: the instrument's own per-replicate record. Coverage is
+		// computed from the RECORDED steps of each replicate's own trace;
+		// orders are the purchase sequences the paired divergence compares;
+		// regimes are decision 11's derived cost-table label.
+		coverage []schedule.CoverageReport
+		orders   [][]string
+		regimes  map[string]bool
+		// tables is the set of RECORDED cost-table snapshots this arm
+		// allocated against, digested. Decision 2's template makes it a
+		// singleton by construction; V-6 is the assertion that it is.
+		tables map[string]bool
 	}
 	states := map[string]*armState{}
 	var order []string
@@ -531,7 +608,7 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 		if !ok || a.Kind != eval.KindRaced {
 			continue
 		}
-		states[id] = &armState{arm: a}
+		states[id] = &armState{arm: a, regimes: map[string]bool{}, tables: map[string]bool{}}
 		order = append(order, id)
 	}
 	for r := 0; r < o.replicates; r++ {
@@ -544,7 +621,8 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 			run, view, err := eval.Race(eval.RunSpec{
 				Arm: st.arm, MVO: o.mvo, Instance: inst, Patches: patches,
 				WorkRoot: dir, EvalHome: home, RepoSrc: store.RepoPath(inst),
-				PolicyFile: policyFile, Parallel: 1, BudgetMS: budget, Needles: needles,
+				TemplateSrc: template,
+				PolicyFile:  policyFile, Parallel: 1, BudgetMS: budget, Needles: needles,
 				// M2b.2 decision 6: the RULE is a flag on the adaptive arm and
 				// on no other. The arm table does not move — no new arm, no new
 				// instance, no new metric — so the only thing this changes about
@@ -581,21 +659,64 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 			}
 			st.winners = append(st.winners, winner)
 			st.sources = append(st.sources, source)
+			// THE SPEND IS THE RACE WINDOW'S, NEVER THE WORKSPACE'S (decision
+			// 3, falsifier V-5). A warmed workspace holds the warm-up's
+			// receipts in the very same ledger, and an arm charged with them
+			// would stop being budget-matched IN THE REPORT even though it is
+			// matched IN THE POOL.
 			st.costs = append(st.costs, oracleSpend(view))
 			st.admits = append(st.admits, view.AdmitResult)
+
+			// M2d.1: coverage from the RECORDED steps, the purchase order for
+			// the paired divergence, and the cost regime derived from the
+			// recorded cost table.
+			st.coverage = append(st.coverage, schedule.Coverage(view.Trace))
+			st.orders = append(st.orders, schedule.PurchaseOrder(view.Trace, ordinalsOf(inst, view)))
+			st.regimes[schedule.CostRegimeOf(view.Trace)] = true
+			if dig := costTableDigest(view.Trace); dig != "" {
+				st.tables[dig] = true
+			}
 		}
+	}
+	// V-6: THE COST TABLE MUST BE BYTE-EQUAL ACROSS ARMS. Decision 2's
+	// template exists to make it so by construction; asserting it is what
+	// turns "by construction" into a measurement, and a cell whose arms priced
+	// differently has every per-arm difference confounded with pricing.
+	allTables := map[string]bool{}
+	for _, id := range order {
+		for dig := range states[id].tables {
+			allTables[dig] = true
+		}
+	}
+	if len(allTables) > 1 {
+		man.CostTableDrift = append(man.CostTableDrift, fmt.Sprintf(
+			"%s: %d distinct recorded cost tables across %d arm(s) x %d replicate(s)",
+			inst.ID, len(allTables), len(order), o.replicates))
+	}
+	// DECISION 6: divergence is the PAIRED question and it is kept apart from
+	// coverage. `coverage > 0, divergence 0` is a MEASURED NULL and must stay
+	// publishable — it is precisely M2b.2 §7.5's pre-registered null, and a
+	// refusal that swallowed it would destroy the one finding that block
+	// earned.
+	if len(order) >= 2 {
+		man.Divergence = append(man.Divergence,
+			divergenceLine(inst.ID, order[0], order[1], states[order[0]].orders, states[order[1]].orders))
 	}
 	for _, id := range order {
 		st := states[id]
 		if len(st.decisions) == 0 {
 			continue
 		}
+		if len(st.coverage) > 0 {
+			man.CoverageByArm[id] = schedule.MergeCoverage(append(
+				[]schedule.CoverageReport{man.CoverageByArm[id]}, st.coverage...))
+		}
 		modal, n, stable := eval.Modal(st.decisions)
 		winnerLabel := modalWinner(st.decisions, st.winners, modal)
 		admitRan, admitResult := modalAdmit(st.decisions, st.admits, modal)
 		rows = append(rows, eval.Row{
 			Instance: inst.ID, Arm: id, Family: inst.Family, Tier: hidden.Tier,
-			Policy: rowPolicy, Cluster: cluster,
+			Policy: rowPolicy, Cluster: cluster, CostRegime: oneRegime(st.regimes),
 			Decision: modal, Stable: stable, Replicates: len(st.decisions), ModalCount: n,
 			WinnerLabel:  winnerLabel,
 			WinnerSource: modalString(st.decisions, st.sources, modal),
@@ -747,11 +868,130 @@ func (o runOpts) detect(workspace string, n eval.Needles, inst eval.Instance,
 	return rep, nil
 }
 
+// ---------------------------------------------------------------------------
+// M2d.1 helpers: all pure over what was RECORDED.
+// ---------------------------------------------------------------------------
+
+// appendWarm keeps one warm report per template key. The cache builds a
+// template once; the manifest reports it once.
+func appendWarm(xs []eval.WarmReport, w eval.WarmReport) []eval.WarmReport {
+	for _, x := range xs {
+		if x.Key == w.Key {
+			return xs
+		}
+	}
+	return append(xs, w)
+}
+
+// ordinalsOf maps this race's world digests to CANDIDATE ORDINALS, which is
+// the only stable identity across runs: a world binds created_at, the agent
+// RunCost and a transcript digest, so the same patch produces a different
+// world digest in every run (M2b.1 F2). A purchase order keyed on digests
+// would report "different subject" on every run, including the null case
+// where the arms agree perfectly.
+func ordinalsOf(inst eval.Instance, v eval.LedgerView) map[string]int {
+	out := map[string]int{}
+	for _, w := range v.Worlds {
+		if c, ok := inst.CandidateByTree(w.World.Tree); ok {
+			out[w.Digest] = c.Ord
+		}
+	}
+	return out
+}
+
+// costTableDigest digests the RECORDED cost-table snapshot a race allocated
+// against — the one on `schedule.started`, not a fit re-derived at read time,
+// which would have moved. An untraced race has no snapshot and digests to "",
+// which is an absence rather than a table everybody agrees on.
+func costTableDigest(tr schedule.Trace) string {
+	if !tr.HasStarted || len(tr.Started.CostTable) == 0 {
+		return ""
+	}
+	b, err := schedule.Payload(tr.Started.CostTable)
+	if err != nil {
+		return ""
+	}
+	return eval.CASKeyBytes(b)
+}
+
+// oneRegime collapses an arm's per-replicate cost regimes into the row's
+// label. A set that MIXES regimes is reported as mixed rather than as either
+// one: a row that pooled a warm replicate with a cold one is exactly the
+// untagged aggregate decision 11 exists to stop.
+func oneRegime(seen map[string]bool) string {
+	var got []string
+	for k := range seen {
+		if k != "" && k != schedule.CostRegimeUnknown {
+			got = append(got, k)
+		}
+	}
+	sort.Strings(got)
+	switch len(got) {
+	case 0:
+		return ""
+	case 1:
+		return got[0]
+	default:
+		return "mixed(" + strings.Join(got, ",") + ")"
+	}
+}
+
+// divergenceLine is decision 6's paired figure: how many replicates bought a
+// DIFFERENT SEQUENCE of (ordinal, oracle). Within a replicate both arms share
+// the rotation ρ, so the sequences are comparable.
+func divergenceLine(instance, armA, armB string, a, b [][]string) string {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n == 0 {
+		return fmt.Sprintf("%s: %s vs %s — no comparable replicate", instance, armA, armB)
+	}
+	diff := 0
+	for i := 0; i < n; i++ {
+		if !schedule.SameOrder(a[i], b[i]) {
+			diff++
+		}
+	}
+	return fmt.Sprintf("%s: %s vs %s — %d of %d replicate(s) bought a different (ordinal, oracle) sequence",
+		instance, armA, armB, diff, n)
+}
+
 // finish computes the metrics, signs the manifest, appends the eval-use line
 // and prints. It is the ONE place a report is rendered, so the "no metric line
 // when nothing was scored" rule cannot be bypassed by a second printer.
 func (o runOpts) finish(man eval.RunManifest, rows []eval.Row, home string) error {
 	man.Rows = rows
+
+	// DECISION 7's REFUSAL, decided BEFORE any metric is computed.
+	//
+	// THE RULE UNDER TEST is the ADAPTIVE arm's selector, because that is what
+	// a cell's caption is a claim about. If it provably never fired, this is
+	// not a comparison of two rules — it is a comparison of one rule against
+	// itself, and the honest output is nothing.
+	//
+	// It is NOT behind --strict. `R < 3` is a THIN measurement and a reader
+	// may reasonably want to look at it; a 0 % comparison is NOT A MEASUREMENT
+	// OF ANYTHING.
+	if c, ok := man.CoverageByArm[eval.ArmAdaptive]; ok {
+		man.RuleCoverage = &c
+		man.Vacuous = c.Vacuous()
+	}
+	if man.Vacuous && !man.AllowVacuous {
+		// NO METRIC LINE IS PRINTED AT ALL — M2d decision 1b's own shape: the
+		// assertion is on the ABSENCE of a number, which is the only way to
+		// test the rule.
+		fmt.Println(joinLines(man.Render()))
+		if o.jsonOut != "" {
+			if err := writeSignedManifest(home, o.jsonOut, man); err != nil {
+				return err
+			}
+		}
+		return codedError{code: exitVacuous, msg: "mvo-eval run: VACUOUS — the rule under test never fired; " +
+			"no verdict and no metric line. Warm the workspace (--warmup auto), lower the budget until it " +
+			"binds, or pass --allow-vacuous to print the tables stamped VACUOUS"}
+	}
+
 	armIDs := map[string]bool{}
 	for _, r := range rows {
 		armIDs[r.Arm] = true
@@ -1113,7 +1353,8 @@ func defaultPolicyDigest() string {
 // inflation, which is exactly the accidental version the mechanism exists to
 // stop. The committed freeze file's own notes promise `mvo-eval score --split
 // eval` refuses; now it does.
-func checkFreeze(repoRoot, corpus, version, split, unfreeze, verb string) (string, []eval.FreezeDrift, error) {
+func checkFreeze(repoRoot, corpus, version, split, unfreeze, verb string,
+	instrument *eval.Instrument) (string, []eval.FreezeDrift, error) {
 	path := filepath.Join(repoRoot, "eval", "freeze", fmt.Sprintf("%s-%s.json", corpus, version))
 	fz, err := eval.LoadFreeze(path)
 	if err != nil {
@@ -1128,6 +1369,12 @@ func checkFreeze(repoRoot, corpus, version, split, unfreeze, verb string) (strin
 	// alternative policy is a declared experiment, not quiet tuning of the
 	// default.
 	drift := fz.CheckFreeze(defaultPolicyDigest(), eval.SchedulerConstants(), eval.SchedulerRules(), nil)
+	// M2d.1 decision 12: the freeze also pins WHAT THE INSTRUMENT COULD
+	// AFFORD, and a moved regime reads `instrument.cost_regime: "cold" ->
+	// "warm"`. Verbs that take no measurement pass nil and are unaffected.
+	if instrument != nil {
+		drift = append(drift, fz.CheckInstrument(*instrument)...)
+	}
 	if len(drift) > 0 && split == eval.SplitEval && unfreeze == "" {
 		var what []string
 		for _, d := range drift {
@@ -1139,6 +1386,17 @@ func checkFreeze(repoRoot, corpus, version, split, unfreeze, verb string) (strin
 				"the reason, the diff and the timestamp are appended to the run log"}
 	}
 	return eval.CASKeyBytes(b), drift, nil
+}
+
+// warmRegimeOf is the regime a run INTENDS, from its flag alone. A run that
+// asks for no warm-up is cold by construction; a run that asks for one is warm
+// unless its races say otherwise, and the manifest's own cost_regime column is
+// derived from the recorded tables rather than from this.
+func warmRegimeOf(auto bool, races int) string {
+	if !auto && races == 0 {
+		return schedule.CostRegimeCold
+	}
+	return schedule.CostRegimeWarm
 }
 
 // splitOf reports which half of the recorded split an instance is assigned to.
