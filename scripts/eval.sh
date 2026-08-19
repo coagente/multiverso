@@ -98,19 +98,29 @@ usage: scripts/eval.sh [options]
                        0 instead of 5. The banner and its reason print either
                        way: a flag that suppresses a refusal must not also
                        suppress its caption
-  --selector RULE      allocation rule the ADAPTIVE arm races under: voc (M2b's
-                       published rule, the binary default) or voc2 (M2b.2's
-                       finishing rule). Run the protocol once per rule to get
-                       M2b.2's paired before/after under ONE binary; the arm
-                       table, the instances, the split, the labels, the scoring
-                       and the metrics do not move, and the rule is recorded in
-                       each cell's manifest notes.
-                       TWO RUNS SCORE EVERY DECLARED CELL TWICE, so the
-                       published eval-use count doubles and §5.2 requires it to
-                       say so. And on a FRESH workspace nothing is priced, so
-                       finish_ms is unknown and voc2 falls back to voc on every
-                       step: as the harness stands, both runs produce IDENTICAL
-                       cells. See M2b.2 §7.4's amendment before quoting either
+  --selector RULE[,RULE]
+                       allocation rule(s) the ADAPTIVE arm races under: voc
+                       (M2b's published rule, the binary default), voc2
+                       (M2b.2's finishing rule), or BOTH as a comma-separated
+                       list. The arm table, the instances, the split, the
+                       labels, the scoring and the metrics do not move, and the
+                       rules are recorded in each cell's manifest notes.
+                       NAME BOTH RULES IN ONE RUN. B is derived inside a run
+                       from that run's OWN reference races, so running the
+                       protocol once per rule takes two draws and hands the two
+                       rules DIFFERENT BUDGETS — measured, minspend 1553 against
+                       1013 on the same instance on the same day, under a cell
+                       captioned ORACLE-BUDGET-MATCHED. That is what this flag
+                       used to instruct, and it invalidated every number it
+                       produced. One run races both rules against one warmed
+                       template, one reference draw and one B; every cell prints
+                       the B it was raced at and the run REFUSES if the arms
+                       ever held different ones.
+                       And on a FRESH workspace nothing is priced, so finish_ms
+                       is unknown and voc2 falls back to voc on every step: both
+                       rules then produce IDENTICAL cells, which is what
+                       --warmup exists to remove. See M2b.2 §7.4's amendment
+                       before quoting either
   --policy-configs "…" evidence-incompleteness configurations to run (default
                        "default schedule": the shipped default has
                        on_evidence_incomplete OFF, policies/schedule.json has it ON,
@@ -124,8 +134,9 @@ usage: scripts/eval.sh [options]
 
 exit codes: 0 ran, 1 a run or an assertion failed, 2 usage,
             3 nothing scorable under --strict, 4 a leak detector fired,
-            5 VACUOUS — the rule under test never fired on some cell, so no
-              verdict and no metric line was printed for it,
+            5 VACUOUS — in some (arm, instance) cell the rule under test never
+              fired, or fired and changed nothing it allocated, so no verdict
+              and no metric line was printed for ANY cell,
             77 SKIP — a named prerequisite is absent
 EOF
 }
@@ -284,9 +295,10 @@ for policy in $POLICY_CONFIGS; do
       # want to look at — it is NOT A MEASUREMENT OF ANYTHING, and printing it
       # beside a claim is the exact failure the block exists to correct. The
       # cell printed its coverage block, its named reason and no metric line.
-      5) echo "eval.sh: cell $CELL is VACUOUS: the rule under test never fired, so NO VERDICT and no" >&2
-         echo "         metric line were printed. Warm the workspace (--warmup auto), lower the budget" >&2
-         echo "         until it binds, or pass --allow-vacuous to print the tables stamped VACUOUS." >&2
+      5) echo "eval.sh: cell $CELL is VACUOUS: in at least one (arm, instance) cell the rule under test" >&2
+         echo "         either never fired or fired and CHANGED NOTHING IT ALLOCATED, so NO VERDICT and no" >&2
+         echo "         metric line were printed for ANY cell. Warm the workspace (--warmup auto), lower" >&2
+         echo "         the budget until it binds, or pass --allow-vacuous to print the tables stamped VACUOUS." >&2
          RC=5 ;;
       77) echo "eval.sh: cell $CELL skipped: a named prerequisite is absent"; ;;
       *) fail "cell $CELL exited $code" ;;
@@ -323,14 +335,22 @@ echo "Every cell above printed, ABOVE its metrics and on every run including at 
 echo "  * what WARMING cost and what it produced (charged to no arm — a separate"
 echo "    intent at --budget-oracle-ms 0 — and recorded, because an uncharged cost"
 echo "    that is also unreported is a cost nobody can audit);"
-echo "  * COVERAGE: what fraction of the recorded steps exercised the rule under"
-echo "    test, per witness, with the baseline it collapses to when inert NAMED;"
+echo "  * COVERAGE, as TWO figures and never one (blocker B3): CONSULTED is the"
+echo "    fraction of steps on which the rule's own regime ran, and EXERCISED --"
+echo "    the headline -- is the fraction on which the ALLOCATION DEPENDED on it."
+echo "    They are not the same set: commit_basis becomes 'reserved' the moment"
+echo "    scarcity is true, BEFORE the commit set is built, so a consulted step"
+echo "    can be one whose allowance is M2b's equal share exactly. Per witness,"
+echo "    per cell, with the baseline it collapses to when inert NAMED;"
 echo "  * the purchase-order divergence between the arms, which is a DIFFERENT"
 echo "    question from coverage: >0 % coverage with 0 divergence is a MEASURED"
 echo "    NULL and is a publishable result, not a failure."
-echo "A cell at 0 % coverage measured NOTHING about any allocation rule and was"
-echo "printed where a failure is printed (exit 5), not as a footnote."
-grep -h -E '^(COVERAGE|  steps exercised|  races exercised|  W[2-5] |  cost table:|instrument:|rule coverage|VACUOUS)' \
+echo "ANY cell at 0 % EXERCISED measured nothing about any allocation rule, and it"
+echo "is printed where a failure is printed (exit 5) rather than as a footnote --"
+echo "per cell and per arm, because a numerator pooled over cells is satisfiable"
+echo "by one step in one of them (blocker B4). A cell whose coverage could not be"
+echo "computed reports its ABSENCE by name and is not a zero."
+grep -h -E '^(COVERAGE|  steps EXERCISED|  steps consulted|  races exercised|  W[2-6] |  W2 IDENTITY|  VACUOUS PARTS|  cost table:|instrument:|rule coverage|cell coverage|VACUOUS)' \
   "$WORK"/cell-*.out 2>/dev/null | sed 's/^/  /' || true
 
 cat <<'CAVEATS'

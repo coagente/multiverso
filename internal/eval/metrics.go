@@ -42,6 +42,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strings"
 
 	"github.com/coagente/multiverso/internal/race"
 )
@@ -151,6 +152,19 @@ type Row struct {
 	// rather than by assumption: no binary before this block could warm an
 	// eval workspace.
 	CostRegime string `json:"cost_regime"`
+	// Selector is the ALLOCATION RULE this row's arm raced under — "" for an
+	// arm that computes no scarcity test (the ladder, the reference and every
+	// derived arm), `voc` or `voc2` for the adaptive arm.
+	//
+	// It is a COLUMN rather than a per-run flag because that is blocker B1:
+	// `--selector` used to be per RUN and B is derived inside a run from that
+	// run's own reference races, so a `voc` run and a `voc2` run of the same
+	// cell were handed DIFFERENT budgets — measured on one host, same instance,
+	// same day: minspend 1553 against 1013 — under a caption reading
+	// ORACLE-BUDGET-MATCHED. Both rules now race inside ONE run against ONE
+	// reference draw, so they share the bound that derives B by construction,
+	// and BudgetMismatches turns "by construction" into a measurement.
+	Selector string `json:"selector"`
 	// Cluster is the independent BUG this instance is a slice of: the fixture
 	// repository. Five instances over two repositories are not five independent
 	// observations, and every denominator prints its cluster count beside it.
@@ -392,6 +406,15 @@ type ArmMetrics struct {
 	// Policies is the set of policies the rows raced under. Compute is called
 	// per policy, so more than one here is a harness bug and RenderArm says so.
 	Policies []string `json:"policies"`
+	// Selectors is the set of allocation rules the rows raced under, and
+	// BudgetsMS is the set of budgets they were handed, sorted and
+	// deduplicated. BudgetsMS is what the ORACLE-BUDGET-MATCHED caption
+	// PRINTS: a caption that asserts a matched budget without naming it is
+	// exactly how two arms came to be compared at 1553 ms and 1013 ms under
+	// one caption. B is per INSTANCE, so a multi-instance cell legitimately
+	// carries several; the cross-arm question is BudgetMismatches'.
+	Selectors []string `json:"selectors"`
+	BudgetsMS []int64  `json:"budgets_ms"`
 
 	// The cost/accuracy axis (decision 12). OracleCostTotalMS and
 	// OracleCostMedianMS are the oracle charge; ScoringTotalMS is A9's separate
@@ -423,6 +446,8 @@ func Compute(arm string, rows []Row) ArmMetrics {
 	}
 	clusters := map[string]bool{}
 	policies := map[string]bool{}
+	selectors := map[string]bool{}
+	budgets := map[int64]bool{}
 	footprint := map[string]bool{}
 	var costs []int64
 	var (
@@ -466,6 +491,10 @@ func Compute(arm string, rows []Row) ArmMetrics {
 		if r.Policy != "" {
 			policies[r.Policy] = true
 		}
+		if r.Selector != "" {
+			selectors[r.Selector] = true
+		}
+		budgets[r.BudgetMS] = true
 		for _, f := range r.Footprint {
 			footprint[f] = true
 		}
@@ -584,9 +613,22 @@ func Compute(arm string, rows []Row) ArmMetrics {
 	}
 	m.Clusters = len(clusters)
 	m.Policies = sortedKeys(policies)
+	m.Selectors = sortedKeys(selectors)
 	m.Footprint = sortedKeys(footprint)
+	m.BudgetsMS = sortedInt64s(budgets)
 	m.OracleCostMedianMS = medianMS(costs)
 	return m
+}
+
+// sortedInt64s is a set of budgets rendered in a fixed order, so a caption is
+// a function of the rows and never of map iteration.
+func sortedInt64s(set map[int64]bool) []int64 {
+	out := make([]int64, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // medianMS is the median of a set of charged costs. A median rather than a mean
@@ -1022,11 +1064,105 @@ const (
 	LabelSelectorArms        = "SELECTOR-ARMS-OVER-A-FIXED-CANDIDATE-SET"
 )
 
+// budgetCaption renders ORACLE-BUDGET-MATCHED **with the budget in it**.
+//
+// BLOCKER B1: the caption used to be a bare assertion. Two arms of one cell were
+// raced at 1553 ms and 1013 ms — same instance, same host, same day — and the
+// cell printed `ORACLE-BUDGET-MATCHED` above both, because the label was a
+// constant and B was never in it. A caption that names the number it is
+// claiming to have matched cannot make that claim falsely: a reader comparing
+// two cells sees `B=1553ms` over one and `B=1013ms` over the other.
+//
+// B is derived PER INSTANCE, so a cell over several instances legitimately
+// carries several budgets and the caption lists them. The cross-arm question —
+// did the arms of ONE instance get the same B — is BudgetMismatches', and it is
+// a refusal rather than a caption.
+func budgetCaption(budgets []int64) string {
+	switch len(budgets) {
+	case 0:
+		return LabelOracleBudgetMatched
+	case 1:
+		if budgets[0] <= 0 {
+			// `mvo intent new` reads 0 as UNBOUNDED, so a cell whose rows
+			// carry 0 is the one cell that was handed infinite money.
+			return LabelOracleBudgetMatched + "(B=UNBOUNDED)"
+		}
+		return fmt.Sprintf("%s(B=%dms)", LabelOracleBudgetMatched, budgets[0])
+	}
+	parts := make([]string, 0, len(budgets))
+	for _, b := range budgets {
+		parts = append(parts, fmt.Sprint(b))
+	}
+	return fmt.Sprintf("%s(B={%s}ms per instance)", LabelOracleBudgetMatched, strings.Join(parts, ","))
+}
+
+// BudgetMismatches is BLOCKER B1's refusal, as a pure function of the rows.
+//
+// THE TWO RULES MUST BE COMPARED AT THE SAME BUDGET. B is derived per instance
+// from that instance's reference races, so within one instance every arm — both
+// allocation rules, the ladder, and every derived arm charged against the same
+// bound — must have been handed exactly one B. More than one means the cell's
+// arms were not budget-matched, whatever its caption says, and M2d.1's own
+// BUILDLOG entry is what that costs: "THIS INVALIDATES EVERY NUMBER".
+//
+// It is keyed on the INSTANCE alone, and deliberately not on the cell key: one
+// instance has one reference draw and therefore one B, whatever family, policy
+// or cost regime its rows carry, so grouping any more finely would let a
+// mismatch hide between two cells of the same instance.
+func BudgetMismatches(rows []Row) []string {
+	type seen struct {
+		budgets map[int64][]string
+		order   []int64
+	}
+	byInst := map[string]*seen{}
+	var instances []string
+	for _, r := range rows {
+		s := byInst[r.Instance]
+		if s == nil {
+			s = &seen{budgets: map[int64][]string{}}
+			byInst[r.Instance] = s
+			instances = append(instances, r.Instance)
+		}
+		if _, ok := s.budgets[r.BudgetMS]; !ok {
+			s.order = append(s.order, r.BudgetMS)
+		}
+		arm := r.Arm
+		if r.Selector != "" {
+			arm += " (--selector=" + r.Selector + ")"
+		}
+		s.budgets[r.BudgetMS] = append(s.budgets[r.BudgetMS], arm)
+	}
+	sort.Strings(instances)
+	var out []string
+	for _, id := range instances {
+		s := byInst[id]
+		if len(s.order) < 2 {
+			continue
+		}
+		sort.Slice(s.order, func(i, j int) bool { return s.order[i] < s.order[j] })
+		var parts []string
+		for _, b := range s.order {
+			arms := append([]string(nil), s.budgets[b]...)
+			sort.Strings(arms)
+			parts = append(parts, fmt.Sprintf("B=%dms: %s", b, strings.Join(arms, ", ")))
+		}
+		out = append(out, fmt.Sprintf(
+			"%s: the arms of this cell were handed %d DIFFERENT budgets — %s. "+
+				"B is derived from ONE reference draw per instance; arms that did not share it "+
+				"are not budget-matched and no number computed over them means anything",
+			id, len(s.order), strings.Join(parts, "; ")))
+	}
+	return out
+}
+
 // Captions renders the label set for a metric computed over these rows. It is
 // a function of the rows so a caption cannot drift from the data: the
 // adversarial label appears exactly when an S3 candidate is in the census.
 func Captions(m ArmMetrics) []string {
-	out := []string{LabelOracleBudgetMatched, LabelSyntheticCandidates, LabelSelectorArms}
+	out := []string{budgetCaption(m.BudgetsMS), LabelSyntheticCandidates, LabelSelectorArms}
+	for _, s := range m.Selectors {
+		out = append(out, "RULE-"+strings.ToUpper(s))
+	}
 	// The adversarial label fires on the POPULATION, not on the winners. A cell
 	// whose candidate sets mix S1/S2 with S3 is a table about a population with
 	// declared attacks in it whether or not an attack won, and firing only on

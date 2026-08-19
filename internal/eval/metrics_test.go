@@ -428,7 +428,7 @@ func TestCaptionsCarryTheLabelSet(t *testing.T) {
 	}
 	rows[0].WinnerSource = SourceAdversarial
 	caps := Captions(Compute("a", rows))
-	need := []string{LabelOracleBudgetMatched, LabelSyntheticCandidates, LabelSelectorArms, LabelAdversarialDeclared}
+	need := []string{LabelSyntheticCandidates, LabelSelectorArms, LabelAdversarialDeclared}
 	for _, w := range need {
 		found := false
 		for _, c := range caps {
@@ -439,6 +439,21 @@ func TestCaptionsCarryTheLabelSet(t *testing.T) {
 		if !found {
 			t.Errorf("caption %q missing from %v", w, caps)
 		}
+	}
+	// B1: the budget label CARRIES B. A bare ORACLE-BUDGET-MATCHED is an
+	// assertion; the same label with the number in it is a claim a reader can
+	// check against the cell beside it.
+	found := false
+	for _, c := range caps {
+		if strings.HasPrefix(c, LabelOracleBudgetMatched) {
+			found = true
+			if !strings.Contains(c, "B=") {
+				t.Errorf("the budget caption %q does not name B", c)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("caption %q missing from %v", LabelOracleBudgetMatched, caps)
 	}
 	// Without an S3 candidate the adversarial label must NOT appear: a
 	// caption that drifted from the data is worse than no caption.

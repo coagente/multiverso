@@ -97,8 +97,13 @@ func TestCoverageOnAWarmedVOC2RaceReportsEveryWitnessSeparately(t *testing.T) {
 	if rep.Rule != SelectorNameVOC2 || rep.Baseline != SelectorNameVOC {
 		t.Fatalf("rule/baseline = %q/%q, want voc2/voc", rep.Rule, rep.Baseline)
 	}
-	if rep.Steps != 2 || rep.Exercised != 2 {
-		t.Fatalf("coverage = %d of %d steps, want 2 of 2 (both steps recorded `reserved`)", rep.Exercised, rep.Steps)
+	if rep.Steps != 2 || rep.Consulted != 2 {
+		t.Fatalf("consulted = %d of %d steps, want 2 of 2 (both steps recorded `reserved`)", rep.Consulted, rep.Steps)
+	}
+	// B3: EXERCISED IS DEPENDENCE. Step 1 committed a world (W3); step 2
+	// lapsed a hard gate (W5). Both are differences `voc` cannot produce.
+	if rep.Exercised != 2 {
+		t.Fatalf("exercised = %d of %d steps, want 2 of 2 (W3 on step 1, W5 on step 2)", rep.Exercised, rep.Steps)
 	}
 	if rep.Vacuous() {
 		t.Error("a fully exercised race reported VACUOUS")
@@ -110,10 +115,10 @@ func TestCoverageOnAWarmedVOC2RaceReportsEveryWitnessSeparately(t *testing.T) {
 		t.Error("a race that stopped S-budget did not report its budget as binding")
 	}
 	want := map[string]int{
-		WitnessFinishDenominator:   2, // every step priced by the finish denominator
 		WitnessReservationReserved: 1, // |C| >= 1 on step 1 only
 		WitnessPassWithheld:        1, // step 1's uncommitted world
 		WitnessHardGateLapsed:      1, // step 2's hard-gated, inadmissible row
+		WitnessHeadMoved:           0, // one row per step, and step 1 withheld a pass
 	}
 	got := map[string]int{}
 	for _, w := range rep.Witnesses {
@@ -121,11 +126,21 @@ func TestCoverageOnAWarmedVOC2RaceReportsEveryWitnessSeparately(t *testing.T) {
 		if w.Total != 2 {
 			t.Errorf("witness %s reports a denominator of %d, want the step count 2", w.ID, w.Total)
 		}
+		if w.ID == WitnessFinishDenominator {
+			t.Error("W2 is still in the witness list: it is the CONSULTED set by construction, " +
+				"and reporting it as an independent witness made two facts look like four")
+		}
 	}
 	for id, n := range want {
 		if got[id] != n {
 			t.Errorf("witness %s fired on %d step(s), want %d", id, got[id], n)
 		}
+	}
+	// W2 is COUNTED so its retirement stays falsifiable, and the identity it
+	// is retired on must hold on every trace this binary writes.
+	if rep.FinishBasisSteps != rep.Consulted || rep.W2Breaks != 0 {
+		t.Errorf("W2 identity broken: finish_basis=%d consulted=%d breaks=%d",
+			rep.FinishBasisSteps, rep.Consulted, rep.W2Breaks)
 	}
 	// THE WITNESSES ARE INDEPENDENT AND THE REPORT SAYS SO. A single
 	// percentage would have hidden that the reservation stopped reserving the
@@ -492,4 +507,274 @@ func TestRecordedAllowanceIsTheNumberAffordabilityTested(t *testing.T) {
 	if seen == 0 {
 		t.Fatal("no row recorded an allowance: the field is dead and coverage would read a zero")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// BLOCKER B3 — CONSULTED IS NOT EXERCISED.
+//
+// `commit_basis` becomes `reserved` the moment `scarce` is true, BEFORE the
+// commit set is built. A step whose commit set is empty allocates by
+// `equalShare(pool, |frontier|)` — M2b decision 8 through the same arithmetic
+// — declines nothing decision 5 would not have declined, and withholds no
+// pass outcome. It is `voc`'s step in every observable respect, and the first
+// version of this file counted it as coverage.
+// ---------------------------------------------------------------------------
+
+// scarceButIdenticalToVOC is the step the reviewer measured: `reserved` on the
+// wire, |C| = 0, nothing withheld, no hard gate lapsed, and the finish
+// denominator agreeing with the rung denominator about who goes first.
+//
+// The two rows are constructed so that BOTH orderings put mv0:aaa at the head:
+// under finish, aaa is cheaper to complete (300 < 900); under M2b's rung
+// denominator, aaa scores 5000*1000/100 = 50 000 against bbb's
+// 5000*1000/200 = 25 000. Same head, both bases.
+func scarceButIdenticalToVOC() Step {
+	return Step{
+		Step: 1, CommitBasis: CommitBasisReserved, Scarce: true, CommitSet: []string{},
+		UncommittedMS: 1000,
+		Considered: []Considered{
+			{World: "mv0:aaa", Oracle: "guard", ScoreBasis: ScoreBasisFinish,
+				Admissible: true, Affordable: true, HardGate: true,
+				ValueBP: 5000, CostMS: 100, FinishMS: 300, AllowanceMS: 500},
+			{World: "mv0:bbb", Oracle: "guard", ScoreBasis: ScoreBasisFinish,
+				Admissible: true, Affordable: true, HardGate: true,
+				ValueBP: 5000, CostMS: 200, FinishMS: 900, AllowanceMS: 500},
+		},
+	}
+}
+
+func TestB3AScarceStepThatAllocatesLikeVOCIsConsultedAndNotExercised(t *testing.T) {
+	s := scarceButIdenticalToVOC()
+	if InertVOC2(s) {
+		t.Fatal("a `reserved` step is CONSULTED: the rule's own code path ran and the predicate must say so")
+	}
+	if DependedVOC2(s) {
+		t.Fatal("BLOCKER B3: a step with |C| = 0, nothing withheld, no lapsed gate and an unmoved " +
+			"queue head allocates EXACTLY as M2b decision 8 does, and it was counted as exercised")
+	}
+
+	tr := Trace{
+		HasStarted:  true,
+		Started:     Started{Selector: SelectorNameVOC2, CostTable: []CostRow{{Kind: "tree-guard", Basis: CostBasisFit, N: 6}}},
+		Steps:       []Step{s},
+		HasFinished: true,
+		Finished:    Finished{Stop: StopBudget, Steps: 1},
+	}
+	rep := Coverage(tr)
+	if rep.Consulted != 1 {
+		t.Errorf("consulted = %d of %d, want 1: the rule ran", rep.Consulted, rep.Steps)
+	}
+	if rep.Exercised != 0 {
+		t.Errorf("exercised = %d of %d, want 0: the rule changed nothing it allocated", rep.Exercised, rep.Steps)
+	}
+	if !rep.Vacuous() {
+		t.Error("a race that consulted the rule on every step and depended on it on none was not VACUOUS: " +
+			"the refusal keys on EXERCISED, or B3's inflated number gates the refusal too")
+	}
+	// The two refusals are different sentences and the harness must print the
+	// one that is true: this run is not "the rule never ran".
+	reason := rep.VacuityReason()
+	if contains(reason, "never fired") {
+		t.Errorf("the refusal claims the rule never fired on a run where it ran on every step:\n%s", reason)
+	}
+	if !contains(reason, "CHANGED NOTHING IT ALLOCATED") {
+		t.Errorf("the refusal does not say what actually happened:\n%s", reason)
+	}
+	// Both figures are printed, always, and the headline is the smaller one.
+	lines := joinedLines(rep.Lines())
+	for _, want := range []string{"steps EXERCISED", "steps consulted"} {
+		if !contains(lines, want) {
+			t.Errorf("the coverage block omits %q:\n%s", want, lines)
+		}
+	}
+}
+
+// EACH DEPENDENCE TERM ON ITS OWN, positive and negative, from the same step
+// that is otherwise identical to `voc`'s. A term that cannot flip the answer
+// by itself is not a term.
+func TestB3EachDependenceTermPromotesConsultedToExercised(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*Step)
+	}{
+		{"W3 the reservation reserved", func(s *Step) { s.CommitSet = []string{"mv0:aaa"} }},
+		{"W4 a pass outcome was withheld", func(s *Step) { s.Considered[1].PassWithheld = true }},
+		{"W5 the hard-gate override lapsed", func(s *Step) { s.Considered[1].Admissible = false }},
+		{"W6 the head of the queue moved", func(s *Step) {
+			// M2b's denominator strictly prefers the SECOND row: it costs 10 ms
+			// for the same value, so it scores 500 000 against the head's
+			// 50 000 — while the finish denominator kept it second because its
+			// world is the expensive one to complete.
+			s.Considered[1].CostMS = 10
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := scarceButIdenticalToVOC()
+			if DependedVOC2(base) {
+				t.Fatal("the control step already depends on the rule; the term proves nothing")
+			}
+			s := scarceButIdenticalToVOC()
+			tc.mut(&s)
+			if InertVOC2(s) {
+				t.Fatal("the mutation made the step inert, so it is not testing dependence")
+			}
+			if !DependedVOC2(s) {
+				t.Fatalf("%s did not make the step exercised", tc.name)
+			}
+		})
+	}
+}
+
+// W6 IS SOUND OR IT IS NOTHING. It compares only against the head, only
+// strictly, only when every row was priced by the finish denominator, and
+// never when a withheld pass outcome means `value_bp` is not the number the
+// baseline would have computed.
+func TestB3HeadMovedIsRefusedWhereItCannotBeComputed(t *testing.T) {
+	inverted := func() Step {
+		s := scarceButIdenticalToVOC()
+		s.Considered[1].CostMS = 10 // M2b strictly prefers row 1
+		return s
+	}
+	if !HeadMovedByFinish(inverted()) {
+		t.Fatal("the positive control does not fire")
+	}
+
+	// A row the rung denominator priced: the recorded order IS voc's order.
+	rung := inverted()
+	rung.Considered[0].ScoreBasis = ScoreBasisRung
+	rung.Considered[1].ScoreBasis = ScoreBasisRung
+	if HeadMovedByFinish(rung) {
+		t.Error("W6 fired on a step the RUNG denominator priced, where the recorded order is the baseline's")
+	}
+
+	// An unpriced row: `score_rank` orders it and `score_bpps` does not exist.
+	unpriced := inverted()
+	unpriced.Considered[1].ScoreRank = 2
+	if HeadMovedByFinish(unpriced) {
+		t.Error("W6 fired on a step holding an unpriced row, where M2b's score is not even the sort key")
+	}
+
+	// A withheld pass outcome: `value_bp` is the fail-closed bracket's, so
+	// recomputing M2b's score from it would compare against a baseline nobody
+	// ran. W4 already carries that step.
+	withheld := inverted()
+	withheld.Considered[1].PassWithheld = true
+	if HeadMovedByFinish(withheld) {
+		t.Error("W6 recomputed the baseline score from a value_bp the baseline would not have computed")
+	}
+	if !DependedVOC2(withheld) {
+		t.Error("the withheld step lost its dependence when W6 refused: W4 must carry it")
+	}
+
+	// A single-row step has no head to move.
+	if HeadMovedByFinish(Step{Considered: []Considered{{ScoreBasis: ScoreBasisFinish}}}) {
+		t.Error("W6 fired on a one-row frontier")
+	}
+	if HeadMovedByFinish(Step{}) {
+		t.Error("W6 is not total on an empty step")
+	}
+}
+
+// EXERCISED ⊆ CONSULTED, on every trace, or the split is not a split.
+func TestB3ExercisedNeverExceedsConsulted(t *testing.T) {
+	for _, tr := range []Trace{warmVOC2Trace(), coldVOC2Trace(), {}} {
+		rep := Coverage(tr)
+		if rep.Exercised > rep.Consulted {
+			t.Fatalf("exercised %d > consulted %d for rule %q", rep.Exercised, rep.Consulted, rep.Rule)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BLOCKER B4 (second half) — W2 WAS THE CONSULTED SET UNDER ANOTHER NAME.
+// ---------------------------------------------------------------------------
+
+func TestB4W2IsRetiredAndItsIdentityIsAsserted(t *testing.T) {
+	rep := Coverage(warmVOC2Trace())
+	for _, w := range rep.Witnesses {
+		if w.ID == WitnessFinishDenominator {
+			t.Fatal("W2 is still reported as an independent witness")
+		}
+	}
+	if rep.FinishBasisSteps != rep.Consulted {
+		t.Fatalf("score_basis=finish on %d step(s) but consulted on %d: the identity that retires W2 "+
+			"does not hold, and the report must say so rather than re-derive a witness from it",
+			rep.FinishBasisSteps, rep.Consulted)
+	}
+	if rep.W2Breaks != 0 {
+		t.Fatalf("W2Breaks = %d on a trace this binary could have written", rep.W2Breaks)
+	}
+	lines := joinedLines(rep.Lines())
+	if !contains(lines, "RETIRED AS A WITNESS") {
+		t.Errorf("W2's retirement is not printed; a witness that silently vanishes reads as one that "+
+			"stopped firing:\n%s", lines)
+	}
+
+	// AND THE ASSERTION IS FALSIFIABLE. A trace where the two sets disagree
+	// is reported, not smoothed.
+	broken := warmVOC2Trace()
+	broken.Steps[1].CommitBasis = CommitBasisNotScarce // inert, yet score_basis stays finish
+	b := Coverage(broken)
+	if b.W2Breaks != 1 {
+		t.Fatalf("W2Breaks = %d on a trace where the sets disagree, want 1", b.W2Breaks)
+	}
+	if !contains(joinedLines(b.Lines()), "W2 IDENTITY BROKEN") {
+		t.Error("a broken identity is not printed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BLOCKER B4 (first half) — A POOLED NUMERATOR IS NOT A COVERAGE FIGURE.
+// ---------------------------------------------------------------------------
+
+// The reviewer's own probe: 99 vacuous races merged with one race holding one
+// exercised step printed `1 of 199 steps (0%)` and `vacuous=false`.
+func TestB4APooledNumeratorCarriesItsVacuousPartsAndNeverPrintsAFlooredZero(t *testing.T) {
+	var parts []CoverageReport
+	for i := 0; i < 99; i++ {
+		parts = append(parts, CoverageReport{
+			Rule: SelectorNameVOC2, Baseline: SelectorNameVOC, Known: true, Applicable: true,
+			Races: 1, Steps: 2, Consulted: 2, Exercised: 0,
+		})
+	}
+	parts = append(parts, CoverageReport{
+		Rule: SelectorNameVOC2, Baseline: SelectorNameVOC, Known: true, Applicable: true,
+		Races: 1, RacesConsulted: 1, RacesExercised: 1, Steps: 1, Consulted: 1, Exercised: 1,
+	})
+	m := MergeCoverage(parts)
+	if m.Steps != 199 || m.Exercised != 1 {
+		t.Fatalf("merged = %d of %d, want 1 of 199", m.Exercised, m.Steps)
+	}
+	if m.VacuousParts != 99 {
+		t.Fatalf("vacuous parts = %d, want 99: pooling is exactly the operation that hides them", m.VacuousParts)
+	}
+	if !m.AnyVacuous() {
+		t.Fatal("BLOCKER B4: a pool of 99 vacuous reports and one exercised step did not report " +
+			"any vacuity at all")
+	}
+	// ABSENCE, NOT A FLOORED ZERO. `1 of 199` is not 0 %.
+	got := m.Summary()
+	if contains(got, "(0%)") {
+		t.Fatalf("a nonzero numerator printed as 0%%: %q", got)
+	}
+	if !contains(got, "<1%") {
+		t.Fatalf("summary = %q, want the `<1%%` form", got)
+	}
+	if !contains(joinedLines(m.Lines()), "VACUOUS PARTS") {
+		t.Error("the pooled block does not name its vacuous parts")
+	}
+	// Zero really is zero, and still prints as such.
+	z := CoverageReport{Rule: SelectorNameVOC2, Known: true, Applicable: true, Races: 1, Steps: 4}
+	if !contains(z.Summary(), "(0%)") {
+		t.Errorf("a genuinely zero numerator did not print 0%%: %q", z.Summary())
+	}
+}
+
+func joinedLines(ls []string) string {
+	out := ""
+	for _, l := range ls {
+		out += l + "\n"
+	}
+	return out
 }

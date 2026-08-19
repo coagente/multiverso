@@ -18,8 +18,18 @@ go test -count=1 ./...                        # -count=1 defeats the cache; a ca
 go test -race -count=1 ./internal/race/... ./internal/publish/...
 scripts/accept.sh                             # end-to-end, must end with "accept: OK"
 scripts/m0-accept.sh                          # the M0 wrapper, still must pass
-scripts/adversarial.sh                        # the laundering corpus, if present
+scripts/adversarial.sh --require-coverage allocation   # the laundering corpus, if present
 ```
+
+**The corpus has three outcomes, not two.** `--require-coverage allocation` is the shipped default of `scripts/adversarial.sh`, and it is spelled out above so that a reader of this file can see what the run asserts rather than having to trust a default:
+
+| exit | meaning | what to report |
+|---|---|---|
+| 0 | verdicts match the recorded baseline **and** the named facet was exercised by ≥ 1 vector | green, with the `coverage:` line quoted |
+| 1 | **drift** — a vector's verdict moved | a failure; name the moved rows |
+| **5** | **`VACUOUS`** — every verdict matched and **nothing exercised the facet** | **not a pass.** The run measured nothing about any allocation rule |
+
+Exit 5 is the gate this repository was missing: M2b.2 called the corpus its blocking gate and the corpus was passing `22/22` while 21 of 22 vectors carried no budget at all. **Never silence it with `--allow-vacuous` to obtain a green** — that flag exists to *declare* a run that exercises nothing (a `--arm fixed` run, for instance, exercises no allocation rule by construction), and it stamps `VACUOUS` on every table it prints. If you pass it, the word `VACUOUS` goes in your report too.
 
 `go test ./...` skips docker-gated tests when no daemon is reachable. If docker IS available, they must run — a suite that silently skipped its container coverage is not green, it is untested. Check for `SKIP` lines and say so.
 
@@ -38,5 +48,6 @@ State plainly:
 - which steps ran and which were skipped, and why
 - any failure with the actual output, not a paraphrase
 - for the adversarial corpus: per-vector caught / not caught, never a summary count that hides an uncaught vector
+- for the adversarial corpus: the `coverage:` line beside the verdict count, always. `22/22` is a statement about the **oracles**; a facet exercised by no vector is a claim the run cannot support, and reporting the count without the coverage line is how "22/22" became evidence for an allocation rule it never touched
 
 If you cannot run a step (no docker, no pytest, no network), say that the step did not run. An unrun check is not a passed check. This project publishes its gaps; the gate is where that habit starts.

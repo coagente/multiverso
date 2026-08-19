@@ -14,8 +14,10 @@ Read [`docs/studies/2026-08-design-partner-study.md`](../../../docs/studies/2026
 ## 1. Run the regression corpus
 
 ```bash
-scripts/adversarial.sh
+scripts/adversarial.sh --require-coverage allocation   # the default; spelled out so the assertion is visible
 ```
+
+**Exit 5 is `VACUOUS`, and it is not a pass**: the verdicts matched the baseline and *no vector exercised the named facet*, so the run is evidence about the oracles and about nothing else. Do not reach for `--allow-vacuous` to turn it green — that flag declares a run that exercises nothing and stamps `VACUOUS` on every table, which then belongs in your report.
 
 `testdata/adversarial/` holds one candidate patch per known laundering vector against a repo with a real bug. Report **per vector**, never as a count: an honest fix must win; every cheat must be caught, and caught *by a named gate*, not by luck. A cheat that loses on a ranking tiebreak is not caught — it is a coin flip that happened to land right.
 

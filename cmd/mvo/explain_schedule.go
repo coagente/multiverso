@@ -511,8 +511,14 @@ func writeSchedule(w io.Writer, s *explainSchedule) {
 	// appears only when it is bad is a number nobody learns to read. It is
 	// RENDERED from the derived report and recomputes no score.
 	if s.Coverage != nil {
-		fmt.Fprintf(w, "  coverage:   %s (rule %s, baseline %s)\n",
+		// BLOCKER B3: BOTH FIGURES, ALWAYS. `exercised` is the steps whose
+		// allocation depended on the rule; `consulted` is the steps on which
+		// the rule merely ran, which is what the first version of this line
+		// printed under the name `coverage`.
+		fmt.Fprintf(w, "  exercised:  %s (rule %s, baseline %s)\n",
 			s.Coverage.Summary(), s.Coverage.Rule, dash(s.Coverage.Baseline))
+		fmt.Fprintf(w, "  consulted:  %s (the rule's own regime ran; it is NOT coverage)\n",
+			s.Coverage.ConsultedSummary())
 	}
 
 	// The table is laid out ALONE and the decline reasons are interleaved

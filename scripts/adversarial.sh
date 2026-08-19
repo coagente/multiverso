@@ -27,15 +27,17 @@
 # drift, so the block that closes the hole updates the baseline and the diff
 # is the proof of what was fixed.
 #
-#   scripts/adversarial.sh                    # run, compare against baseline
+#   scripts/adversarial.sh                    # run, compare against baseline,
+#                                             # WITH the coverage refusal ARMED
 #   scripts/adversarial.sh --record           # (re)record the baseline
 #   scripts/adversarial.sh --only 05          # one vector
 #   scripts/adversarial.sh --repeat 9         # coin-flip duels, 9 rounds
 #   scripts/adversarial.sh --json out.json    # also write the report here
 #   scripts/adversarial.sh --arm fixed        # race the M1 exhaustive ladder
-#   scripts/adversarial.sh --require-coverage allocation
-#                                             # exit 5 if NO vector exercised
-#                                             # the allocation (M2d.1 dec. 13)
+#   scripts/adversarial.sh --require-coverage ranking
+#                                             # arm the refusal on ANOTHER facet
+#   scripts/adversarial.sh --allow-vacuous    # the ONLY opt-out: same banner,
+#                                             # exit 0, every table STAMPED
 #
 # NO REAL AGENT CLI IS EVER INVOKED. Only `--agent script` is used, and the
 # harness front-loads PATH with poisoned stubs (below) so that any code path
@@ -62,20 +64,37 @@ ARM=""
 # REQUIRE_COVERAGE is M2d.1 decision 13. `verdicts 22/22` is a true sentence
 # about the ORACLES and carries no information about any allocation rule: 19
 # vectors carry no budget at all, so their races are unbounded and
-# max_oracle_ms is read never. This flag makes that failure LOUD instead of
+# max_oracle_ms is read never. This makes that failure LOUD instead of
 # invisible — it is what M2b.2 needed when it called this corpus that block's
 # blocking gate.
-REQUIRE_COVERAGE=""
+#
+# BLOCKER B5: IT IS ARMED BY DEFAULT, AND THE OPT-OUT IS EXPLICIT. It shipped
+# as an opt-in flag and NOTHING opted in — neither `scripts/accept.sh` nor the
+# `gate` skill passed it — so the "adversarial 22/22" that a green result was
+# built on came from a run where this refusal was never armed. A gate nobody
+# runs is the vacuum this whole block exists to remove, one level up, and the
+# only fix that survives a reader forgetting a flag is for the flag not to
+# exist: the refusal is the DEFAULT and `--allow-vacuous` is the declaration.
+#
+# A `--arm fixed` run exercises NO allocation rule by construction (the ladder
+# computes no scarcity test at all), so it refuses too — correctly, and the
+# operator says `--allow-vacuous` and reads the stamp.
+REQUIRE_COVERAGE="allocation"
+# ALLOW_VACUOUS is decision 7's escape hatch, verbatim: it prints the same
+# banner, exits 0, and STAMPS `VACUOUS` on every table it produced — because
+# the flag that suppresses a refusal must not also suppress its caption.
+ALLOW_VACUOUS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) RECORD=1; shift ;;
     --declare) DECLARE="${2:?--declare needs a comma-separated vector prefix list}"; shift 2 ;;
     --require-coverage) REQUIRE_COVERAGE="${2:?--require-coverage needs a facet}"; shift 2 ;;
+    --allow-vacuous) ALLOW_VACUOUS=1; shift ;;
     --arm) ARM="${2:?--arm needs adaptive or fixed}"; shift 2 ;;
     --only) ONLY="${2:?--only needs a vector prefix}"; shift 2 ;;
     --repeat) REPEAT="${2:?--repeat needs a count}"; shift 2 ;;
     --json) JSON_OUT="${2:?--json needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "adversarial: unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -175,8 +194,25 @@ warm_for() {
   [ -f "$f" ] && tr -d "[:space:]" < "$f" || true
 }
 
-# warmup REPO WARMPATCH — race the named patch UNBUDGETED until the cost table
-# is priced, in the same workspace the vector will then race in.
+# priced REPO POLICY — M2d.1 decision 1's PREDICATE, read rather than counted:
+# does every kind the pinned policy can buy carry a local fit? It is a
+# read-only verb over the workspace's own ledger (`mvo oracles --json --policy`
+# already reports `declared_by_policy`, `measurement` and `measurement_n`), so
+# it costs no race and the warm loop is race -> re-read -> stop.
+priced() {
+  "$MVO" oracles --dir "$1" --json --policy "$2" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    kinds = json.load(sys.stdin)["kinds"]
+except Exception:
+    sys.exit(1)
+buyable = [k for k in kinds if k.get("declared_by_policy")]
+sys.exit(0 if buyable and all(k.get("measurement") for k in buyable) else 1)
+'
+}
+
+# warmup REPO WARMPATCH POLICY — race the named patch UNBUDGETED until the cost
+# table is priced, in the same workspace the vector will then race in.
 #
 # It is charged to nothing: the warm-up is a SEPARATE INTENT at
 # --budget-oracle-ms 0 and the pool is per race, so its spend is structurally
@@ -184,18 +220,39 @@ warm_for() {
 # unpriced purchase is affordable while any pool remains, and the budget does
 # not bind at all — which is why 24-schedule_budget_burn already fell back to
 # M2b's rule despite carrying a budget.
+#
+# WARMING IS A PREDICATE, NOT A COUNT, AND THE COUNT WAS WRONG (M2d.1 decision
+# 1). This loop used to run a hard-coded TWO races and stop. Every warm-up race
+# here is `--budget-candidates 1`, so it contributes exactly ONE sample per
+# kind, and `MinSamples` is THREE: two races left every kind at n=2, the fit
+# stayed null, the cost model still read `declared-rank (no local measurement)`
+# on every rung, and the `.warm` sidecars were INERT. Measured on this host
+# before the fix: `23-schedule_starvation`'s duel spent 1585 ms against a
+# 1200 ms bound and stopped `S-budget` only after the pool crossed zero — the
+# cold-workspace overrun the block itself named, inside the very vectors added
+# to escape it. So the loop reads the predicate after each race and stops when
+# it holds, capped at 3, and REFUSES BY NAME if it still does not.
 warmup() {
-  local repo="$1" warm="$2" i=0 wi wp
+  local repo="$1" warm="$2" policy="${3:-default}" i=0 wi wp
   [ -n "$warm" ] || return 0
   wp="$repo.warmpatches"
   mkdir -p "$wp"
-  cp "$VECTORS/$warm.patch" "$wp/01-warm.patch" 2>/dev/null || return 0
-  while [ "$i" -lt 2 ]; do
+  cp "$VECTORS/$warm.patch" "$wp/01-warm.patch" \
+    || die "warm-up: $VECTORS/$warm.patch is named by a .warm sidecar and does not exist"
+  while [ "$i" -lt 3 ]; do
+    priced "$repo" "$policy" && break
     i=$((i + 1))
     wi="$("$MVO" intent new --dir "$repo" --title "warm-up $i" --budget-candidates 1 --budget-oracle-ms 0)"
-    [ -n "$wi" ] || return 0
-    "$MVO" race "$wi" --dir "$repo" --agent script --patches "$wp" --schedule=fixed >/dev/null 2>&1 || return 0
+    [ -n "$wi" ] || die "warm-up: intent new printed no digest in $repo"
+    "$MVO" race "$wi" --dir "$repo" --agent script --patches "$wp" --schedule=fixed >/dev/null 2>&1 \
+      || die "warm-up race $i failed in $repo: a vector that declares a .warm sidecar and races cold
+is a vector whose caption is false, so this is a failure and not a fallback"
   done
+  priced "$repo" "$policy" \
+    || die "warm_incomplete: $warm did not price every buyable kind in 3 races under policy $policy.
+The vector would race against a declared-rank table where an unpriced purchase is affordable while
+any pool remains, so its budget would not bind — which is the vacuity the .warm sidecar exists to
+remove. Refusing rather than reporting a 'warm' row that is cold."
 }
 
 # worldof REPO INTENT PATCHFILE — the world digest whose captured patch is
@@ -285,7 +342,7 @@ solo() {
   mkdir -p "$pdir"
   cp "$VECTORS/$vec.patch" "$pdir/01-candidate.patch"
   mkrepo "$repo" "$policy"
-  warmup "$repo" "$(warm_for "$vec")"
+  warmup "$repo" "$(warm_for "$vec")" "${policy:-default}"
   intent="$(race_once "$repo" "$pdir" 1 "solo: $vec" "$WORK/$vec/solo.abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$vec/solo.abort" ]; then
     python3 "$CORPUS/report.py" solo-aborted \
@@ -338,7 +395,7 @@ duel_round() {
   cp "$VECTORS/$vec.patch" "$pdir/01-cheat.patch"
   cp "$HONEST" "$pdir/02-honest.patch"
   mkrepo "$repo" "$policy"
-  warmup "$repo" "$(warm_for "$vec")"
+  warmup "$repo" "$(warm_for "$vec")" "${policy:-default}"
   intent="$(race_once "$repo" "$pdir" 2 "duel: $vec" "$WORK/$tag/abort" "$(budget_for "$vec")")"
   if [ -s "$WORK/$tag/abort" ]; then
     python3 "$CORPUS/report.py" duel-aborted \
@@ -381,7 +438,15 @@ done
 
 REPORT="$WORK/report.json"
 RENDER_ARGS=(render --results "$RESULTS" --out "$REPORT")
-[ -n "$REQUIRE_COVERAGE" ] && RENDER_ARGS+=(--require-coverage "$REQUIRE_COVERAGE")
+# ARMED ON EVERY RUN (blocker B5). The facet is passed unconditionally, so a
+# run of this script with no flags at all is a run with the refusal armed;
+# `--allow-vacuous` is the one way past it and it carries its caption with it.
+if [ -n "$REQUIRE_COVERAGE" ]; then
+  RENDER_ARGS+=(--require-coverage "$REQUIRE_COVERAGE")
+fi
+if [ "$ALLOW_VACUOUS" = "1" ]; then
+  RENDER_ARGS+=(--allow-vacuous)
+fi
 set +e
 python3 "$CORPUS/report.py" "${RENDER_ARGS[@]}"
 RENDER_RC=$?

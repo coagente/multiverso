@@ -2910,21 +2910,41 @@ If it exited 5 the warming does not warm or the witnesses do not witness (falsif
 $(tail -40 "$WARM_OUT")"
 ! grep -q '^VACUOUS' "$WARM_OUT" || fail "m2d1-9b: the refusal fired on a warmed run (V-3):
 $(tail -40 "$WARM_OUT")"
-grep -q 'COVERAGE — did the rule under test ever fire' "$WARM_OUT" \
+grep -q 'COVERAGE — did the ALLOCATION DEPEND on the rule under test' "$WARM_OUT" \
   || fail "m2d1-9b: no coverage block was printed"
-for W in W2 W3 W4 W5; do
+# BLOCKER B3: the DEPENDENCE witnesses, and W2 is not among them — it was the
+# consulted set under another name, and reporting it as a fourth independent
+# witness made two facts look like four.
+for W in W3 W4 W5 W6; do
   grep -q "      $W " "$WARM_OUT" || fail "m2d1-9b: the per-witness breakdown is missing $W"
 done
+grep -q 'consulted (the rule.s own regime ran, NOT coverage)' "$WARM_OUT" \
+  || fail "m2d1-9b: the CONSULTED figure is not printed beside the EXERCISED one (blocker B3)"
+grep -q 'W2 finish denominator .* RETIRED AS A WITNESS' "$WARM_OUT" \
+  || fail "m2d1-9b: W2's retirement is not printed; a witness that silently vanishes reads as one
+that stopped firing"
+! grep -q 'W2 IDENTITY BROKEN' "$WARM_OUT" \
+  || fail "m2d1-9b: score_basis=finish and commit_basis=reserved named different sets, so the
+identity that retires W2 no longer holds and the consulted figure must be re-derived"
 grep -q 'cost table: WARM' "$WARM_OUT" || fail "m2d1-9b: the warmed run did not report a WARM cost table"
 python3 - "$WARM_OUT" <<'M2D1_9B' || fail "m2d1-9b: the warmed comparison reported 0% coverage on BOTH arms"
 import re, sys
 text = open(sys.argv[1]).read()
-pct = [int(m) for m in re.findall(r"steps \((\d+)%\)", text)]
-assert pct, ("no coverage percentage was printed", text[-2000:])
-assert max(pct) > 0, ("every arm reported 0% coverage on a warmed run", pct)
-print("m2d1-9b: coverage above zero on a warmed run: %s" % pct)
+# BLOCKER B3: the assertion is on EXERCISED — the steps whose ALLOCATION
+# depended on the rule — and never on the consulted line beneath it. A run
+# refused at exit 0 with `consulted 100 %, exercised 0 %` is exactly the state
+# the inflated figure used to report as coverage.
+ex = [(int(a), int(b)) for a, b in re.findall(r"EXERCISED (\d+) of (\d+) steps", text)]
+assert ex, ("no EXERCISED figure was printed", text[-2000:])
+assert any(n > 0 for n, _ in ex), ("every arm's allocation was independent of its rule", ex)
+# And a nonzero numerator may never be rendered as 0 % (blocker B4).
+for n, d in ex:
+    if n > 0 and n * 100 // d == 0:
+        assert "<1%" in text, ("a nonzero numerator printed as a floored 0%", n, d)
+print("m2d1-9b: exercised above zero on a warmed run: %s" % ex)
 M2D1_9B
-echo "m2d1-9b: the warmed comparison is NOT refused (exit 0) and prints coverage with all four witnesses"
+echo "m2d1-9b: the warmed comparison is NOT refused (exit 0) and prints EXERCISED, CONSULTED and the
+four dependence witnesses"
 
 # --- m2d1-9c. WARMING IS CHARGED TO NOBODY, AND THE WINDOW HOLDS.
 #
@@ -3042,7 +3062,7 @@ assert cov.get("steps", 0) == 0, cov
 # is printed mid-report, so under `set -o pipefail` the writer's EPIPE turns a
 # HIT into a failure — the same trap step m2b1-6e already documents.
 LADDER_COV="$("$MVO" explain "$L_INTENT" --dir "$WARMREPO" --schedule)"
-printf '%s' "$LADDER_COV" | grep -q 'coverage:   — (computes no scarcity test)' \
+printf '%s' "$LADDER_COV" | grep -q 'exercised:  — (computes no scarcity test)' \
   || fail "m2d1-9e: the rendered ladder line does not say the figure is not applicable:
 $(printf '%s' "$LADDER_COV" | sed -n '1,12p')"
 COV1="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --json --schedule \
@@ -3062,25 +3082,114 @@ assert cov["steps"] > 0, cov
 # The workspace was warmed by m2d1-9c, so the rule under test DID fire and the
 # derived figure must say so. A `0 of N` here would mean warming did not warm.
 assert cov["exercised"] > 0, ("the measured race on a WARMED workspace reports 0% coverage", cov)
+# BLOCKER B3: CONSULTED IS NOT EXERCISED, and the report carries BOTH. The
+# headline is the smaller one, and `commit_basis: reserved` alone can no longer
+# put a step in it.
+assert cov["consulted"] >= cov["exercised"], ("exercised exceeds consulted", cov)
+assert cov["consulted"] > 0, cov
 ids = {w["id"] for w in cov["witnesses"]}
-assert ids == {"W2", "W3", "W4", "W5"}, ids
-print("m2d1-9e: voc2 coverage %d of %d step(s), baseline %s, four witnesses reported separately"
-      % (cov["exercised"], cov["steps"], cov["baseline"]))
+assert ids == {"W3", "W4", "W5", "W6"}, ids
+# BLOCKER B4: W2 is RETIRED — it was definitionally the consulted set, and the
+# identity that retires it is asserted on every run rather than assumed.
+assert "W2" not in ids, ("W2 is still reported as an independent witness", ids)
+assert cov["finish_basis_steps"] == cov["consulted"], (
+    "score_basis=finish and commit_basis=reserved named different sets", cov)
+assert cov["w2_identity_breaks"] == 0, cov
+print("m2d1-9e: voc2 exercised %d of %d step(s) (consulted %d), baseline %s, "
+      "four dependence witnesses reported separately, W2 retired"
+      % (cov["exercised"], cov["steps"], cov["consulted"], cov["baseline"]))
 ' || fail "m2d1-9e: the derived coverage report is missing its rule, baseline or witnesses"
 # THE RENDERED LINE RECOMPUTES NOTHING: racing again moves the workspace's
 # fitted coefficients, and the coverage of a PAST race must not move with them
 # (step 5d's rule, extended to the coverage line).
-COVLINE_BEFORE="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep '^  coverage:')"
+COVLINE_BEFORE="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep -E '^  (exercised|consulted):')"
 X_INTENT="$("$MVO" intent new --dir "$WARMREPO" --title "m2d1-9e cost drift" --budget-oracle-ms 0)"
 "$MVO" race "$X_INTENT" --dir "$WARMREPO" --agent script --patches "$WARMREPO/patches" \
   --schedule=fixed >/dev/null || fail "m2d1-9e: the cost-drift race failed"
-COVLINE_AFTER="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep '^  coverage:')"
+COVLINE_AFTER="$("$MVO" explain "$M_INTENT" --dir "$WARMREPO" --schedule | grep -E '^  (exercised|consulted):')"
 [ "$COVLINE_BEFORE" = "$COVLINE_AFTER" ] \
   || fail "m2d1-9e: the coverage line MOVED after the workspace's cost fit moved — it is being
 recomputed rather than derived from the recorded trace:
 before: $COVLINE_BEFORE
 after:  $COVLINE_AFTER"
 echo "m2d1-9e: coverage is derived, deterministic, rendered and unmoved by a later fit"
+
+# --- m2d1-9f. THE COVERAGE GATE IS ARMED WHERE IT IS ACTUALLY RUN (blocker
+# B5), AND THIS SCRIPT IS ONE OF THE PLACES IT IS RUN.
+#
+# `--require-coverage` shipped as an OPT-IN flag and NOTHING opted in: neither
+# this script nor the `gate` skill passed it, so the "adversarial 22/22" that a
+# green result was built on came from a run where the refusal was never armed.
+# A gate nobody runs is the vacuum this whole block exists to remove, one level
+# up. The fix that survives a reader forgetting a flag is for the flag not to
+# be needed: `scripts/adversarial.sh` arms `--require-coverage allocation` by
+# default and `--allow-vacuous` is the declaration that goes the other way.
+#
+# THE CORPUS IS INVOKED HERE WITH NO FLAGS AT ALL, because a step that passed
+# the flag would assert the flag works and not that anybody passes it — which
+# is precisely the defect. Both halves, decision 9's pairing rule applied to
+# the corpus: a gate that only ever refuses is a rubber stamp in the other
+# direction, so the exercising vector must NOT refuse in the same step. One
+# vector each, chosen for cost: the corpus's own control and the one budgeted
+# vector, ~5 s apiece. ---
+ADV="$ROOT/scripts/adversarial.sh"
+set +e
+"$ADV" --only 01-honest_fix > "$WORK/m2d1-9f-bare.out" 2>&1
+ADV_BARE_RC=$?
+set -e
+[ "$ADV_BARE_RC" = "5" ] || fail "m2d1-9f: the corpus run with NO FLAGS exited $ADV_BARE_RC, want 5.
+01-honest_fix carries no budget, so it exercises no allocation and the refusal must fire WITHOUT
+anybody remembering to arm it. This is blocker B5: an exit 0 here is a green corpus that measured
+nothing about any allocation rule (an exit 1 is baseline DRIFT, which is a different failure).
+$(tail -20 "$WORK/m2d1-9f-bare.out")"
+grep -q '^VACUOUS: --require-coverage allocation' "$WORK/m2d1-9f-bare.out" \
+  || fail "m2d1-9f: the unflagged corpus run exited 5 without printing the VACUOUS banner:
+$(tail -20 "$WORK/m2d1-9f-bare.out")"
+grep -q 'ARMED BY DEFAULT' "$WORK/m2d1-9f-bare.out" \
+  || fail "m2d1-9f: the refusal does not say it was armed by default, so a reader cannot tell it
+from a flag somebody remembered to pass"
+grep -q 'NOTHING BELOW IS EVIDENCE ABOUT ALLOCATION' "$WORK/m2d1-9f-bare.out" \
+  || fail "m2d1-9f: the verdict table was printed without the VACUOUS stamp above it"
+
+# The opt-out is a DECLARATION and it does not suppress the caption (decision
+# 7): same banner, exit 0, and the stamp lands in the report file so a report
+# copied out with --json carries the fact that it measured nothing.
+set +e
+"$ADV" --only 01-honest_fix --allow-vacuous --json "$WORK/m2d1-9f-allowed.json" \
+  > "$WORK/m2d1-9f-allowed.out" 2>&1
+ADV_ALLOW_RC=$?
+set -e
+[ "$ADV_ALLOW_RC" = "0" ] || fail "m2d1-9f: --allow-vacuous exited $ADV_ALLOW_RC, want 0:
+$(tail -20 "$WORK/m2d1-9f-allowed.out")"
+grep -q '^VACUOUS: --require-coverage allocation' "$WORK/m2d1-9f-allowed.out" \
+  || fail "m2d1-9f: --allow-vacuous suppressed the banner as well as the exit code. The flag that
+suppresses a refusal must not also suppress its caption (M2d.1 decision 7)"
+python3 -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+v = r.get("vacuous")
+assert v == {"facet": "allocation", "allowed": True}, ("the report carries no VACUOUS stamp", v)
+print("m2d1-9f: the allowed-vacuous report is STAMPED in the artifact: %s" % json.dumps(v, sort_keys=True))
+' "$WORK/m2d1-9f-allowed.json" \
+  || fail "m2d1-9f: --allow-vacuous exited 0 and left no stamp in the report file"
+
+# THE ANTI-RUBBER-STAMP HALF. A vector that does carry a binding budget against
+# a priced table must pass the same unflagged invocation, or the default is a
+# gate that refuses everything and trains every reader to pass --allow-vacuous.
+set +e
+"$ADV" --only 24-schedule_budget_burn > "$WORK/m2d1-9f-covered.out" 2>&1
+ADV_COV_RC=$?
+set -e
+[ "$ADV_COV_RC" = "0" ] || fail "m2d1-9f: the BUDGETED vector exited $ADV_COV_RC, want 0 — the
+armed default refuses a run that did exercise the allocation:
+$(tail -20 "$WORK/m2d1-9f-covered.out")"
+! grep -q '^VACUOUS' "$WORK/m2d1-9f-covered.out" \
+  || fail "m2d1-9f: the refusal fired on a vector that exercises the allocation"
+grep -q 'allocation 1/1' "$WORK/m2d1-9f-covered.out" \
+  || fail "m2d1-9f: the budgeted vector did not report allocation coverage:
+$(sed -n '/COVERAGE/,$p' "$WORK/m2d1-9f-covered.out")"
+echo "m2d1-9f: the corpus refuses (exit 5) on an unexercised run WITH NO FLAGS PASSED, exits 0 on the
+budgeted vector, and --allow-vacuous exits 0 while keeping its caption"
 
 # --- 4. admit lands a new commit on trunk ---
 PRE="$($GIT -C "$REPO" log -1 --format=%H)"

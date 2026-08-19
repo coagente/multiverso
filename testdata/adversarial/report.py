@@ -81,20 +81,28 @@ def coverage_facets(report, receipts_n=0, gates_n=0, admitted=False, worlds_rank
     steps = sched.get("steps") or []
     budget_ms = int(sched.get("budget_ms") or 0)
     binding = any(r.get("admissible") and not r.get("affordable") for r in steps)
+    # BLOCKER B3: `exercised` is the steps whose ALLOCATION DEPENDED on the
+    # rule, and `consulted` is the steps on which the rule's own regime merely
+    # ran. The facet keys on the first. Keying it on the second would call a
+    # vector that reached scarcity and allocated M2b's equal share exactly an
+    # exercise of the allocation rule, which is what the inflated figure did.
     exercised = int(cov.get("exercised") or 0)
+    consulted = int(cov.get("consulted") or 0)
     out = {
         "evidence": bool(receipts_n >= 1 and gates_n >= 1),
         "ranking": bool(worlds_ranked >= 2),
         "allocation": bool(budget_ms > 0 and binding and exercised > 0),
         "admission": bool(admitted),
         # The WHY, so a reader can tell "not exercised because no budget" from
-        # "not exercised because the budget did not bind".
+        # "not exercised because the budget did not bind" from "the rule ran
+        # and changed nothing it allocated".
         "budget_ms": budget_ms,
         "budget_bound": bool(binding),
         "rule": cov.get("rule", ""),
         "baseline": cov.get("baseline", ""),
         "steps": int(cov.get("steps") or 0),
         "exercised": exercised,
+        "consulted": consulted,
         "cost_regime": cov.get("cost_regime", ""),
     }
     return out
@@ -104,12 +112,19 @@ def allocation_note(cov):
     if not cov:
         return "not exercised (no trace)"
     if cov.get("allocation"):
-        return "exercised (%d of %d steps, %s cost table)" % (
-            cov.get("exercised", 0), cov.get("steps", 0), (cov.get("cost_regime") or "unknown"))
+        return "exercised (%d of %d steps depended on the rule; consulted on %d; %s cost table)" % (
+            cov.get("exercised", 0), cov.get("steps", 0), cov.get("consulted", 0),
+            (cov.get("cost_regime") or "unknown"))
     if not cov.get("budget_ms"):
         return "not exercised (no budget)"
     if not cov.get("budget_bound"):
         return "not exercised (budget never bound)"
+    if cov.get("consulted"):
+        # THE TWO REFUSALS ARE DIFFERENT SENTENCES (blocker B3). This vector
+        # reached the rule's own regime on some step and the rule still
+        # allocated exactly what its baseline would have.
+        return "not exercised (the rule ran on %d of %d steps and CHANGED NOTHING IT ALLOCATED)" % (
+            cov.get("consulted", 0), cov.get("steps", 0))
     return "not exercised (the rule under test never fired)"
 
 
@@ -464,11 +479,36 @@ def cmd_render(args):
             for name, data in sorted(rows.items())
         ],
     }
+
+    # BLOCKER B5: THE REFUSAL IS DECIDED BEFORE THE TABLE IS PRINTED, because
+    # `--allow-vacuous` must not be able to suppress the CAPTION as well as the
+    # exit code (decision 7). The exercising set per facet is a pure function of
+    # the report, so it is computed here, once, and read twice: to stamp the
+    # tables above and to refuse below.
+    counts = {f: [] for f in FACETS}
+    for entry in report["vectors"]:
+        cov = entry.get("coverage") or {}
+        for f in FACETS:
+            if cov.get(f):
+                counts[f].append(entry["vector"])
+    want = args.require_coverage
+    if want and want not in FACETS:
+        raise SystemExit("render: --require-coverage %s is not one of %s" % (want, ", ".join(FACETS)))
+    vacuous = bool(want) and not counts[want]
+    if vacuous:
+        # The stamp goes in the ARTIFACT too. A report file copied out with
+        # --json, or recorded as the baseline, must carry the fact that the
+        # facet its reader cares about was exercised by nothing.
+        report["vacuous"] = {"facet": want, "allowed": bool(args.allow_vacuous)}
+
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=1, sort_keys=True)
         handle.write("\n")
 
     print()
+    if vacuous:
+        print("*** VACUOUS (--require-coverage %s): NOTHING BELOW IS EVIDENCE ABOUT %s ***"
+              % (want, want.upper()))
     print("VECTOR                       POLICY        SOLO RACE                                DUEL vs HONEST FIX")
     print("                                           gates  decision  admit  verify  fixed?   outcome        deciding key")
     print("-" * 126)
@@ -554,12 +594,6 @@ def cmd_render(args):
     # unexercised majority does and does not license.
     # ------------------------------------------------------------------
     print()
-    counts = {f: [] for f in FACETS}
-    for entry in report["vectors"]:
-        cov = entry.get("coverage") or {}
-        for f in FACETS:
-            if cov.get(f):
-                counts[f].append(entry["vector"])
     n = len(report["vectors"])
     print("COVERAGE — what this corpus actually exercised (M2d.1 decision 13):")
     print("  verdicts: %d/%d rows compared against the recorded baseline" % (n, n))
@@ -585,16 +619,29 @@ def cmd_render(args):
             print("    %-28s allocation: %s" % (entry["vector"], allocation_note(cov)))
     print()
 
-    if args.require_coverage:
-        want = args.require_coverage
-        if want not in FACETS:
-            raise SystemExit("render: --require-coverage %s is not one of %s" % (want, ", ".join(FACETS)))
-        if not counts[want]:
-            print("VACUOUS: --require-coverage %s and the exercising set is EMPTY." % want)
-            print("  Every verdict above is true and none of it is evidence about %s. This is the" % want)
-            print("  gate M2b.2 needed when it called this corpus that block's blocking gate: had it")
-            print("  existed, the gate would have failed honestly instead of passing vacuously.")
-            raise SystemExit(5)
+    # ------------------------------------------------------------------
+    # BLOCKER B5: ARMED BY DEFAULT (`--require-coverage allocation`), and the
+    # opt-out is a DECLARATION rather than an omission. The flag shipped as
+    # opt-in and nothing opted in, so the corpus run behind a green result was
+    # a run where this refusal never existed.
+    # ------------------------------------------------------------------
+    if vacuous:
+        print("VACUOUS: --require-coverage %s and the exercising set is EMPTY." % want)
+        print("  Every verdict above is true and none of it is evidence about %s. This is the" % want)
+        print("  gate M2b.2 needed when it called this corpus that block's blocking gate: had it")
+        print("  existed, the gate would have failed honestly instead of passing vacuously.")
+        if args.allow_vacuous:
+            # Decision 7's escape hatch: the same banner, exit 0, and the
+            # caption stamped on the tables above and into the report file —
+            # because the flag that suppresses a refusal must not also
+            # suppress its caption.
+            print("  --allow-vacuous was passed: exiting 0 with every table above STAMPED VACUOUS,")
+            print("  and \"vacuous\": {\"facet\": \"%s\", \"allowed\": true} written into %s."
+                  % (want, args.out))
+            return
+        print("  The refusal is ARMED BY DEFAULT. If a run that exercises nothing is what you meant,")
+        print("  say so with --allow-vacuous and the tables keep the VACUOUS stamp.")
+        raise SystemExit(5)
 
 
 # --------------------------------------------------------------- diff ----
@@ -751,8 +798,18 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument(
         "--require-coverage",
-        default="",
-        help="exit 5 when NO vector exercised this facet (evidence|ranking|allocation|admission)",
+        # ARMED BY DEFAULT, at the tool as well as at the shell (blocker B5).
+        # A default that lives only in `scripts/adversarial.sh` is a default
+        # the next caller of report.py does not get.
+        default="allocation",
+        help="exit 5 when NO vector exercised this facet (evidence|ranking|allocation|admission); "
+        "default: allocation",
+    )
+    p.add_argument(
+        "--allow-vacuous",
+        action="store_true",
+        help="do not exit 5 on an empty exercising set: print the same banner, stamp every table "
+        "VACUOUS, record the stamp in the report, and exit 0",
     )
     p.set_defaults(fn=cmd_render)
 

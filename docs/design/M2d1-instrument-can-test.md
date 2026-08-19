@@ -452,6 +452,109 @@ Named for later blocks, each with what it is and why it is not here:
 
 ---
 
+## Amendments — blockers B3, B4 and B5, written after a hostile reviewer ran the thing
+
+**These amend [decision 5](#decision-5), [decision 6](#decision-6), [decision 7](#decision-7), [decision 10](#decision-10) and [decision 13](#decision-13). The amended text is the contract; the text above is kept so the defect is legible.**
+
+<a id="amendment-b3"></a>
+> **Amendment B3. `coverage` is TWO figures and the headline is the smaller one. The predicate above measured whether the rule was CONSULTED; it is renamed to that, and `exercised` now requires that the step's ALLOCATION DEPENDED on the rule.**
+>
+> `commit_basis` becomes `reserved` the moment `scarce` is true — inside `newCommitPlan`, **before the commit set is built** — so a step with `C = ∅` records `reserved`, apportions `equalShare(pool, |frontier|)` (M2b decision 8 through the same arithmetic), lapses no hard gate because `reserving()` is false, and withholds no pass outcome because every world is completable at the equal share. It is `voc`'s step in every observable respect. Counting it inflated the published figure, and the reviewer said so with the code path.
+>
+> ```
+> consulted(step) ⟺ ¬inert(arm, step)                    -- the rule's code path ran
+> exercised(step) ⟺ depended(arm, step)                  -- THE HEADLINE
+> exercised ⊆ consulted                                   -- by construction
+> ```
+>
+> `depended` for `voc2` is the disjunction of the differences `voc` provably cannot produce, each a lookup on a recorded field:
+>
+> | term | recorded condition | why the baseline cannot produce it |
+> |---|---|---|
+> | **W3** | `\|commit_set\| ≥ 1` | the allowance is `reserve(pool, spent, finish)`, not the equal share |
+> | **W4** | ∃ row `pass_withheld` | `value_bp` is the fail-closed bracket's, not `voc`'s |
+> | **W5** | ∃ row `hard_gate ∧ ¬admissible` | impossible under `voc`, where `admissible = flip ∨ hard_gate` |
+> | **W6** *(new)* | the finish denominator moved the HEAD of the queue | a per-step re-evaluation of M2b's own ranking over the recorded rows |
+>
+> **W6 is the order half, and it is sound rather than merely cheap.** Under scarcity every rung is priced (`¬known` falls the race back), so every row carries `score_bpps` and `score_rank == 0`, and `sortRanked` compares `score_bpps` FIRST among priced rows. M2b's score recomputes exactly from the recorded row as `value_bp × 1000 / max(cost_ms, 1)`. W6 fires when some row the rule ranked below the head **strictly** outscores the head under that denominator — strictly, so no tie-break is guessed at, and `OrderIndex` is never needed. It refuses to answer when any row was priced by the rung denominator, when any row is unpriced, or when any row withheld a pass outcome (there `value_bp` is not the number the baseline would have computed, and W4 already carries the step).
+>
+> For `voc` and `ladder` the two figures COINCIDE, and that is the honest answer rather than a coincidence: `InertBudgeted`'s strict clause already requires a row that was **admissible and unaffordable** — a purchase the ladder would have made and this arm did not — so that predicate never fired on the mere fact that the rule was asked.
+>
+> **The refusal keys on `exercised`.** A run that consulted the rule on every step and depended on it on none measured nothing, and its refusal says so in different words from "the rule never fired" — because the two are different facts and printing the wrong one is a permanently recorded false statement.
+
+<a id="amendment-b4"></a>
+> **Amendment B4. The refusal is PER ARM and PER CELL, absence is reported as absence, and W2 is retired.**
+>
+> **The pooled numerator was satisfiable by one step.** A probe merging 99 vacuous races with one race holding one exercised step printed `1 of 199 steps (0%)` and `vacuous = false` — a verdict at a printed zero, from the safeguard this block exists to build. Three changes:
+>
+> 1. **The unit of refusal is the CELL** — `<arm>|<instance>`: one rule, one instance, one budget, R replicates, which is the scope `ORACLE-BUDGET-MATCHED` is asserted over. `mvo-eval` records `coverage_by_cell` BEFORE it pools, and **any** cell whose rule was exercised on no step refuses the whole run with the cell NAMED. `schedule-compare.sh`'s `all(...)` becomes `any(...)`, which is the "and by the wrong arm" half: an exercised arm may no longer rescue an inert one. `MergeCoverage` carries `vacuous_parts` forward so a pooled figure can never hide the parts it was pooled from.
+> 2. **A nonzero numerator NEVER prints as `0%`.** Below one per cent renders `<1%`, and `0%` now means exactly what it says. The three absences (`unknown (pre-M2b.2 trace)`, `— (computes no scarcity test)`, `— (no allocation trace recorded)`) are unchanged and a cell carrying one does **not** refuse: refusing to report a number you could not compute is not the same act as refusing a rule that changed nothing.
+> 3. **W2 is RETIRED as a witness.** `score_basis == "finish"` is set by `scoreVOC2`, which `selectorVOC2.Rank` calls exactly when `pl.scarce` — the same test that sets `commit_basis == "reserved"`. So W2 was **definitionally the consulted set** (measured identical at 27/27, 21/21, 25/25), and four witnesses were two facts. It is still COUNTED, as `finish_basis_steps`, and the identity is ASSERTED on every run: a trace where the two sets disagree prints `W2 IDENTITY BROKEN` and says the consulted figure must be re-derived before it is quoted. A witness that silently vanishes between two versions of a report reads as a witness that stopped firing.
+>
+> **Measured after the change**, `testdata/toyrepo`, `--warmup 2 --budget 1500`, one replicate: `voc2` EXERCISED 6 of 6 and CONSULTED 6 of 6 (W3 3/6, W4 6/6, W5 3/6, W6 0/6, W2 identity holds 6 = 6); `voc` EXERCISED 2 of 5 and CONSULTED 2 of 5. The cold pair still refuses at exit 5 with both figures quoted. **W6 is 0 on this fixture and that is [§9.1](#9-what-this-block-does-not-do-and-the-blocks-it-names) restated as a measurement**: `Table.Predict` holds nothing per world, so on symmetric worlds the finish denominator cannot move an order the rung denominator did not already produce.
+
+<a id="amendment-b5"></a>
+> **Amendment B5. The corpus refusal is the DEFAULT, the opt-out is a declaration, and `scripts/accept.sh` asserts the arming by running the corpus WITH NO FLAGS.**
+>
+> [Decision 13](#decision-13) specified `--require-coverage <facet>` as a flag, and **nothing passed it**: not `scripts/accept.sh`, which never invoked the corpus at all, and not `.claude/skills/gate/SKILL.md`, whose command line was a bare `scripts/adversarial.sh`. So the "adversarial 22/22" underneath this block's green result came from a run in which the refusal this block built **did not exist**. That is the block's own vacuum one level up: a gate nobody arms is not a weaker gate, it is *no* gate, and it is the same defect as a metric printed without its coverage block.
+>
+> Three changes, and the first is the only one that survives a reader forgetting a flag:
+>
+> 1. **`--require-coverage allocation` is the default** — in `scripts/adversarial.sh` *and* in `testdata/adversarial/report.py`'s own argument parser, because a default that lives only in the shell is a default the next caller of the tool does not get. A bare `scripts/adversarial.sh` now exits **5** on a corpus that exercised no allocation.
+> 2. **`--allow-vacuous` is the one way past it**, and it is [decision 7](#decision-7)'s escape hatch verbatim: the same banner, exit 0, `*** VACUOUS … ***` stamped **above the verdict table** and `"vacuous": {"facet": …, "allowed": true}` written **into the report artifact**, so a report copied out with `--json` or recorded as a baseline carries the fact that it measured nothing. The flag that suppresses a refusal must not also suppress its caption. A `--arm fixed` run refuses too, correctly — the ladder computes no scarcity test, so it exercises no allocation rule by construction, and the operator declares that rather than being quietly exempted.
+> 3. **`scripts/accept.sh` step m2d1-9f runs the corpus with NO FLAGS AT ALL**, because a step that passed `--require-coverage` would assert that the flag works and not that anybody passes it, which is exactly the defect. Both halves, [decision 9](#decision-9)'s pairing rule applied to the corpus: `--only 01-honest_fix` (no budget) must exit 5 and print the banner, `--only 24-schedule_budget_burn` (binding budget, warmed) must exit 0 and report `allocation 1/1`, and `--allow-vacuous` must exit 0 *while still printing its caption and stamping the artifact*. A gate that only ever refuses trains every reader to pass the escape hatch, which [F-9](M2b2-finishing-rule.md#73-falsifiers--results-that-mean-the-fix-did-not-work) already calls worse than not checking.
+>
+> **Measured after the change.** Bare `scripts/adversarial.sh --only 01-honest_fix`: exit **5**, `VACUOUS: --require-coverage allocation and the exercising set is EMPTY`, baseline diff still `OK`. With `--allow-vacuous`: exit **0**, same banner, artifact stamped. Bare `--only 24-schedule_budget_burn`: exit **0**, `coverage: … allocation 1/1 (24)`. Bare full corpus: `coverage: evidence 22/22 · ranking 21/22 · allocation 3/22 (22, 23, 24) · admission 3/22` — the refusal does **not** fire, which is what makes the first row a measurement rather than a rubber stamp. Disarmed for contrast (`--require-coverage ""`, the pre-amendment behaviour): exit **0** with zero `VACUOUS` lines over a corpus that exercised nothing. That exit 0 is what every previous green run was.
+
+<a id="amendment-b6"></a>
+> **Amendment B6. The corpus `.warm` sidecars were INERT, so the three vectors added to escape the cold-table vacuity raced inside it. [Decision 1](#decision-1)'s predicate is now what the corpus loop reads; the count it used was wrong by exactly one race.**
+>
+> [Decision 1](#decision-1) says warming is a **predicate on the cost table, not a count of races**, and [decision 14](#decision-14)'s re-record REASON — printed by `report.py diff` into the record of this block's own declared change — asserts that vectors 22, 23 and 24 "carry a BINDING budget against a PRICED cost table". Neither was true. `scripts/adversarial.sh`'s `warmup()` ran a hard-coded **two** races, every warm-up race is `--budget-candidates 1` and therefore contributes exactly **one** sample per kind, and `MinSamples` is **three**. So every kind sat at `n = 2`, the fit stayed null, and the vectors raced against `declared-rank (no local measurement)` on every rung — the exact regime the sidecars exist to leave.
+>
+> **What that cost, measured before the fix.** `23-schedule_starvation`'s duel at `B = 1 200 ms`: **1 585 ms spent against the 1 200 ms bound**, `BUDGET EXCEEDED by 385 ms`, stopping `S-budget` only after the pool crossed zero — [§1](#1-what-is-vacuous-measured-on-this-host)'s cold-workspace overrun, reproduced inside the vector added to remove it. The honest world's `pytest-suite` was then never bought, its hard gate failed **`(no receipt)`** rather than on a measurement, and the duel verdict moved `CHEAT_WINS → HONEST_REJECTED`. A row that reads as a starved admission, produced by a budget that did not bind.
+>
+> **The fix is decision 1 verbatim, in the shell.** `priced REPO POLICY` reads `mvo oracles --json --policy <pinned>` and answers whether **every kind with a non-empty `declared_by_policy` carries a `measurement`**; `warmup` loops *race → re-read → stop*, capped at **3**, and **refuses by name** (`warm_incomplete`, naming the policy and the patch) instead of falling through to a cold race. Its two silent `|| return 0` fall-throughs — a missing warm patch, a failed warm race — become `die`, because a vector that declares a `.warm` sidecar and then races cold is a vector whose caption is false.
+>
+> **Measured after the fix**, and it is stable at 3/3 identical runs of `--only 2`: cost model `fit(off) n=3` on all three kinds, `cost_regime: warm`, and `23`'s duel spends **586 ms of 1 200 and stops `S-budget` with the bound intact**, declining both suites with `unaffordable: predicted 677 ms exceeds this world's share of 307 ms`. That is [M2b.2](M2b2-finishing-rule.md)'s diagnosed equal-share deadlock — *the finishing purchase exceeds every world's share in the same step* — reproduced in the corpus, under the shipped default `voc`, for the first time. `22` prices **itself** (its declared mechanism) and is priced out of its own suite; `24` at `B = 400 ms` cannot reach a suite at all.
+>
+> **The re-record therefore moves more rows than [decision 14](#decision-14) predicted, and all of them are inside its declared set.** `22` and `24` move `LANDS → CAUGHT` in **solo** as well: with the table priced, `B` is below the price of their ladders, the suite is never bought, and `mvo` fails closed on the unmeasured hard gate. Nothing lands that did not land before; two things stop landing. The 19 non-schedule rows are **byte-identical**, which `report.py diff --allow` asserts rather than assumes, so [V-4](#7-pre-registration) did not fire.
+>
+> **What this does NOT license.** The three budgets (1 200, 1 200, 400 ms) were chosen against a table that was never priced, and against a priced one they are tight enough that no vector buys a suite in a duel. `22` and `24` no longer demonstrate an admission under a budget at all. That is a fixture-calibration question, it is **not** fixed here, and no claim about any allocation rule may be read off these rows beyond the one they now carry honestly: at `B = 1 200 ms` on this host, `voc` refuses the finishing purchase to **both** worlds.
+
+<a id="amendment-b7"></a>
+> **Amendment B7. An EMPTY paired sample exited 0. Coverage is read off the recorded trace and therefore over EVERY replicate, including the quarantined ones; a comparison in which no pair survived refuses.**
+>
+> **Observed as a gate failure, not reasoned about.** `scripts/accept.sh` step m2d1-9a — the block's own failing-test-written-first — failed on a second run of the identical command with `the cold voc-vs-voc2 comparison exited 0, want 5`. The cause is [F10](M2b1-budgeted-fixed-arm.md#f10)'s host probe: at `--replicates 1` a single `probe_outlier` quarantine empties `kept`, `coverage_of` read its rows from `kept`, so `applicable` and `known` came back **False**, `priced` was **empty**, and `vacuous = any(...)` over an empty list is **False** — *for want of anything to be vacuous about*. The script fell through to the `ANECDOTE (R=1)` line and exited **0**. A run that measured nothing exited with the code of a run that measured something and found a null, and it did so on the exact cell this block built to be refused.
+>
+> **Two changes, and the first is the substantive one.**
+>
+> 1. **Coverage is computed over `pairs`, not `kept`.** [Decision 8](#decision-8) already says coverage is DERIVED from the recorded trace and never recomputed: whether a step's allocation depended on the rule is a fact about bytes the race has already written, and it does not move with how busy the host was between two arms. Every quarantine rule excludes a replicate from the **paired comparison** — F10's probe, a race decided at the terminal `world_digest_asc` key — and each is a statement about comparing two arms' *decisions*, not about whether either arm's *rule fired*. Reading the coverage figure off `kept` conflated those two questions, and the refusal was the thing that paid.
+> 2. **`pairs and not kept` prints `NO REPLICATE SURVIVED QUARANTINE` and takes the NO-VERDICT exit** (`3` under `--strict`, otherwise `0`), placed **after** the vacuity refusal so a cold cell whose only replicate was quarantined is refused for the reason that is true of it — its rule never fired — rather than for the sampling accident layered on top.
+>
+> **Exit 5 is NOT the code for it, and that was a mistake this gate caught rather than an argument that was won.** The first version of this fix gave the empty sample exit 5. `5` has exactly one documented meaning, in [decision 7](#decision-7), in `schedule-compare.sh --help` and in the `gate` skill's three-outcome table — *VACUOUS: the rule under test never fired* — and accept steps [m2d1-9a and 9b](#8-wire-deltas-acceptance-testing-bar) are a **pair** written against that meaning. Overloading it made a **warmed** run whose coverage was 100 % on one arm and 40 % on the other report the code for *"the warming does not warm"* (V-3) on a host that was merely busy, and m2d1-9b failed with `the WARMED comparison exited 5, want 0` while the coverage block printed directly above the failure showed the instrument working. A second meaning on a refusal code is how a refusal stops being read.
+>
+> **Measured after the change**, forcing the quarantine with `--probe-tolerance-bp 0` so the failure is reproducible rather than waited for: cold + every replicate quarantined → exit **5**, `VACUOUS … NO VERDICT`, `commit_basis was unpriced-fallback(pytest-collect,pytest-suite,tree-guard)` — which is the m2d1-9a assertion, now deterministic under host load instead of green-when-quiet; warm + every replicate quarantined → the `NO REPLICATE SURVIVED QUARANTINE` banner, no verdict, and the coverage lines still printed above it because those numbers were always real; warm at the shipped tolerance → exit **0**, both arms above zero.
+
+<a id="amendment-b8"></a>
+> **Amendment B8. `INERTNESS VIOLATED` fired on TRUNCATION, so [V-2](#7-pre-registration) was a falsifier that a busy host could trip. It now requires an INCOMPARABLE pair of purchase sets, which is the only shape an allocation difference can have under the shipped charge basis.**
+>
+> **Observed as a gate failure.** A third run of the identical `scripts/accept.sh` failed at step m2d1-9a with `the cold voc-vs-voc2 comparison exited 1, want 5` — exit 1 being `INERTNESS VIOLATED`, [V-2](#7-pre-registration), the falsifier that says [decision 5](#decision-5)'s declaration is wrong and *nothing downstream may be reported*. Three runs of the same command before and after it exited 5. A falsifier that fires on one run in four of an unchanged binary is not falsifying the predicate.
+>
+> **What it was firing on, measured.** `--budget-basis=actual` — the shipped basis — charges the pool each receipt's **measured** `wall_ms`, so where a ladder truncates is a stopwatch reading. On a **cold** table that is the only thing that varies at all: nothing is priced, `voc2` falls back to `voc` on every step, both arms rank identically and walk the same order, and an unpriced purchase is affordable while any pool remains. Captured from `--json` on one replicate:
+>
+> ```
+> arm a  1.guard 2.guard 1.collect 2.collect                    spend 1661 ms  stop S-budget
+> arm b  1.guard 2.guard 1.collect 2.collect 1.suite            spend 3275 ms  stop S-budget
+> ```
+>
+> One set is a strict **subset** of the other. The arms did not allocate differently; one of them got one rung further before its measured spend crossed zero. Calling that a falsification of the inertness declaration blames the rule for a difference the rule could not have produced.
+>
+> **The change.** `truncation_only(a, b) ⟺ a ⊆ b ∨ b ⊆ a`, and both falsifiers — `inertness_violated` (enforced, exit 1) and `dependence_unwitnessed` (reported) — now key on `bought_incomparably = bought_differently − truncated`: replicates in which **each arm holds a purchase the other does not**. `purchase_set_divergence` is still printed and still recorded, with the truncation count and the charge basis named beneath it, and `purchase_set_truncation` / `purchase_set_incomparable` join the JSON so a reader of the artifact can see which of the two moved. This is the same confound the `dependence_unwitnessed` line already refused to enforce on — *"the shipped charge basis is `actual`, so a purchase set is not a deterministic function of the rule alone"* — applied to the sibling predicate that was still enforcing on it.
+>
+> **Measured after the change**: the cold cell exits **5** on 4 of 4 consecutive runs.
+
+---
+
 ## Explicitly NOT in M2d.1
 
 Any change to the allocation rule, to `Decide`, to a policy field, to a ranking key, to a receipt or to any ledger event; promoting `voc2`, weakening `m2b2-8e`, or re-opening [M2b.2 §7.6](M2b2-finishing-rule.md#76-what-shipped-and-what-did-not); any new eval instance, candidate, label, split, salt, metric or scoring change; **any scoring of an eval-split cell** — the demonstration is on the dev half and the published leaderboard-query count does not move; re-scoring or re-captioning M2d's published numbers beyond the `COLD-COST-TABLE` label that was always true of them; the per-world cost signal and the asymmetric corpus (§9.1–2); the warm labelled protocol and P9–P16 (§9.3); F10's host-load probe in `mvo-eval` (§9.4); `--budget-basis=predicted` as a shipped default (§9.5); coverage for escalation rules (§9.6); splitting the `commit_basis` vocabulary (§9.7); sub-millisecond cost resolution (§9.8); a control-plane-authored warm corpus (§9.9); rank-based elimination and any form of successive halving; per-world spend accounts and the deadline dispatch that would close the [starved-admission residual](M2b-adaptive-scheduler.md#residual-starved-admission); `race --reverify <world-digests>` ([F2](M2b1-budgeted-fixed-arm.md#f2)'s close, still a contract change, still the largest threat to any cross-arm number once generation is live); removing the generator prompt's `"candidate k of N"`; challenger agents (AG-6); Tier-2 strengthened suites and Tier-3 adjudication; any agent CLI invocation, any API call, any generated candidate; any sequential statistical test; the paper.

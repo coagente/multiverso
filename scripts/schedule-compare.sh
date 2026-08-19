@@ -608,11 +608,41 @@ def arm_stats(side):
 #                                reason to trust the first three.
 # ---------------------------------------------------------------------------
 def coverage_of(side):
-    rows = [p[side]["coverage"] or {} for p in kept]
+    # OVER EVERY REPLICATE, INCLUDING THE QUARANTINED ONES, AND THAT IS NOT A
+    # LOOSENING. Coverage is DERIVED FROM THE RECORDED TRACE (M2d.1 decision
+    # 8): whether a step's allocation depended on the rule is a fact about
+    # bytes the race already wrote, and it does not move with how busy the host
+    # was. Every quarantine rule here excludes a replicate from the PAIRED
+    # COMPARISON for a reason that is not the treatment — F10's host probe, a
+    # race decided at the terminal world-digest key — and that is a statement
+    # about comparing two arms' decisions, not about whether either arm's rule
+    # fired. Reading coverage off `kept` conflated the two, and at R=1 a single
+    # quarantine emptied the sample, made `priced` empty, made `vacuous` False
+    # for want of anything to be vacuous ABOUT, and let a run that measured
+    # NOTHING exit 0 — observed on this host under load, on the very cold cell
+    # accept step m2d1-9a exists to see refused.
+    rows = [p[side]["coverage"] or {} for p in pairs]
     steps = sum(int(c.get("steps", 0)) for c in rows)
+    # BLOCKER B3: TWO FIGURES. `consulted` is the steps on which the rule's own
+    # regime ran — `commit_basis` becomes `reserved` the moment scarcity is
+    # true, BEFORE the commit set is built — and `exercised` is the steps whose
+    # ALLOCATION depended on it. Only the second may be captioned as coverage.
+    consulted = sum(int(c.get("consulted", 0)) for c in rows)
     exercised = sum(int(c.get("exercised", 0)) for c in rows)
     races = sum(1 for c in rows if c.get("applicable") and c.get("known"))
     races_ex = sum(1 for c in rows if int(c.get("exercised", 0)) > 0)
+    races_cons = sum(1 for c in rows if int(c.get("consulted", 0)) > 0)
+    # W2's retirement, carried through: score_basis=finish is set by exactly
+    # the scarcity test that sets commit_basis=reserved, so it IS `consulted`.
+    # The identity is asserted rather than assumed, and a break is printed.
+    finish_steps = sum(int(c.get("finish_basis_steps", 0)) for c in rows)
+    w2_breaks = sum(int(c.get("w2_identity_breaks", 0)) for c in rows)
+    # BLOCKER B4: the per-replicate cells this figure was pooled from. A
+    # numerator summed over replicates is satisfiable by one step in one of
+    # them, so the parts are counted and reported beside the whole.
+    vacuous_reps = sum(1 for c in rows
+                       if c.get("applicable") and c.get("known")
+                       and int(c.get("steps", 0)) > 0 and int(c.get("exercised", 0)) == 0)
     wit = {}
     for c in rows:
         for w in c.get("witnesses") or []:
@@ -627,17 +657,27 @@ def coverage_of(side):
         "baseline": first.get("baseline", ""),
         "applicable": bool(first.get("applicable")),
         "known": bool(first.get("known")),
-        "steps": steps, "exercised": exercised,
-        "races": races, "races_exercised": races_ex,
+        "steps": steps, "exercised": exercised, "consulted": consulted,
+        "races": races, "races_exercised": races_ex, "races_consulted": races_cons,
+        "finish_basis_steps": finish_steps, "w2_identity_breaks": w2_breaks,
+        "vacuous_replicates": vacuous_reps,
         "witnesses": wit, "commit_basis": regimes,
         "cost_regime": tables[0] if len(tables) == 1 else ("mixed(%s)" % ",".join(tables) if tables else "unknown"),
-        # A trace this binary priced and that never exercised its rule.
+        # A trace this binary priced and whose allocation never DEPENDED on its
+        # rule. It keys on `exercised` and never on `consulted`: a run in which
+        # the rule was asked on every step and mattered on none measured
+        # nothing, whatever commit_basis says.
         "vacuous": bool(first.get("applicable") and first.get("known") and steps > 0 and exercised == 0),
     }
 
 COV_A, COV_B = coverage_of("a"), coverage_of("b")
 priced = [c for c in (COV_A, COV_B) if c["applicable"] and c["known"] and c["steps"] > 0]
-vacuous = bool(priced) and all(c["exercised"] == 0 for c in priced)
+# BLOCKER B4: PER ARM, NOT POOLED. `all` let an exercised arm rescue an inert
+# one — the reviewer's "and by the wrong arm" — so ANY priced arm whose rule
+# changed nothing it allocated refuses the whole comparison. A comparison in
+# which one of the two rules never mattered is a comparison of one rule against
+# itself just as surely as one in which neither did.
+vacuous = any(c["exercised"] == 0 for c in priced)
 
 # DIVERGENCE is the ORDER; INERTNESS VIOLATION is the SET, and they are two
 # different questions for a reason that is measured rather than stylistic.
@@ -659,10 +699,44 @@ vacuous = bool(priced) and all(c["exercised"] == 0 for c in priced)
 def purchase_set(order):
     return sorted(order)
 
+
+# TRUNCATION IS NOT DIVERGENCE, AND UNDER THE SHIPPED CHARGE BASIS IT IS THE
+# ONLY DIFFERENCE TWO INERT ARMS CAN HAVE.
+#
+# `--budget-basis=actual` charges the pool each receipt's MEASURED wall_ms, so
+# where a ladder truncates is a stopwatch reading. On a COLD table it is the
+# ONLY thing that varies at all: nothing is priced, `voc2` falls back to `voc`
+# on every step, both arms rank identically and walk the same order, and an
+# unpriced purchase is affordable while any pool remains — so one arm simply
+# gets one rung further than the other before its spend crosses zero.
+#
+# MEASURED, and this is why the test moved rather than the claim: cold, B =
+# 1 500 ms, one replicate — arm a bought `1.guard 2.guard 1.collect 2.collect`
+# for 1 661 ms and arm b bought THE SAME FOUR PLUS `1.suite` for 3 275 ms, both
+# stopping `S-budget`. One set is a strict SUBSET of the other. Calling that a
+# falsification of the inertness declaration says the rule caused a difference
+# that the rule could not have caused, and it made accept step m2d1-9a flake
+# between exit 5 and exit 1 on the same command.
+#
+# So the falsifier requires a SYMMETRIC difference: each arm holding a purchase
+# the other does not. That is the shape a genuine allocation difference has and
+# the shape truncation can never have, and it is the same confound the
+# `dependence_unwitnessed` line below already refuses to enforce on, for the
+# same measured reason.
+def truncation_only(pa, pb):
+    a, b = set(pa), set(pb)
+    return a <= b or b <= a
+
+
 divergent = sum(1 for p in kept if p["a"]["purchase_order"] != p["b"]["purchase_order"])
-bought_differently = sum(
-    1 for p in kept
-    if purchase_set(p["a"]["purchase_order"]) != purchase_set(p["b"]["purchase_order"]))
+differing = [p for p in kept
+             if purchase_set(p["a"]["purchase_order"]) != purchase_set(p["b"]["purchase_order"])]
+bought_differently = len(differing)
+truncated = sum(1 for p in differing
+                if truncation_only(p["a"]["purchase_order"], p["b"]["purchase_order"]))
+# The replicates where NEITHER arm's purchases contain the other's: the only
+# set difference a rule can be blamed for.
+bought_incomparably = bought_differently - truncated
 # AND IT IS A TEST OF A PAIR OF DECLARED RULES, not of a rule against a
 # baseline that declares nothing. The violation says "the arms bought
 # different things on steps where THE ARM DECLARED ITSELF INERT" — which needs
@@ -670,7 +744,37 @@ bought_differently = sum(
 # no such declaration, so a voc-vs-ladder set difference at a budget that bound
 # for one arm and not the other is a MEASUREMENT and is reported as one; only a
 # pair of priced, inert rules can falsify the predicate.
-inertness_violated = len(priced) >= 2 and all(c["exercised"] == 0 for c in priced) and bought_differently > 0
+#
+# AND IT KEYS ON `consulted`, NOT ON `exercised` (blocker B3). The declaration
+# being falsified is the INERTNESS predicate — "when this arm's own regime did
+# not run, it IS its baseline" — so the steps it is a claim about are the ones
+# where the regime did not run. Keying it on the new `exercised` figure would
+# make it fire on a run where both rules ran, changed nothing they allocated
+# and still bought different things — which is a falsification of the
+# DEPENDENCE predicate and is reported separately below, under its own name.
+#
+# AND IT KEYS ON `bought_incomparably`, NOT ON `bought_differently`: a set
+# difference that is pure TRUNCATION is a stopwatch artefact of the `actual`
+# charge basis and not an allocation the rule produced (see `truncation_only`
+# above, with the measurement that moved this line).
+inertness_violated = (len(priced) >= 2
+                      and all(c["consulted"] == 0 for c in priced)
+                      and bought_incomparably > 0)
+# THE DEPENDENCE PREDICATE'S OWN FALSIFIER (blocker B3). If every priced arm
+# was CONSULTED and none of them DEPENDED, then by the predicate's own claim
+# both arms allocated exactly as their baselines would have — so they must have
+# bought the same set. A difference means `DependedVOC2` is missing a term.
+#
+# It is REPORTED and not enforced, and the reason is measured rather than
+# squeamish: the shipped charge basis is `actual`, so the pool is charged real
+# wall-clock and two arms' purchase sets are not a deterministic function of
+# the rule alone. Enforcing it would make the accept gate flake on host jitter,
+# which is the rubber stamp F-9 names pointed the other way. Under
+# `--budget-basis=predicted` it is a hard falsifier and the line says so.
+dependence_unwitnessed = (len(priced) >= 2
+                          and all(c["exercised"] == 0 for c in priced)
+                          and any(c["consulted"] > 0 for c in priced)
+                          and bought_incomparably > 0)
 
 A, B = arm_stats("a"), arm_stats("b")
 table = {}
@@ -751,6 +855,10 @@ verdict = {
     "coverage": {"a": COV_A, "b": COV_B},
     "purchase_order_divergence": divergent,
     "purchase_set_divergence": bought_differently,
+    # Split out, because the falsifiers key on the second and a reader of the
+    # artifact must be able to see which of the two moved.
+    "purchase_set_truncation": truncated,
+    "purchase_set_incomparable": bought_incomparably,
     "vacuous": vacuous,
     "inertness_violated": inertness_violated,
 }
@@ -800,6 +908,15 @@ for arm in (A, B):
           % (q(arm["waste_ms"], " ms"), q(arm["selection_us"], " us"),
              arm["overrun_count"], arm["overrun_max_ms"]))
 print()
+def pct_text(n, d):
+    # BLOCKER B4: a nonzero numerator NEVER prints as 0 %. The probe that
+    # merged 99 vacuous races with one exercised step printed `1 of 199 steps
+    # (0%)`, and a reader who saw the parenthesis read a zero nobody measured.
+    if d <= 0:
+        return "--"
+    p = n * 100 // d
+    return "<1%" if (p == 0 and n > 0) else "%d%%" % p
+
 def cov_line(side, cov, arm):
     if not cov["steps"]:
         if not cov["applicable"]:
@@ -807,20 +924,40 @@ def cov_line(side, cov, arm):
         if not cov["known"]:
             return "  arm %s (%s): coverage unknown (pre-M2b.2 trace)" % (side, arm["selector"] or "-")
         return "  arm %s (%s): coverage -- (no allocation trace recorded)" % (side, arm["selector"] or "-")
-    pct = cov["exercised"] * 100 // cov["steps"]
-    return ("  arm %s (%s, baseline %s): %d of %d steps (%d%%), %d of %d races"
+    return ("  arm %s (%s, baseline %s): EXERCISED %d of %d steps (%s), %d of %d races"
             % (side, cov["rule"] or "-", cov["baseline"] or "-",
-               cov["exercised"], cov["steps"], pct, cov["races_exercised"], cov["races"]))
+               cov["exercised"], cov["steps"], pct_text(cov["exercised"], cov["steps"]),
+               cov["races_exercised"], cov["races"]))
 
-print("COVERAGE — did the rule under test ever fire? (M2d.1 decision 10; printed always)")
+print("COVERAGE — did the ALLOCATION DEPEND on the rule under test? (M2d.1 decision 10 as amended")
+print("by blocker B3; printed always, including at 100 %)")
 for side, cov, arm in (("a", COV_A, A), ("b", COV_B, B)):
     print(cov_line(side, cov, arm))
+    if cov["steps"]:
+        # B3's demoted figure, printed directly beneath the headline. The gap
+        # between the two is the whole of what the first version got wrong.
+        print("      consulted (the rule's own regime ran, NOT coverage): %d of %d steps (%s), %d of %d races"
+              % (cov["consulted"], cov["steps"], pct_text(cov["consulted"], cov["steps"]),
+                 cov["races_consulted"], cov["races"]))
+        if cov["vacuous_replicates"]:
+            print("      VACUOUS PARTS: %d of %d replicate(s) exercised the rule on NO step — a pooled"
+                  % (cov["vacuous_replicates"], cov["races"]))
+            print("        numerator hides that, so the parts are printed beside the whole (B4)")
     for wid in sorted(cov["witnesses"]):
         w = cov["witnesses"][wid]
         extra = ""
         if wid == "W3" and w["total"] > w["steps"]:
             extra = "   (|C| = 0 on %d: equal shares, M2b decision 8)" % (w["total"] - w["steps"])
         print("      %s %-26s %d of %d%s" % (wid, w["name"], w["steps"], w["total"], extra))
+    if cov["steps"] and cov["rule"] == "voc2":
+        print("      W2 finish denominator      %d of %d   RETIRED AS A WITNESS: score_basis=finish is"
+              % (cov["finish_basis_steps"], cov["steps"]))
+        print("        set by exactly the scarcity test that sets commit_basis=reserved, so it IS the")
+        print("        consulted set above — four witnesses were two facts (B4)")
+        if cov["w2_identity_breaks"]:
+            print("      W2 IDENTITY BROKEN on %d step(s): the construction that retires it no longer"
+                  % cov["w2_identity_breaks"])
+            print("        holds, and the consulted figure must be re-derived before it is quoted")
     if cov["commit_basis"]:
         print("      commit_basis observed: %s" % " / ".join(cov["commit_basis"]))
     print("      cost table: %s" % (cov["cost_regime"] or "unknown").upper())
@@ -828,6 +965,14 @@ print("  purchase-order divergence: %d of %d replicate(s) bought a different (or
       % (divergent, len(kept)))
 print("  purchase-set divergence:   %d of %d replicate(s) bought a different (ordinal, oracle) SET"
       % (bought_differently, len(kept)))
+if truncated:
+    print("      of which %d is TRUNCATION (one arm's purchases are a SUBSET of the other's): the"
+          % truncated)
+    print("      `%s` charge basis pays each receipt's measured wall_ms, so the two arms stopped at"
+          % os.environ["BASIS"])
+    print("      different points along the SAME order. %d replicate(s) bought INCOMPARABLE sets,"
+          % bought_incomparably)
+    print("      which is the only shape an allocation difference can take.")
 if bought_differently and len(priced) < 2:
     print("      (only %d arm declares an inertness predicate here, so a set difference is a"
           % len(priced))
@@ -835,23 +980,47 @@ if bought_differently and len(priced) < 2:
 print()
 
 if inertness_violated:
-    print("INERTNESS VIOLATED: the arms bought a DIFFERENT SET on %d replicate(s) whose every step"
-          % bought_differently)
+    print("INERTNESS VIOLATED: the arms bought INCOMPARABLE SETS on %d replicate(s) whose every step"
+          % bought_incomparably)
     print("  was declared INERT. The inertness predicate in M2d.1 decision 5 is WRONG for these arms,")
     print("  the coverage number above is not measuring what it claims, and NOTHING DOWNSTREAM MAY BE")
     print("  REPORTED. This is a failure of the coverage mechanism, not a result about the arms.")
     sys.exit(1)
 
+if dependence_unwitnessed:
+    print("DEPENDENCE UNWITNESSED: every priced arm was CONSULTED and none of them DEPENDED, yet the")
+    print("  arms bought INCOMPARABLE SETS on %d replicate(s). By the dependence predicate's own claim"
+          % bought_incomparably)
+    print("  both arms allocated exactly as their baselines would have, so a set difference means the")
+    print("  predicate is MISSING A TERM. Reported and not enforced ONLY because the shipped charge")
+    print("  basis is `actual`, so a purchase set is not a deterministic function of the rule alone;")
+    print("  under --budget-basis=predicted this line is a falsification of blocker B3's repair.")
+    print()
+
 if vacuous:
-    print("VACUOUS (coverage %d of %d steps, %d of %d replicates): NO VERDICT"
-          % (sum(c["exercised"] for c in priced), sum(c["steps"] for c in priced),
-             sum(c["races_exercised"] for c in priced), len(kept)))
-    observed = sorted({g for c in priced for g in c["commit_basis"]}) or ["no commit_basis at all"]
-    print("  the rule under test never fired: commit_basis was %s on every" % " / ".join(observed))
-    print("  step of every replicate, so each arm ran its own BASELINE and this is not a comparison")
-    print("  of two rules:")
-    for c in priced:
-        print("    --selector=%-6s ran %s" % (c["rule"], c["baseline"] or "its undeclared baseline"))
+    dead = [c for c in priced if c["exercised"] == 0]
+    print("VACUOUS (%d of %d priced arm(s) exercised the rule on NO step): NO VERDICT" % (len(dead), len(priced)))
+    for c in dead:
+        print("  --selector=%-6s EXERCISED %d of %d steps, CONSULTED %d of %d"
+              % (c["rule"], c["exercised"], c["steps"], c["consulted"], c["steps"]))
+    observed = sorted({g for c in dead for g in c["commit_basis"]}) or ["no commit_basis at all"]
+    if all(c["consulted"] == 0 for c in dead):
+        print("  the rule under test never fired: commit_basis was %s on every" % " / ".join(observed))
+        print("  step of every replicate, so each arm ran its own BASELINE and this is not a comparison")
+        print("  of two rules:")
+    else:
+        # B3: THE TWO REFUSALS ARE DIFFERENT SENTENCES AND MAY NOT BE
+        # INTERCHANGED. "the rule never ran" is a claim about the code path;
+        # this one is a claim about the allocation, and it is the true one for
+        # a `reserved`-on-every-step run whose commit set was always empty.
+        print("  the rule under test RAN and CHANGED NOTHING IT ALLOCATED: commit_basis was %s,"
+              % " / ".join(observed))
+        print("  and no step recorded a commit set, a withheld pass outcome, a lapsed hard-gate")
+        print("  override or a moved queue head — so every allowance and every order was the")
+        print("  baseline's, and this is not a comparison of two rules:")
+    for c in dead:
+        print("    --selector=%-6s allocated exactly as %s would have"
+              % (c["rule"], c["baseline"] or "its undeclared baseline"))
     print("  Warm the workspace (--warmup auto / --warmup N) or drop the claim.")
     print()
     print("  NOTE: on a cold workspace no kind carries a local fit, so an unpriced purchase is")
@@ -865,6 +1034,39 @@ for name, reps in quarantine.items():
     if reps:
         print("  QUARANTINED %s: replicates %s (excluded from the paired comparison)" % (name, reps))
 print()
+
+# AN EMPTY PAIRED SAMPLE SAYS SO IN ITS OWN WORDS, and it says so through the
+# NO-VERDICT channel rather than through exit 5. Every quarantine rule here
+# removes a replicate for a reason that is not the treatment, and at R=1 a
+# single quarantine empties the sample; the script then printed `ANECDOTE
+# (R=1)`, which is true of the sample size and silent about the fact that
+# nothing was compared at all.
+#
+# EXIT 5 IS NOT THE CODE FOR IT, and giving it that code was a mistake caught
+# by the gate rather than by argument. `5` has ONE documented meaning here and
+# in `.claude/skills/gate/SKILL.md` — VACUOUS: the rule under test never fired
+# — and accept steps m2d1-9a and 9b are a PAIR written against exactly that
+# meaning. Overloading it made a WARMED run whose coverage was 100 % on one arm
+# and 40 % on the other report the code for "the warming does not warm", on a
+# host that was merely busy. A second meaning on a refusal code is how a
+# refusal stops being read.
+#
+# So the banner is loud, no verdict follows it, and the exit is the anecdote
+# rule's own: `--strict` turns no-verdict into 3, and without it the caller
+# reads the banner. Placed AFTER the vacuity refusal on purpose: a cold cell
+# whose only replicate was quarantined is refused for the reason that is TRUE
+# of it — its rule never fired — and not for the sampling accident on top.
+if pairs and not kept:
+    print("NO REPLICATE SURVIVED QUARANTINE: all %d replicate(s) were excluded, so no arm was"
+          % len(pairs))
+    print("  compared to any other. The coverage figures above are still real — they are read off")
+    print("  each race's recorded trace, which no quarantine touches — but the PAIRED comparison")
+    print("  has an EMPTY SAMPLE and there is no verdict of any kind below:")
+    for name, reps in quarantine.items():
+        if reps:
+            print("    %-24s replicates %s" % (name, reps))
+    print("  Re-run with more replicates, or on a quieter host if the probe is what excluded them.")
+    sys.exit(3 if strict else 0)
 if not verdict_ok:
     print("  ANECDOTE (R=%d): no verdict." % R)
     print("  A single run at a budget level measures one draw of a process whose own")

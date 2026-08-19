@@ -63,6 +63,24 @@ tests nothing, and a harness that raced it anyway would record a green row
 that means nothing. Vectors 01-13 have no sidecar and keep the shipped
 default, which is why their rows do not move.
 
+**Vectors 22-24 additionally carry `.budget` and `.warm` sidecars, and both
+are load-bearing.** `<nn>-<name>.budget` is the intent's `--budget-oracle-ms`;
+`<nn>-<name>.warm` names the patch file the harness races UNBUDGETED into the
+same workspace beforehand, so the cost table is priced before the vector runs.
+**The warm-up is a predicate, not a count**: the loop races, re-reads
+`mvo oracles --json --policy <pinned>`, and stops when every kind the policy
+can buy carries a local fit — capped at three races, and refusing by name
+(`warm_incomplete`) rather than racing cold. It has to be, because
+`MinSamples` is 3 and each warm-up race is one candidate and therefore one
+sample per kind: a hard-coded two races leaves every kind at `n=2`, the fit
+stays null, every rung prices `declared-rank`, an unpriced purchase is
+affordable while any pool remains, and **the budget does not bind at all** —
+measured, vector 23 spent 1585 ms against its own 1200 ms bound. A `.warm`
+sidecar that does not reach the predicate is a caption, not a warm table.
+The warm set is the **honest control** (`01-honest_fix`), except for vector
+22, which declares **itself** because poisoning its own cost fit is that
+vector's entire mechanism.
+
 ### Tested and refuted (and one that was not)
 
 `sitecustomize.py` dropped in the repo root is **not** picked up by `python3 -m pytest`
@@ -356,7 +374,17 @@ scripts/adversarial.sh --only 05    # one vector
 scripts/adversarial.sh --repeat 9   # more stopwatch rounds
 scripts/adversarial.sh --json r.json
 scripts/adversarial.sh --record     # re-record, after a deliberate change
+scripts/adversarial.sh --allow-vacuous   # declare a run that exercises no allocation
 ```
+
+**Exit 5 is `VACUOUS` and it is not a pass.** `--require-coverage allocation` is armed on
+every run by default (M2d.1 decision 13, amendment B5): a run whose verdicts all match the
+baseline while *no vector exercised the allocation* is a statement about the oracles and the
+trust boundary and carries no information about any allocation rule, so it refuses instead of
+printing a green count. `--allow-vacuous` is the one way past it — it prints the same banner,
+stamps `VACUOUS` above the verdict table, writes `"vacuous"` into the report artifact and
+exits 0, because the flag that suppresses a refusal must not also suppress its caption. A
+`--arm fixed` run exercises no allocation rule by construction and is expected to need it.
 
 The diff compares gate outcomes, decisions, admission, verification, recorded metrics and
 ground truth. It deliberately does **not** compare wall-clock, durations or stopwatch

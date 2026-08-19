@@ -83,6 +83,16 @@ type runOpts struct {
 	keep       string
 	python     string
 	selector   string
+	// selectors is --selector parsed as a LIST. More than one rule races
+	// every rule inside ONE run, against ONE reference draw and therefore ONE
+	// derived B — which is blocker B1's fix, and the reason the field is a
+	// slice rather than a string.
+	selectors []string
+	// armIDs is --arms parsed. It is kept apart from RunManifest.Arms, which
+	// records the TREATMENTS that raced (one per rule for the adaptive arm),
+	// because the plan is built from the arm table and the manifest reports
+	// what actually ran.
+	armIDs []string
 	// warmup is M2d.1 decision 1: {auto|N|0}. `auto` races into a TEMPLATE
 	// until every kind the pinned policy can buy carries a local fit, or
 	// refuses by name; `0` is the COLD instrument, kept because accept step
@@ -130,11 +140,15 @@ func cmdRun(args []string) error {
 	fs.StringVar(&o.keep, "keep", "", "keep the run's workspaces in this directory")
 	fs.StringVar(&o.python, "python", "python3", "interpreter for the hidden suite")
 	fs.StringVar(&o.selector, "selector", "",
-		"which allocation RULE the adaptive arm races under: voc (M2b's published rule, the binary "+
-			"default) or voc2 (M2b.2's finishing rule). It is how the published M2d numbers stay reproducible "+
-			"on a binary that ships the revision: the arm, the instances, the labels, the scoring and the "+
-			"metrics are unchanged, and only the rule moves. Recorded in the manifest's notes, because a "+
-			"cell that cannot say which rule it raced under is a cell whose caption is a guess")
+		"which allocation RULE(s) the adaptive arm races under: voc (M2b's published rule, the binary "+
+			"default), voc2 (M2b.2's finishing rule), or a COMMA-SEPARATED LIST of both. It is how the "+
+			"published M2d numbers stay reproducible on a binary that ships the revision: the arm, the "+
+			"instances, the labels, the scoring and the metrics are unchanged, and only the rule moves. "+
+			"A LIST RACES EVERY RULE INSIDE ONE RUN, which is the only way two rules can be compared at "+
+			"the same budget: B is derived from the instance's own reference races, so two RUNS of one "+
+			"cell take two reference draws and get two budgets — measured, 1553 ms against 1013 ms on the "+
+			"same instance on the same day, under a caption reading ORACLE-BUDGET-MATCHED. One run, one "+
+			"draw, one B, and the harness refuses if the arms ever disagree about it")
 	fs.StringVar(&o.warmup, "warmup", eval.WarmupAuto,
 		"how the COST TABLE is priced before the arms race against it (M2d.1 decision 1): `auto` races an "+
 			"UNBUDGETED warm-up into a template until every kind the pinned policy can buy carries a local "+
@@ -154,6 +168,19 @@ func cmdRun(args []string) error {
 	if werr != nil {
 		return codedError{code: exitUsage, msg: werr.Error()}
 	}
+	o.selectors = splitList(o.selector)
+	// A rule named twice would race twice and be pooled into one cell, which
+	// is a replicate wearing a second rule's name. Refused at usage rather
+	// than deduplicated silently.
+	for i, s := range o.selectors {
+		for j := 0; j < i; j++ {
+			if o.selectors[j] == s {
+				return codedError{code: exitUsage, msg: fmt.Sprintf(
+					"mvo-eval run: --selector names %q twice: a rule raced twice inside one cell is a "+
+						"replicate wearing a second rule's name", s)}
+			}
+		}
+	}
 
 	home := o.common.home
 	if home == "" {
@@ -163,13 +190,20 @@ func cmdRun(args []string) error {
 			return err
 		}
 	}
+	o.armIDs = splitList(o.arms)
 	man := eval.RunManifest{
 		Schema: eval.SchemaRun, Corpus: o.common.corpus, Version: o.common.version,
 		Split: o.split, Replicates: o.replicates, BudgetLevel: o.level,
-		Arms: splitList(o.arms), CanaryVerdict: eval.CanaryNotInUse,
+		// THE TREATMENTS THAT RACED, not the arm ids that were asked for: with
+		// two rules the adaptive arm is two treatments, and a manifest whose
+		// arm list did not say so would be a manifest whose rows nobody could
+		// join to its header.
+		Arms: armKeys(armPlan(o.armIDs, o.selectors)), CanaryVerdict: eval.CanaryNotInUse,
 		Derivations:   map[string][]eval.Derived{},
 		AllowVacuous:  o.allowVacuous,
 		CoverageByArm: map[string]schedule.CoverageReport{},
+		// B4: the refusal's real unit. One entry per (arm, instance).
+		CoverageByCell: map[string]schedule.CoverageReport{},
 		Notes: []string{
 			"n = 1–2 repositories, synthetic candidates, Tier-1 labels, oracle-budget-matched only, " +
 				"selection cost measured and uncharged, tokens and runner time unmeasured, no agent output anywhere in it. " +
@@ -185,7 +219,7 @@ func cmdRun(args []string) error {
 				"family-B cell carries no information about a real cohort.",
 		},
 	}
-	if o.selector != "" {
+	if len(o.selectors) > 0 {
 		// A cell that cannot say which allocation rule produced it is a cell
 		// whose caption is a guess (M2b.2 §5.2). The binary's default rule is
 		// already recorded per race in schedule.started.constants; this is the
@@ -194,7 +228,17 @@ func cmdRun(args []string) error {
 			"THE ADAPTIVE ARM RACED UNDER --selector=%s. The arm, the instances, the split, the labels, "+
 				"the scoring and the metrics are unchanged; the ALLOCATION RULE is what moved. "+
 				"M2b.2 ships voc2 as the binary default and retains voc so every published M2b.1 and M2d "+
-				"number stays reproducible under ONE binary.", o.selector))
+				"number stays reproducible under ONE binary.", strings.Join(o.selectors, ",")))
+	}
+	if len(o.selectors) > 1 {
+		man.Notes = append(man.Notes, fmt.Sprintf(
+			"THE %d RULES RACED INSIDE ONE RUN, so they share ONE warmed template, ONE reference draw and "+
+				"therefore ONE derived B per instance. This is the only configuration in which two "+
+				"allocation rules are comparable at all: B is derived from the reference races, so two RUNS "+
+				"of one cell take two draws and are handed two budgets — measured, 1553 ms against 1013 ms "+
+				"on the same instance on the same day, under a caption reading ORACLE-BUDGET-MATCHED. "+
+				"Every cell prints the B it was raced at, and the run REFUSES if the arms of an instance "+
+				"ever held different ones.", len(o.selectors)))
 	}
 
 	// Degradation first: an absent corpus is a NAMED SKIP for every instance
@@ -583,7 +627,16 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 	var rows []eval.Row
 	// 4. The budgeted arms, R replicates each, interleaved.
 	type armState struct {
-		arm       eval.Arm
+		arm eval.Arm
+		// selector is the ALLOCATION RULE this treatment raced under. Two
+		// rules are two treatments of one arm inside one run, sharing the
+		// template, the reference races and B.
+		selector string
+		// budgets is the set of budgets this arm's races RECORDED on their own
+		// `schedule.started`. Read from the artifact rather than from the
+		// variable that was passed, for the reason V-6 reads the cost table
+		// from the artifact: a check on the variable checks the assignment.
+		budgets   map[int64]bool
 		decisions []string
 		winners   []string
 		sources   []string
@@ -603,13 +656,13 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 	}
 	states := map[string]*armState{}
 	var order []string
-	for _, id := range man.Arms {
-		a, ok := eval.ArmByID(id)
-		if !ok || a.Kind != eval.KindRaced {
-			continue
+	plan := armPlan(o.armIDs, o.selectors)
+	for _, p := range plan {
+		states[p.key] = &armState{
+			arm: p.arm, selector: p.selector, budgets: map[int64]bool{},
+			regimes: map[string]bool{}, tables: map[string]bool{},
 		}
-		states[id] = &armState{arm: a, regimes: map[string]bool{}, tables: map[string]bool{}}
-		order = append(order, id)
+		order = append(order, p.key)
 	}
 	for r := 0; r < o.replicates; r++ {
 		for _, id := range order {
@@ -622,12 +675,17 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 				Arm: st.arm, MVO: o.mvo, Instance: inst, Patches: patches,
 				WorkRoot: dir, EvalHome: home, RepoSrc: store.RepoPath(inst),
 				TemplateSrc: template,
-				PolicyFile:  policyFile, Parallel: 1, BudgetMS: budget, Needles: needles,
+				// ONE `budget`, computed ONCE above from ONE reference draw,
+				// handed to EVERY arm of this instance including both
+				// allocation rules. That is blocker B1's fix, and it is one
+				// variable rather than a promise: the assertion below reads
+				// the budget each race RECORDED and refuses if they differ.
+				PolicyFile: policyFile, Parallel: 1, BudgetMS: budget, Needles: needles,
 				// M2b.2 decision 6: the RULE is a flag on the adaptive arm and
 				// on no other. The arm table does not move — no new arm, no new
 				// instance, no new metric — so the only thing this changes about
 				// a published cell is which allocation rule produced it.
-				ExtraFlags: selectorFlags(o.selector, st.arm.ID),
+				ExtraFlags: selectorFlags(st.selector, st.arm.ID),
 			})
 			if err != nil {
 				man.Census.Add(inst.ID, eval.SkipPreflightAbort,
@@ -676,6 +734,13 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 			if dig := costTableDigest(view.Trace); dig != "" {
 				st.tables[dig] = true
 			}
+			// B1: what this race's OWN `schedule.started` says it was given.
+			// A traced race that recorded no budget is an ABSENCE and is not
+			// folded into the set as a 0, which `mvo intent new` reads as
+			// unbounded — absent source implies absent metric.
+			if view.Trace.HasStarted {
+				st.budgets[view.Trace.Started.Budget.MaxOracleMS] = true
+			}
 		}
 	}
 	// V-6: THE COST TABLE MUST BE BYTE-EQUAL ACROSS ARMS. Decision 2's
@@ -693,6 +758,45 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 			"%s: %d distinct recorded cost tables across %d arm(s) x %d replicate(s)",
 			inst.ID, len(allTables), len(order), o.replicates))
 	}
+	// BLOCKER B1: THE ARMS MUST HAVE HELD THE SAME BUDGET, AND THE CHECK IS ON
+	// WHAT THEY RECORDED.
+	//
+	// B is one variable, computed once above from one reference draw, so
+	// equality is true by construction — exactly as the cost table's was
+	// before V-6 asserted it. Asserting it against each race's own
+	// `schedule.started.budget.max_oracle_ms` is what turns "by construction"
+	// into a measurement, and it is the only form of the check that survives a
+	// future refactor that reintroduces a per-arm derivation.
+	if man.BudgetByInstance == nil {
+		man.BudgetByInstance = map[string]int64{}
+		man.RecordedBudgets = map[string]string{}
+	}
+	man.BudgetByInstance[inst.ID] = budget
+	recorded := map[int64][]string{}
+	var perArm []string
+	for _, id := range order {
+		bs := sortedInt64Keys(states[id].budgets)
+		if len(bs) == 0 {
+			perArm = append(perArm, id+"=— (no trace)")
+			continue
+		}
+		for _, b := range bs {
+			recorded[b] = append(recorded[b], id)
+		}
+		perArm = append(perArm, fmt.Sprintf("%s=%s", id, joinInt64s(bs)))
+	}
+	man.RecordedBudgets[inst.ID] = strings.Join(perArm, " ")
+	if len(recorded) > 1 {
+		var parts []string
+		for _, b := range sortedInt64Keys(recorded) {
+			arms := append([]string(nil), recorded[b]...)
+			sort.Strings(arms)
+			parts = append(parts, fmt.Sprintf("B=%dms: %s", b, strings.Join(arms, ", ")))
+		}
+		man.BudgetMismatch = append(man.BudgetMismatch, fmt.Sprintf(
+			"%s: the arms of this cell RECORDED %d different budgets — %s",
+			inst.ID, len(recorded), strings.Join(parts, "; ")))
+	}
 	// DECISION 6: divergence is the PAIRED question and it is kept apart from
 	// coverage. `coverage > 0, divergence 0` is a MEASURED NULL and must stay
 	// publishable — it is precisely M2b.2 §7.5's pre-registered null, and a
@@ -708,6 +812,12 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 			continue
 		}
 		if len(st.coverage) > 0 {
+			// BLOCKER B4: THE CELL IS RECORDED BEFORE THE POOL, because the
+			// pool is the operation that hides it. `<arm>|<instance>` is one
+			// rule, one instance, one budget, R replicates — the scope the
+			// ORACLE-BUDGET-MATCHED caption is asserted over, and therefore
+			// the scope the refusal has to be taken at.
+			man.CoverageByCell[coverageCellKey(id, inst.ID)] = schedule.MergeCoverage(st.coverage)
 			man.CoverageByArm[id] = schedule.MergeCoverage(append(
 				[]schedule.CoverageReport{man.CoverageByArm[id]}, st.coverage...))
 		}
@@ -717,6 +827,7 @@ func (o runOpts) runInstance(store *eval.Store, home string, inst eval.Instance,
 		rows = append(rows, eval.Row{
 			Instance: inst.ID, Arm: id, Family: inst.Family, Tier: hidden.Tier,
 			Policy: rowPolicy, Cluster: cluster, CostRegime: oneRegime(st.regimes),
+			Selector: st.selector,
 			Decision: modal, Stable: stable, Replicates: len(st.decisions), ModalCount: n,
 			WinnerLabel:  winnerLabel,
 			WinnerSource: modalString(st.decisions, st.sources, modal),
@@ -963,6 +1074,29 @@ func divergenceLine(instance, armA, armB string, a, b [][]string) string {
 func (o runOpts) finish(man eval.RunManifest, rows []eval.Row, home string) error {
 	man.Rows = rows
 
+	// BLOCKER B1's REFUSAL, decided FIRST — before the vacuity refusal and
+	// before any metric — because it is prior to both. A cell whose arms held
+	// different budgets is not a comparison of two rules at all, whatever its
+	// coverage says, and M2d.1's own BUILDLOG entry says what that costs:
+	// THIS INVALIDATES EVERY NUMBER.
+	//
+	// Two sources and both are checked: what the RUNNER handed each arm (read
+	// off the rows here) and what each race RECORDED on its own
+	// `schedule.started` (collected per instance while racing, and already in
+	// man.BudgetMismatch by the time this runs).
+	man.BudgetMismatch = append(man.BudgetMismatch, eval.BudgetMismatches(rows)...)
+	if len(man.BudgetMismatch) > 0 {
+		fmt.Println(joinLines(man.Render()))
+		if o.jsonOut != "" {
+			if err := writeSignedManifest(home, o.jsonOut, man); err != nil {
+				return err
+			}
+		}
+		return codedError{code: exitFailure, msg: "mvo-eval run: ARMS NOT BUDGET-MATCHED — " +
+			strings.Join(man.BudgetMismatch, " | ") +
+			". Race every allocation rule inside ONE run (--selector=voc,voc2) so they share one " +
+			"reference draw, or pin B explicitly with --budget"}
+	}
 	// DECISION 7's REFUSAL, decided BEFORE any metric is computed.
 	//
 	// THE RULE UNDER TEST is the ADAPTIVE arm's selector, because that is what
@@ -973,9 +1107,65 @@ func (o runOpts) finish(man eval.RunManifest, rows []eval.Row, home string) erro
 	// It is NOT behind --strict. `R < 3` is a THIN measurement and a reader
 	// may reasonably want to look at it; a 0 % comparison is NOT A MEASUREMENT
 	// OF ANYTHING.
-	if c, ok := man.CoverageByArm[eval.ArmAdaptive]; ok {
-		man.RuleCoverage = &c
-		man.Vacuous = c.Vacuous()
+	//
+	// B1 makes the adaptive arm one treatment PER RULE, so what gates the run
+	// is the coverage of EVERY rule that raced: a comparison in which either
+	// rule never fired is a comparison of one rule against itself just as
+	// surely as one in which the only rule never fired.
+	// BLOCKER B4, AND IT IS DECIDED PER CELL BEFORE ANYTHING IS POOLED.
+	//
+	// The refusal used to read a numerator merged over every race in the run,
+	// and a merged numerator is satisfiable by ONE STEP: a probe merging 99
+	// vacuous races with one exercised step printed `1 of 199 steps (0%)` and
+	// `vacuous=false`. So the question is asked of each `<arm>|<instance>`
+	// cell — the scope a caption is a claim about — and ANY cell whose rule
+	// was exercised on no step refuses the whole run. A cell that recorded no
+	// computable coverage at all is an ABSENCE and `Vacuous` is false for it
+	// by construction: refusing to report a number you could not compute is
+	// not the same act as refusing a rule that changed nothing.
+	for _, k := range adaptiveCellKeys(sortedStrings(man.CoverageByCell)) {
+		c := man.CoverageByCell[k]
+		if !c.Vacuous() {
+			continue
+		}
+		man.Vacuous = true
+		man.VacuousCells = append(man.VacuousCells, fmt.Sprintf(
+			"%s: exercised %d of %d step(s), consulted %d — %s",
+			k, c.Exercised, c.Steps, c.Consulted, c.VacuityReason()))
+	}
+	if keys := adaptiveKeys(sortedStrings(man.CoverageByArm)); len(keys) > 0 {
+		reports := make([]schedule.CoverageReport, 0, len(keys))
+		for _, k := range keys {
+			c := man.CoverageByArm[k]
+			reports = append(reports, c)
+			// ANY vacuous rule makes the comparison vacuous. Merging first and
+			// asking afterwards would let an exercised rule carry an inert one
+			// over the threshold, which is B4's shape one arm over.
+			//
+			// This is the BACKSTOP, not the gate. The gate is the per-cell
+			// loop above, and it is strictly stronger: an arm pooled to zero
+			// had every one of its cells at zero. `Vacuous` and not
+			// `AnyVacuous` deliberately — a single replicate that never
+			// reached scarcity is a thin measurement and not a vacuous cell,
+			// and a refusal that fired on it would be F-9's rubber stamp
+			// pointed the other way. The count is PRINTED as `VACUOUS PARTS`
+			// instead, which is B4's "report absence rather than a floored 0 %".
+			if c.Vacuous() {
+				man.Vacuous = true
+			}
+		}
+		merged := schedule.MergeCoverage(reports)
+		// MergeCoverage takes the FIRST report's rule name, which was right
+		// while a run held one rule and is a guess now that it can hold two:
+		// a block pooling voc and voc2 captioned `the rule under test: voc`
+		// would be a caption nobody measured. The per-arm lines above it are
+		// the unpooled numbers; this names what the pooled one is over.
+		if rules := distinctOf(reports, func(c schedule.CoverageReport) string { return c.Rule }); len(rules) > 1 {
+			merged.Rule = strings.Join(rules, "+")
+			merged.Baseline = strings.Join(
+				distinctOf(reports, func(c schedule.CoverageReport) string { return c.Baseline }), "+")
+		}
+		man.RuleCoverage = &merged
 	}
 	if man.Vacuous && !man.AllowVacuous {
 		// NO METRIC LINE IS PRINTED AT ALL — M2d decision 1b's own shape: the
@@ -987,9 +1177,20 @@ func (o runOpts) finish(man eval.RunManifest, rows []eval.Row, home string) erro
 				return err
 			}
 		}
-		return codedError{code: exitVacuous, msg: "mvo-eval run: VACUOUS — the rule under test never fired; " +
+		msg := "mvo-eval run: VACUOUS — the rule under test changed nothing it allocated; " +
 			"no verdict and no metric line. Warm the workspace (--warmup auto), lower the budget until it " +
-			"binds, or pass --allow-vacuous to print the tables stamped VACUOUS"}
+			"binds, or pass --allow-vacuous to print the tables stamped VACUOUS"
+		if len(man.VacuousCells) > 0 {
+			// B4: NAME THE CELLS. "somewhere in this run the rule fired" is
+			// what the pooled numerator used to say, and it is what let a
+			// verdict be printed at a measured zero.
+			msg = fmt.Sprintf("mvo-eval run: VACUOUS in %d cell(s) — %s. %s",
+				len(man.VacuousCells), strings.Join(man.VacuousCells, " | "),
+				"No verdict and no metric line is printed for ANY cell: a table whose rows were not all "+
+					"measured is not a table. Warm the workspace (--warmup auto), lower the budget until "+
+					"it binds, or pass --allow-vacuous to print the tables stamped VACUOUS")
+		}
+		return codedError{code: exitVacuous, msg: msg}
 	}
 
 	armIDs := map[string]bool{}
@@ -1022,6 +1223,14 @@ func (o runOpts) finish(man eval.RunManifest, rows []eval.Row, home string) erro
 			if id == eval.ArmFixedBudget {
 				b = id
 			}
+		}
+		// WHEN TWO RULES RACED, THE PAIR IS THE TWO RULES. That is the whole
+		// point of racing them in one run: they share the instance, the
+		// template, the reference draw and B, so the paired table is a
+		// comparison of the RULES and of nothing else. With one rule the pair
+		// stays adaptive-against-ladder, exactly as M2d published it.
+		if ada := adaptiveKeys(ids); len(ada) >= 2 {
+			a, b = ada[0], ada[1]
 		}
 		p := eval.Pair(a, b, rows)
 		man.Paired = append(man.Paired, p)
@@ -1162,6 +1371,145 @@ func selectorFlags(selector, armID string) []string {
 		return nil
 	}
 	return []string{"--selector=" + selector}
+}
+
+// racedArm is one TREATMENT of one raced arm: the arm and the allocation rule
+// it races under. Two rules are two treatments of the adaptive arm, and they
+// belong to ONE run for blocker B1's reason.
+type racedArm struct {
+	key      string // the arm id every row, coverage report and caption uses
+	arm      eval.Arm
+	selector string
+}
+
+// armPlan expands the --arms list against the --selector list.
+//
+// BLOCKER B1, AND THIS FUNCTION IS THE WHOLE OF IT. `--selector` used to be a
+// per-RUN choice, so comparing two allocation rules meant two runs; B is
+// derived inside a run from that run's own reference races, so the two runs
+// took two draws and the two rules were handed different budgets under a cell
+// captioned ORACLE-BUDGET-MATCHED (measured: minspend 1553 against 1013, same
+// instance, same host, same day). Naming both rules races both inside ONE run,
+// against ONE warmed template, ONE reference draw and therefore ONE B.
+//
+// With zero or one rule the plan is EXACTLY what it was: the same arm ids, so
+// every published M2d number keeps its arm names and its cell keys.
+func armPlan(armIDs []string, selectors []string) []racedArm {
+	rules := selectors
+	if len(rules) == 0 {
+		rules = []string{""}
+	}
+	var out []racedArm
+	for _, id := range armIDs {
+		a, ok := eval.ArmByID(id)
+		if !ok || a.Kind != eval.KindRaced {
+			continue
+		}
+		// The rule is a flag on the adaptive arm and on no other (M2b.2
+		// decision 6), so every other arm is one treatment however many rules
+		// were named — and it is raced ONCE, shared by both rules' cells,
+		// because racing the ladder twice would buy nothing and would put two
+		// identical rows in one cell.
+		if id != eval.ArmAdaptive {
+			out = append(out, racedArm{key: id, arm: a})
+			continue
+		}
+		if len(rules) == 1 {
+			out = append(out, racedArm{key: id, arm: a, selector: rules[0]})
+			continue
+		}
+		for _, r := range rules {
+			out = append(out, racedArm{key: id + "@" + r, arm: a, selector: r})
+		}
+	}
+	return out
+}
+
+// armKeys is the plan's arm ids, in plan order.
+func armKeys(plan []racedArm) []string {
+	out := make([]string, 0, len(plan))
+	for _, p := range plan {
+		out = append(out, p.key)
+	}
+	return out
+}
+
+// adaptiveKeys are the arm ids in `ids` that are the ADAPTIVE ARM under some
+// rule — `A2-adaptive` itself, or `A2-adaptive@<rule>` when more than one rule
+// raced. It is what keeps the vacuity refusal and the pairing pointed at the
+// rule under test after B1 split the arm into one treatment per rule.
+func adaptiveKeys(ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if isAdaptiveArm(id) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isAdaptiveArm(id string) bool {
+	return id == eval.ArmAdaptive || strings.HasPrefix(id, eval.ArmAdaptive+"@")
+}
+
+// coverageCellSep separates the arm from the instance in a cell key. It is a
+// character no arm id and no instance id contains — arm ids are
+// `adaptive@<rule>` and instance ids are `<fixture>-<stat>-<letter>`.
+const coverageCellSep = "|"
+
+// coverageCellKey names BLOCKER B4's unit of refusal: one allocation rule on
+// one instance, over that cell's replicates.
+func coverageCellKey(arm, instance string) string { return arm + coverageCellSep + instance }
+
+// adaptiveCellKeys keeps the cells belonging to an ADAPTIVE arm, which is the
+// only arm a rule-coverage claim is about. A cell key whose arm half is not
+// recognised is DROPPED rather than guessed at: the gate may not be applied to
+// an arm nobody declared an inertness predicate for.
+func adaptiveCellKeys(keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if arm, _, ok := strings.Cut(k, coverageCellSep); ok && isAdaptiveArm(arm) {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// distinctOf is the set of values a field takes across reports, in first-seen
+// order, empties dropped.
+func distinctOf[T any](xs []T, get func(T) string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, x := range xs {
+		v := get(x)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// sortedInt64Keys renders a set of budgets in a fixed order, so a refusal is a
+// function of what was recorded and never of map iteration.
+func sortedInt64Keys[V any](m map[int64]V) []int64 {
+	out := make([]int64, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func joinInt64s(xs []int64) string {
+	parts := make([]string, 0, len(xs))
+	for _, x := range xs {
+		parts = append(parts, fmt.Sprintf("%dms", x))
+	}
+	return strings.Join(parts, "/")
 }
 
 // modalWinner returns the winner label of the replicates that produced the

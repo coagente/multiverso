@@ -81,6 +81,24 @@ type RunManifest struct {
 	// label and are not budget-matched, so they are printed above the metrics
 	// rather than left for a reader to infer from a budget_ms of 0.
 	Unbudgeted []string `json:"unbudgeted"`
+	// BudgetByInstance is THE ONE B EVERY ARM OF THAT INSTANCE WAS HANDED, and
+	// RecordedBudgets is what each raced arm's own `schedule.started` says it
+	// actually held. The pair is blocker B1's fix and its measurement.
+	//
+	// B is derived per instance from ONE reference draw, so every arm of that
+	// instance — both allocation rules, the ladder, and every derived arm
+	// charged against the same bound — shares it BY CONSTRUCTION. That was
+	// also true of the cost table until V-6 asserted it, and it is asserted
+	// here for V-6's reason: `--selector` used to be per RUN, so two runs of
+	// one cell took two reference draws and were compared at 1553 ms against
+	// 1013 ms under a caption reading ORACLE-BUDGET-MATCHED.
+	//
+	// BudgetMismatch is nonempty exactly when that happened, and it is a
+	// FAILURE rather than a caption: no number computed over arms that did not
+	// share a budget means anything.
+	BudgetByInstance map[string]int64  `json:"budget_by_instance"`
+	RecordedBudgets  map[string]string `json:"recorded_budgets"`
+	BudgetMismatch   []string          `json:"budget_mismatch"`
 	// ReferenceSpread records, per instance, every reference replicate's own
 	// minspend and S beside the median that became the treatment level. B1 is
 	// derived from that median, so B is a measurement, and a measurement taken
@@ -105,8 +123,25 @@ type RunManifest struct {
 	// two arms' coverage are two numbers and averaging them would be a number
 	// about neither.
 	CoverageByArm map[string]schedule.CoverageReport `json:"coverage_by_arm"`
+	// CoverageByCell is BLOCKER B4's UNIT OF REFUSAL, keyed `<arm>|<instance>`:
+	// one allocation rule, one instance, one budget, R replicates — which is
+	// exactly what a cell caption is a claim about, and exactly the scope
+	// ORACLE-BUDGET-MATCHED is asserted over.
+	//
+	// It exists because the refusal used to be taken off a POOLED numerator,
+	// and a pooled numerator is satisfiable by one step: a probe merging 99
+	// vacuous races with one race holding one exercised step printed `1 of 199
+	// steps (0%)` and `vacuous=false`. A verdict was reported at a printed 0 %.
+	// The rule under test must be exercised in EVERY cell whose numbers are
+	// printed, not somewhere in the union of them.
+	CoverageByCell map[string]schedule.CoverageReport `json:"coverage_by_cell"`
+	// VacuousCells names each (arm, instance) whose rule was exercised on NO
+	// step, with the recorded reason. A cell missing from CoverageByCell is an
+	// ABSENCE and is reported as one — never as a zero.
+	VacuousCells []string `json:"vacuous_cells"`
 	// RuleCoverage is the report for THE RULE UNDER TEST — the adaptive arm's
-	// selector, which is what a cell's caption is a claim about.
+	// selector, which is what a cell's caption is a claim about. IT IS A
+	// PRINTED FIGURE AND NOT A GATE: the gate is VacuousCells.
 	RuleCoverage *schedule.CoverageReport `json:"rule_coverage,omitempty"`
 	// Vacuous is decision 7's refusal: the rule under test provably never
 	// fired, so NO METRIC LINE IS PRINTED AT ALL and the run exits 5.
@@ -235,6 +270,21 @@ func (m RunManifest) Render() []string {
 	for _, u := range m.Unbudgeted {
 		out = append(out, "NOT BUDGET-MATCHED: "+u)
 	}
+	// B1: THE BUDGET IS PRINTED, per instance, with the arms that shared it.
+	// It is above the metrics rather than beside them because the question it
+	// answers — were the two rules compared at the same budget at all — is
+	// prior to every number below.
+	for _, id := range sortedKeys(m.BudgetByInstance) {
+		line := fmt.Sprintf("budget: %s B=%d ms, derived ONCE from this instance's reference draw and shared by every arm",
+			id, m.BudgetByInstance[id])
+		if rec := m.RecordedBudgets[id]; rec != "" {
+			line += " (recorded per arm: " + rec + ")"
+		}
+		out = append(out, line)
+	}
+	for _, b := range m.BudgetMismatch {
+		out = append(out, "ARMS NOT BUDGET-MATCHED: "+b)
+	}
 	for _, s := range m.ReferenceSpread {
 		out = append(out, "reference spread: "+s)
 	}
@@ -326,7 +376,30 @@ func (m RunManifest) InstrumentLines() []string {
 	}
 	for _, id := range sortedKeys(m.CoverageByArm) {
 		c := m.CoverageByArm[id]
-		out = append(out, fmt.Sprintf("rule coverage [%s]: %s", id, c.Summary()))
+		out = append(out, fmt.Sprintf("rule coverage [%s]: exercised %s; consulted %s",
+			id, c.Summary(), c.ConsultedSummary()))
+	}
+	// B4: THE PER-CELL FIGURES, PRINTED ONE PER LINE AND NEVER SUMMED. A cell
+	// is what a caption is a claim about, so a cell is where the number has to
+	// be legible — and the pooled line above it can only ever be larger.
+	for _, k := range sortedKeys(m.CoverageByCell) {
+		c := m.CoverageByCell[k]
+		line := fmt.Sprintf("cell coverage [%s]: exercised %s; consulted %s", k, c.Summary(), c.ConsultedSummary())
+		if c.Vacuous() {
+			line += "   VACUOUS CELL"
+		}
+		out = append(out, line)
+	}
+	if len(m.VacuousCells) > 0 {
+		// The named non-verdict, at the cell it is about. It is printed here
+		// as well as in the banner below because a run may be refused by a
+		// cell while the POOLED figure is comfortably nonzero — which is
+		// exactly the state blocker B4 found reported as a verdict.
+		out = append(out, fmt.Sprintf(
+			"VACUOUS (%d cell(s) exercised the rule on NO step): NO VERDICT", len(m.VacuousCells)))
+		for _, v := range m.VacuousCells {
+			out = append(out, "  "+v)
+		}
 	}
 	if m.RuleCoverage != nil {
 		for _, l := range m.RuleCoverage.Lines() {
@@ -336,8 +409,18 @@ func (m RunManifest) InstrumentLines() []string {
 	for _, d := range m.Divergence {
 		out = append(out, "purchase-order divergence: "+d)
 	}
-	if m.Vacuous && m.RuleCoverage != nil {
-		out = append(out, m.RuleCoverage.VacuityBanner()...)
+	if m.Vacuous {
+		// THE POOLED BANNER IS PRINTED ONLY WHEN THE POOLED FIGURE IS ITSELF
+		// VACUOUS. Under B4 a run is refused by a CELL, and the pooled
+		// numerator over the other cells can be comfortably nonzero — printing
+		// "the rule ran on 2 of 2 steps and changed nothing" over a report
+		// whose own numerator is 1 would be a permanently recorded false
+		// statement, which is the class of defect `inadmissibleReason` already
+		// exists to prevent one layer down. The true sentence for that state
+		// is the per-cell block above, and it names the cell.
+		if m.RuleCoverage != nil && m.RuleCoverage.Vacuous() {
+			out = append(out, m.RuleCoverage.VacuityBanner()...)
+		}
 		if m.AllowVacuous {
 			// The flag that suppresses a refusal must not also suppress its
 			// caption: every table below carries the stamp.
